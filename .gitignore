@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output (shipped via package.json "files")
+dist/
+
+# Test artifacts
+test/hook-payload.json
+*.tgz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code per-project settings (NEVER commit / publish)
+.claude/
+
+# Local data
+.linksee-memory/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+credentials*
+.npmrc
+
+# Logs
+*.log
