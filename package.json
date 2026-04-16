@@ -1,6 +1,6 @@
 {
   "name": "linksee-memory",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Local-first agent memory MCP — cross-agent brain with 6-layer structured memory + token-saving file diff cache",
   "type": "module",
   "bin": {
@@ -41,13 +41,13 @@
   ],
   "author": "Synapse Arrows PTE. LTD.",
   "license": "MIT",
-  "homepage": "https://github.com/synapse-arrows/linksee-memory",
+  "homepage": "https://github.com/michielinksee/linksee-memory",
   "repository": {
     "type": "git",
-    "url": "https://github.com/synapse-arrows/linksee-memory.git"
+    "url": "https://github.com/michielinksee/linksee-memory.git"
   },
   "bugs": {
-    "url": "https://github.com/synapse-arrows/linksee-memory/issues"
+    "url": "https://github.com/michielinksee/linksee-memory/issues"
   },
   "dependencies": {
     "@babel/parser": "^7.25.0",
