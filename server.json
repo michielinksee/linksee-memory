@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.michielinksee/linksee-memory",
+  "description": "Local-first agent memory MCP. 6-layer brain + token-saving file diff cache (86% savings).",
+  "repository": {
+    "url": "https://github.com/michielinksee/linksee-memory",
+    "source": "github"
+  },
+  "version": "0.0.5",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "linksee-memory",
+      "version": "0.0.5",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
