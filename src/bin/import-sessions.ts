@@ -12,7 +12,7 @@ import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { openDb, runMigrations } from '../db/migrate.js';
-import { parseSessionFile, projectNameFromCwd } from '../lib/session-parser.js';
+import { parseSessionFile, projectNameFromCwd, detectProjectName } from '../lib/session-parser.js';
 import { extractSession, type ExtractedFileEdit } from '../lib/session-extractor.js';
 
 const CLAUDE_PROJECTS = join(homedir(), '.claude', 'projects');
@@ -72,7 +72,7 @@ async function main() {
       return;
     }
 
-    const projectName = projectNameFromCwd(parsed.project_cwd) || 'unknown';
+    const projectName = detectProjectName(parsed) || 'unknown';
     const result = extractSession(parsed, projectName);
 
     if (dryRun) {
@@ -85,9 +85,10 @@ async function main() {
     // Idempotent: wipe any prior data for THIS session before re-inserting
     const wiped = wipeSession(db, result.session_id);
 
-    // Resolve project entity
+    // Resolve project entity (canonical_key = project:<name>, so same project across
+    // different sessions/cwds collapses to one entity)
     let projectEntityId: number;
-    const canonicalKey = parsed.project_cwd;
+    const canonicalKey = `project:${projectName.toLowerCase()}`;
     const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', projectName) as { id: number } | undefined;
     if (existing) {
       projectEntityId = existing.id;
@@ -165,7 +166,11 @@ async function main() {
     if (files.length === 0) { console.log(`[skip] no .jsonl in ${projectDir}`); continue; }
     agg.projects++;
 
-    const dirName = projectDir.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? 'unknown';
+    // Decode Claude Code's project-dir encoding: "C--Users-HP-KanseiLINK" → "KanseiLINK"
+    // (the encoding replaces `/` with `--`, so the last segment is the actual project name)
+    const rawDirName = projectDir.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? 'unknown';
+    const decodedParts = rawDirName.split('--').filter(Boolean);
+    const dirName = decodedParts.length > 1 ? decodedParts[decodedParts.length - 1] : rawDirName;
     console.log(`\n=== Project: ${dirName} (${files.length} session files) ===`);
 
     let projectEntityId: number | null = null;
@@ -179,7 +184,10 @@ async function main() {
       }
       if (!parsed) { agg.sessions_skipped++; continue; }
 
-      const projectName = projectNameFromCwd(parsed.project_cwd) || dirName;
+      // Detect project name from actual file edits (majority vote), falling back
+      // to cwd-based detection. Previously used cwd alone, which collapsed many
+      // distinct projects under one entity (e.g. "Card_Navi" for everything).
+      const projectName = detectProjectName(parsed) || dirName;
       const result = extractSession(parsed, projectName);
       agg.sessions_parsed++;
       agg.memories_planned += result.memories.length;
@@ -191,16 +199,15 @@ async function main() {
 
       if (!db) continue;
 
-      // Ensure entity exists (once per project)
-      if (projectEntityId === null) {
-        const canonicalKey = parsed.project_cwd;
-        const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', projectName) as { id: number } | undefined;
-        if (existing) {
-          projectEntityId = existing.id;
-        } else {
-          const ins = db.prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)').run('project', projectName, canonicalKey);
-          projectEntityId = Number(ins.lastInsertRowid);
-        }
+      // Resolve entity per-SESSION (not per-project-dir) since each session may
+      // belong to a different project based on its file ops.
+      const canonicalKey = `project:${projectName.toLowerCase()}`;
+      const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', projectName) as { id: number } | undefined;
+      if (existing) {
+        projectEntityId = existing.id;
+      } else {
+        const ins = db.prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)').run('project', projectName, canonicalKey);
+        projectEntityId = Number(ins.lastInsertRowid);
       }
 
       // Idempotent: wipe any prior data for THIS session before re-inserting (Phase B)

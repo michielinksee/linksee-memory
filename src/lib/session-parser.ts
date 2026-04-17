@@ -304,3 +304,93 @@ export function projectNameFromCwd(cwd: string): string {
   if (!cwd) return 'unknown';
   return cwd.replace(/\\/g, '/').replace(/\/$/, '').split('/').filter(Boolean).pop() ?? 'unknown';
 }
+
+// ─── Improved entity detection ───────────────────────────────────────────
+// Problem: projectNameFromCwd() uses the session's starting cwd, but Claude Code
+// sessions often edit files across many projects. Everything ends up tagged with
+// the one cwd name (e.g. "Card_Navi"), destroying recall precision.
+//
+// Solution: inspect file_ops, extract the project name from each file path,
+// and take the majority vote. Fall back to cwd if no useful file ops exist.
+
+// Directories we never treat as "project" — they're just user home conventions
+// or Claude Code internal dirs.
+const SKIP_DIR_SEGMENTS = new Set([
+  '.claude', '.config', '.cache', '.local', '.vscode', '.git', '.ssh', '.npm',
+  'Downloads', 'Documents', 'Desktop', 'Pictures', 'Music', 'Videos',
+  'node_modules', 'tmp', 'temp', 'AppData', 'Library',
+  'OneDrive', 'Dropbox', 'Google Drive',
+  'Users', 'home', 'HP',  // part of the user home path itself
+  // Claude Code internal subdirs (appear when Claude reads its own state files):
+  'projects', 'commands', 'skills', 'worktrees', 'hooks', 'agents', 'plugins',
+  'settings', 'memory', 'todos', 'shell-snapshots', 'ide',
+]);
+
+// User-home-like prefixes we strip before looking for the project segment.
+// Add drive-letter-agnostic patterns that match Windows / macOS / Linux / WSL.
+const HOME_PATTERNS: RegExp[] = [
+  /^[A-Za-z]:\/Users\/[^\/]+\//i,        // C:/Users/HP/...
+  /^\/Users\/[^\/]+\//,                  // /Users/HP/... (macOS)
+  /^\/home\/[^\/]+\//,                   // /home/HP/... (Linux)
+  /^\/mnt\/[a-z]\/Users\/[^\/]+\//i,     // /mnt/c/Users/HP/... (WSL)
+  /^[A-Za-z]:\/Set up company\//i,       // D:/Set up company/... (Michie-specific)
+];
+
+function stripHomePrefix(normalized: string): string {
+  for (const p of HOME_PATTERNS) {
+    if (p.test(normalized)) return normalized.replace(p, '');
+  }
+  return normalized;
+}
+
+// Extract a project name from a single file path.
+// Returns null if the path doesn't contain a meaningful project segment.
+export function projectNameFromFilePath(filePath: string): string | null {
+  if (!filePath) return null;
+  const normalized = filePath.replace(/\\/g, '/');
+  // Paths inside Claude Code's own state dir are internal — never a real project signal.
+  // e.g. C:/Users/HP/.claude/projects/C--Users-HP-KanseiLINK/abc.jsonl
+  if (/\/\.claude\//.test(normalized)) return null;
+  const rest = stripHomePrefix(normalized);
+  if (rest === normalized) return null; // no home prefix matched, can't safely extract
+  const segments = rest.split('/').filter(Boolean);
+  for (const seg of segments) {
+    if (SKIP_DIR_SEGMENTS.has(seg)) continue;
+    if (seg.startsWith('.')) continue;
+    // Skip single-file-like segments (have extension) — we want a directory name
+    if (/\.[a-z0-9]{1,5}$/i.test(seg)) continue;
+    // Skip Claude Code's project-dir encoding (e.g. "C--Users-HP-Xxx")
+    if (/^[A-Z]--/.test(seg)) continue;
+    return seg;
+  }
+  return null;
+}
+
+// Aggregate file_ops into a single project name by majority vote.
+// Returns null if no file_op yields a usable name.
+export function projectNameFromFileOps(
+  file_ops: ParsedSession['file_ops'],
+): string | null {
+  if (!file_ops || file_ops.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const op of file_ops) {
+    const name = projectNameFromFilePath(op.path);
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  if (counts.size === 0) return null;
+  let bestName: string | null = null;
+  let bestCount = 0;
+  for (const [name, count] of counts) {
+    if (count > bestCount) { bestName = name; bestCount = count; }
+  }
+  return bestName;
+}
+
+// Combined detector: prefers file_ops majority, falls back to cwd-based.
+// This is the function import-sessions.ts should call.
+export function detectProjectName(parsed: ParsedSession): string {
+  return (
+    projectNameFromFileOps(parsed.file_ops) ??
+    projectNameFromCwd(parsed.project_cwd)
+  );
+}
