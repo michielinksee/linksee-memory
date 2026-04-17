@@ -7,18 +7,20 @@
   "bin": {
     "linksee-memory": "./dist/mcp/server.js",
     "linksee-memory-import": "./dist/bin/import-sessions.js",
-    "linksee-memory-sync": "./dist/bin/sync-session.js"
+    "linksee-memory-sync": "./dist/bin/sync-session.js",
+    "linksee-memory-install-skill": "./dist/bin/install-skill.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/db/schema.sql",
+    "dist/skill/SKILL.md",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql')\"",
+    "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql'); require('fs').mkdirSync('dist/skill',{recursive:true}); require('fs').copyFileSync('src/skill/SKILL.md','dist/skill/SKILL.md')\"",
     "start": "node dist/mcp/server.js",
     "dev": "tsx src/mcp/server.ts",
     "migrate": "node dist/db/migrate.js",

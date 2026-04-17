@@ -48,6 +48,18 @@ claude mcp add -s user linksee -- npx -y linksee-memory
 
 Restart Claude Code. Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee__recall_file`, `mcp__linksee__read_smart`, `mcp__linksee__forget`, `mcp__linksee__consolidate`.
 
+### Recommended: install the skill (auto-invocation)
+
+Installing the MCP alone doesn't teach Claude Code *when* to call `recall` / `remember`. The bundled skill fixes that:
+
+```bash
+npx -y linksee-memory-install-skill
+```
+
+This copies a `SKILL.md` to `~/.claude/skills/linksee-memory/`. Claude Code auto-discovers it and fires the skill on phrases like "前に…", "また同じエラー", "覚えておいて", new task starts, file edits, and so on — no need to say "use linksee-memory".
+
+Flags: `--dry-run`, `--force`, `--help`.
+
 ### Optional: auto-capture every session (Stop hook)
 
 Add to `~/.claude/settings.json` to record every Claude Code session to your local brain automatically:
