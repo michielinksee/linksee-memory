@@ -191,6 +191,95 @@ Aggregated MCP-usage data helps the [KanseiLink](https://kansei-link.com) projec
 
 The full payload schema and validation logic is open-source — read `src/lib/telemetry.ts` if you want to verify exactly what leaves your machine.
 
+## Pricing
+
+**Free forever.**
+
+linksee-memory is local-first and runs entirely on your machine. There is no hosted component you need to pay for. The SQLite DB lives in your home directory; backup = file copy.
+
+No account, no credit card, no API key. Just install and use.
+
+## Troubleshooting
+
+<details>
+<summary><b>The skill isn't firing — Claude Code doesn't call <code>recall</code> when I ask about past work.</b></summary>
+
+1. Verify the skill was installed:
+   ```bash
+   ls ~/.claude/skills/linksee-memory/SKILL.md
+   ```
+   If absent, run `npx -y linksee-memory-install-skill`.
+2. Restart Claude Code. Skills are indexed on session start.
+3. Check that the MCP is registered under the name `linksee` (the skill expects `mcp__linksee__*` tool names):
+   ```bash
+   claude mcp list | grep linksee
+   ```
+   If it's registered as something else, either re-register or edit `~/.claude/skills/linksee-memory/SKILL.md` to match.
+</details>
+
+<details>
+<summary><b>Stop hook isn't recording my sessions.</b></summary>
+
+1. Check the hook log: `cat ~/.linksee-memory/hook.log`
+2. Run a manual test:
+   ```bash
+   echo '{"session_id":"test","transcript_path":"/path/to/some.jsonl"}' | npx linksee-memory-sync
+   ```
+3. Make sure the `Stop` hook in `~/.claude/settings.json` points to `npx -y linksee-memory-sync` (not the old `-import`).
+</details>
+
+<details>
+<summary><b>Upgrading from v0.0.5 or earlier — my recalls are mostly tagged "Card_Navi" or my project-dir name.</b></summary>
+
+v0.0.6+ fixed the entity detection bug that collapsed all memories into the session's starting cwd. To re-index existing history with correct project attribution, run:
+
+```bash
+npx linksee-memory-import --all
+```
+
+The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
+</details>
+
+<details>
+<summary><b><code>recall</code> returns too much — the context window fills up fast.</b></summary>
+
+Reduce `max_tokens`:
+```
+recall({ query: "...", max_tokens: 800 })   // default is 2000
+```
+Or narrow with `entity_name` and `layer`:
+```
+recall({ query: "...", entity_name: "my-project", layer: "caveat" })
+```
+</details>
+
+<details>
+<summary><b>How do I reset / delete all memory?</b></summary>
+
+```bash
+rm -rf ~/.linksee-memory   # nuke everything; next run creates a fresh DB
+```
+
+Or delete individual memories via the `forget` tool with a specific `memory_id`.
+</details>
+
+<details>
+<summary><b>DB is getting large (>100 MB). How do I trim it?</b></summary>
+
+Run consolidate — it clusters old cold memories into compressed learning-layer summaries:
+```
+consolidate({ scope: "all", min_age_days: 7 })
+```
+Caveat and active-goal layers are always preserved. Consider scheduling a weekly run via cron / Task Scheduler.
+</details>
+
+## Support
+
+- **Issues & bug reports**: [github.com/michielinksee/linksee-memory/issues](https://github.com/michielinksee/linksee-memory/issues)
+- **Feature requests**: open an issue with the `enhancement` label
+- **Security concerns**: see [SECURITY.md](./SECURITY.md) if present, or file a private advisory on GitHub
+- **Company**: Synapse Arrows PTE. LTD. (Singapore)
+
 ## License
 
 MIT — Synapse Arrows PTE. LTD.
