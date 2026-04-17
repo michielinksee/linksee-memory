@@ -17,7 +17,9 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
 
-const DEFAULT_ENDPOINT = 'https://kansei-link.com/api/telemetry/linksee';
+// Production endpoint hosted on Railway. (kansei-link.com is a GitHub Pages site;
+// the dynamic API lives on the Railway deployment.)
+const DEFAULT_ENDPOINT = 'https://kansei-link-mcp-production.up.railway.app/api/telemetry/linksee';
 // Allow override for testing or self-hosting
 const ENDPOINT = process.env.LINKSEE_TELEMETRY_URL || DEFAULT_ENDPOINT;
 

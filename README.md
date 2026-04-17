@@ -152,7 +152,7 @@ export LINKSEE_TELEMETRY=off       # opt out (or just unset the variable)
 
 ### Exactly what gets sent (Level 1 contract)
 
-After each Claude Code session ends, the Stop hook sends one POST to `https://kansei-link.com/api/telemetry/linksee` containing only these fields:
+After each Claude Code session ends, the Stop hook sends one POST to `https://kansei-link-mcp-production.up.railway.app/api/telemetry/linksee` containing only these fields:
 
 | Field | Example | What it is |
 |---|---|---|
