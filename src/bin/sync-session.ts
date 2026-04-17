@@ -11,10 +11,12 @@
 //   - All errors logged to ~/.linksee-memory/hook.log
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, appendFileSync, existsSync, statSync, renameSync } from 'node:fs';
+import { mkdirSync, appendFileSync, existsSync, statSync, renameSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isTelemetryEnabled, buildPayload, sendTelemetry } from '../lib/telemetry.js';
+import Database from 'better-sqlite3';
 
 const LOG_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const LOG_FILE = join(LOG_DIR, 'hook.log');
@@ -85,11 +87,53 @@ async function main(): Promise<void> {
   const elapsed = Date.now() - startedAt;
   if (r.error) {
     log(`importer spawn error (session=${sessionId}, ${elapsed}ms): ${r.error.message}`);
+    process.exit(0);
   } else if (r.status !== 0) {
     log(`importer exited ${r.status} (session=${sessionId}, ${elapsed}ms): ${(r.stderr || '').slice(0, 500)}`);
-  } else {
-    const out = (r.stdout || '').trim().split('\n').slice(-1)[0] || '';
-    log(`ok (session=${sessionId}, cwd=${cwd}, ${elapsed}ms): ${out}`);
+    process.exit(0);
+  }
+
+  const out = (r.stdout || '').trim().split('\n').slice(-1)[0] || '';
+  log(`ok (session=${sessionId}, cwd=${cwd}, ${elapsed}ms): ${out}`);
+
+  // ── Opt-in telemetry (LINKSEE_TELEMETRY=basic) ──────────────────
+  // Runs ONLY if explicitly enabled. Failures are silent. Never blocks Claude Code.
+  if (isTelemetryEnabled() && sessionId) {
+    try {
+      // Detect MCP servers in use from BOTH ~/.claude.json and ~/.claude/settings.json
+      // (Claude Code reads both — names only, never commands or arg paths.)
+      const mcpServerSet = new Set<string>();
+      for (const confPath of [join(homedir(), '.claude.json'), join(homedir(), '.claude', 'settings.json')]) {
+        try {
+          if (!existsSync(confPath)) continue;
+          const parsed = JSON.parse(readFileSync(confPath, 'utf8'));
+          if (parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers) {
+            for (const name of Object.keys(parsed.mcpServers)) {
+              mcpServerSet.add(String(name).slice(0, 64));
+            }
+          }
+        } catch { /* ignore */ }
+      }
+      const mcpServers = Array.from(mcpServerSet);
+
+      const dbDir = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
+      const dbPath = join(dbDir, 'memory.db');
+      if (existsSync(dbPath)) {
+        const db = new Database(dbPath, { readonly: true });
+        try {
+          const payload = buildPayload(db, sessionId, { mcpServersInUse: mcpServers });
+          if (payload) {
+            const result = await sendTelemetry(payload, { timeoutMs: 3000 });
+            if (result.ok) log(`telemetry: sent (anon=${payload.anon_id.slice(0, 8)}, mcp=${mcpServers.length}, exts=${Object.keys(payload.file_extensions).length})`);
+            else log(`telemetry: send failed: ${result.error}`);
+          }
+        } finally {
+          db.close();
+        }
+      }
+    } catch (e: any) {
+      log(`telemetry: error (non-fatal): ${e?.message ?? e}`);
+    }
   }
 
   process.exit(0);

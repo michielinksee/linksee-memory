@@ -1,6 +1,6 @@
 {
   "name": "linksee-memory",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Local-first agent memory MCP — cross-agent brain with 6-layer structured memory + token-saving file diff cache",
   "type": "module",
   "bin": {
