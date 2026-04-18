@@ -300,16 +300,35 @@ function handleRecall(args: any): string {
     ok: true,
     count: top.length,
     search: searchMethod,
-    memories: top.map((r) => ({
-      id: r.id,
-      entity: { name: r.entity_name, kind: r.entity_kind, momentum: r.momentum_score },
-      layer: r.layer,
-      content: r.content,
-      importance: r.importance,
-      heat: Number(r.heat_score.toFixed(1)),
-      band: r.heat_band,
-      composite: Number(r.composite_score.toFixed(3)),
-    })),
+    memories: top.map((r) => {
+      // `content` is stored as JSON stringify-ed so we can enforce schema per
+      // layer, but agents receiving it via MCP then have to parse it again —
+      // extra tokens and a round-trip. Try to pre-parse; if the stored value
+      // isn't JSON (legacy plaintext memory), fall back to the raw string.
+      // content_raw preserves backward compatibility for callers who depend
+      // on the stringified form.
+      let parsedContent: unknown = r.content;
+      try {
+        parsedContent = JSON.parse(r.content);
+      } catch {
+        // leave as string
+      }
+      return {
+        id: r.id,
+        entity: {
+          name: r.entity_name,
+          kind: r.entity_kind,
+          momentum: r.momentum_score,
+        },
+        layer: r.layer,
+        content: parsedContent,
+        content_raw: r.content,
+        importance: r.importance,
+        heat: Number(r.heat_score.toFixed(1)),
+        band: r.heat_band,
+        composite: Number(r.composite_score.toFixed(3)),
+      };
+    }),
   });
 }
 
