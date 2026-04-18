@@ -72,13 +72,23 @@ const FAILURE_PATTERNS = [
 // opinions into protected caveats. Tightened to imperative/prohibitive forms
 // only. Loses some recall, but precision matters more for the "never forget"
 // layer.
+// Imperative negations: `[ぁ-ん一-龯]ないで` reads as "don't do X" only when
+// what follows is NOT part of a polite negation (「ないです」 = "it is not"),
+// a probability form (「ないでしょう」), a request (「ないでほしい」), or a
+// continuation (「ないでいる」). The negative lookahead `(?![すしいほ])`
+// catches all four cases in one filter (す: です, し: しょう, い: いる/いない,
+// ほ: ほしい). 「ないでください」 still passes because "く" is not excluded.
 const CAVEAT_PATTERNS = [
-  // Imperative negations: any verb-stem + ないで is a command "don't X".
-  // The 「[ぁ-ん一-龯]ないで」 clause catches 触らないで / 消さないで / 使わないで /
-  // 書かないで etc. while `(?!いる|いない|ほし)` excludes descriptive forms
-  // like 「やらないでいる」 or 「やらないでほしい」 (state / request).
-  /気をつけて|注意して|[！!]注意[！!]|避けて(?!いる|いない)|[ぁ-ん一-龯]ないで(?!いる|いない|ほし)|やめて(?!おく|ほし)|禁止|ダメだ|危険/,
-  /\b(?:don'?t|do\s+not)\s+(?:do|use|run|call|forget|try|send|share|commit|push|paste|edit)\b|\bnever\s+(?:do|use|call|share|commit|paste|run|push|edit)\b|\bavoid(?:ing)?\b|\bwatch\s+out\b/i,
+  // `ダメだ(?!った|ろうと|と思)` excludes 過去形 (ダメだった = "it failed") and
+  // speculation (ダメだろうと) which are descriptive, not prescriptive.
+  // `ないで` only counts as imperative when it ends the clause. We accept:
+  //   sentence terminators 。！!、 / particles ね・よ / whitespace / ください
+  // Anything else (e.g. も = concessive「〜ないでも」, 止まる・いる・ほしい etc.)
+  // is treated as descriptive and excluded.
+  /気をつけて|注意して|[！!]注意[！!]|避けて(?!いる|いない)|[ぁ-ん一-龯]ないで(?=[。！!、\s]|ください|ね[^い]|よ[^う]|$)|やめて(?!おく|ほし)|禁止|ダメだ(?!った|ろうと|と思)|危険[だです]/,
+  // English: require a concrete action after avoid/don't/never — a bare
+  // "Avoiding rebuild of unchanged files" in a Vercel log is not a caveat.
+  /\b(?:don'?t|do\s+not)\s+(?:do|use|run|call|forget|try|send|share|commit|push|paste|edit)\b|\bnever\s+(?:do|use|call|share|commit|paste|run|push|edit)\b|\bavoid\s+(?:using|running|calling|committing|pushing|sharing|pasting|editing|creating|modifying)\b|\bwatch\s+out\b/i,
 ];
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {

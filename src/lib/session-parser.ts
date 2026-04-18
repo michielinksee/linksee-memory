@@ -127,6 +127,14 @@ export function isPastedExternalContent(text: string): boolean {
   if (/^(Add|Enable|Disable|Configure) (organization|2FA|members|users)/i.test(t)) return true;
   // Service status pages / logs
   if (/^(Service offline|Failed|Success|Deployment|Build|Logs?|Error:)/.test(t.slice(0, 80))) return true;
+  // CI/CD and cloud build logs are almost always pasted and contain substrings
+  // (Avoiding / Running / never / error) that false-trigger the caveat patterns.
+  // Detect by timestamp-prefixed first line (e.g. "17:40:13.469 Running build")
+  // or by dense occurrence of ISO-time prefixes.
+  if (/^\d{1,2}:\d{2}:\d{2}[.:]\d{2,3}\s/.test(t)) return true;
+  if ((t.match(/\d{1,2}:\d{2}:\d{2}[.:]\d{2,3}/g) || []).length >= 3) return true;
+  // Deployment-success notice from Vercel / Netlify / etc. (pasted by user)
+  if (/^成功しました/.test(t) && /デプロイ|deploy/i.test(t.slice(0, 200))) return true;
   // Extractor-internal duplicate (was generating same caveat per session)
   if (t === 'Review errors before repeating this workflow.') return true;
   // Pasted from forums/Reddit/etc. — block when "your post" / "Rule N:" patterns dominate
