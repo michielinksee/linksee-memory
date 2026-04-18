@@ -66,9 +66,19 @@ const FAILURE_PATTERNS = [
   /失敗|バグ|エラー|直して|修正|戻して/,
   /error|bug|fail|broken|revert|rollback/i,
 ];
+// Caveats must be EXPLICIT warnings/prohibitions the user wants preserved.
+// Previous bare patterns (/注意/ /やらない/ /避けて/) caught descriptive usage
+// like「一般ユーザーはやらない」「Anthropicがやらない範囲」and turned
+// opinions into protected caveats. Tightened to imperative/prohibitive forms
+// only. Loses some recall, but precision matters more for the "never forget"
+// layer.
 const CAVEAT_PATTERNS = [
-  /注意|気をつけ|避けて|やらない|禁止/,
-  /do not|never|avoid|watch out/i,
+  // Imperative negations: any verb-stem + ないで is a command "don't X".
+  // The 「[ぁ-ん一-龯]ないで」 clause catches 触らないで / 消さないで / 使わないで /
+  // 書かないで etc. while `(?!いる|いない|ほし)` excludes descriptive forms
+  // like 「やらないでいる」 or 「やらないでほしい」 (state / request).
+  /気をつけて|注意して|[！!]注意[！!]|避けて(?!いる|いない)|[ぁ-ん一-龯]ないで(?!いる|いない|ほし)|やめて(?!おく|ほし)|禁止|ダメだ|危険/,
+  /\b(?:don'?t|do\s+not)\s+(?:do|use|run|call|forget|try|send|share|commit|push|paste|edit)\b|\bnever\s+(?:do|use|call|share|commit|paste|run|push|edit)\b|\bavoid(?:ing)?\b|\bwatch\s+out\b/i,
 ];
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {
