@@ -14,7 +14,7 @@ import { consolidate as runConsolidate } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
 import { handleReadSmart as handleReadSmartImpl } from './read-smart.js';
 
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.1.1';
 
 const db = openDb();
 runMigrations(db);
@@ -69,7 +69,7 @@ const TOOLS = [
         entity_key: { type: 'string', description: 'Optional canonical key (email, domain, file path)' },
         layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Common aliases (why, decisions, warnings, how, ...) are accepted.' },
         content: { type: 'string', description: 'The memory content (plain text or JSON)' },
-        importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Use 1.0 to "pin" a memory (protects from forgetting even outside caveat layer).' },
+        importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set to 0.9 or higher to "pin" a memory (protects from forgetting even outside caveat layer).' },
         force: { type: 'boolean', default: false, description: 'Bypass the paste-back/CI-log quality check. Only set when you are sure the content is original user or agent thought.' },
       },
       required: ['entity_name', 'entity_kind', 'layer', 'content'],
@@ -107,7 +107,7 @@ const TOOLS = [
         memory_id: { type: 'number', description: 'The memory.id to update' },
         content: { type: 'string', description: 'New content (plain text or JSON). If omitted, content is kept.' },
         layer: { type: 'string', description: 'Move to a different layer (aliases accepted). If omitted, layer is kept.' },
-        importance: { type: 'number', minimum: 0, maximum: 1, description: 'New importance 0-1. Set to 1.0 to pin.' },
+        importance: { type: 'number', minimum: 0, maximum: 1, description: 'New importance 0-1. Set to 0.9 or higher to pin.' },
       },
       required: ['memory_id'],
     },
@@ -129,7 +129,7 @@ const TOOLS = [
   {
     name: 'forget',
     description:
-      'Explicitly delete a memory by id, OR run auto-forgetting across all memories based on forgettingRisk (importance + heat + age). Caveat-layer, goal-layer, and importance=1.0 (pinned) memories are always preserved. Prefer update_memory for corrections — forget is destructive.',
+      'Explicitly delete a memory by id, OR run auto-forgetting across all memories based on forgettingRisk (importance + heat + age). Caveat-layer, goal-layer, and pinned (importance>=0.9) memories are always preserved. Prefer update_memory for corrections — forget is destructive.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -229,7 +229,7 @@ function handleRemember(args: any): string {
 
   const result = db
     .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected) VALUES (?, ?, ?, ?, ?)')
-    .run(entityId, layer, rawContent, importance, importance >= 1.0 ? 1 : 0);
+    .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0);
 
   db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
     entityId,
@@ -244,7 +244,7 @@ function handleRemember(args: any): string {
     memory_id: Number(result.lastInsertRowid),
     entity_id: entityId,
     layer,
-    pinned: importance >= 1.0,
+    pinned: importance >= 0.9,
     momentum: { score: mom.score, band: mom.band },
   });
 }
@@ -397,7 +397,7 @@ function handleRecall(args: any): string {
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
     const importanceBoost = r.importance; // 0-1
 
-    // Composite: give a bit to importance so pinned (1.0) memories always rank high
+    // Composite: give a bit to importance so pinned (>=0.9) memories always rank high
     const w_rel = 0.45, w_heat = 0.25, w_mom = 0.15, w_imp = 0.15;
     const composite = w_rel * relevance + w_heat * heatNorm + w_mom * momNorm + w_imp * importanceBoost;
 
@@ -414,7 +414,7 @@ function handleRecall(args: any): string {
     if (heat.band === 'hot') reasons.push('heat:hot');
     else if (heat.band === 'warm') reasons.push('heat:warm');
     if (r.momentum_score >= 5) reasons.push('entity_active');
-    if (r.importance >= 1.0) reasons.push('pinned');
+    if (r.importance >= 0.9) reasons.push('pinned');
     else if (r.importance >= 0.8) reasons.push('high_importance');
     if (r.protected === 1 && r.layer === 'caveat') reasons.push('caveat_protected');
 
@@ -482,7 +482,7 @@ function handleRecall(args: any): string {
         content: parsedContent,
         content_raw: r.content,
         importance: r.importance,
-        pinned: r.importance >= 1.0,
+        pinned: r.importance >= 0.9,
         heat: Number(r.heat_score.toFixed(1)),
         band: r.heat_band,
         composite: Number(r.composite_score.toFixed(3)),
@@ -495,28 +495,28 @@ function handleRecall(args: any): string {
 
 function handleForget(args: any): string {
   if (args.memory_id) {
-    // Explicit delete by id — respect protected AND pinned (importance >= 1.0)
+    // Explicit delete by id — respect protected AND pinned (importance >= 0.9)
     const target = db.prepare('SELECT id, layer, importance, protected FROM memories WHERE id = ?').get(args.memory_id) as any;
     if (!target) {
       return JSON.stringify({ ok: false, error: `memory_id ${args.memory_id} not found` });
     }
-    if (target.protected === 1 || target.importance >= 1.0) {
+    if (target.protected === 1 || target.importance >= 0.9) {
       return JSON.stringify({
         ok: false,
         preserved: true,
-        reason: target.protected === 1 ? `${target.layer}-layer is auto-protected` : 'pinned (importance=1.0)',
-        hint: 'Use update_memory to lower importance below 1.0 first, then forget.',
+        reason: target.protected === 1 ? `${target.layer}-layer is auto-protected` : 'pinned (importance>=0.9)',
+        hint: 'Use update_memory to lower importance below 0.9 first, then forget.',
       });
     }
     const res = db.prepare('DELETE FROM memories WHERE id = ?').run(args.memory_id);
     return JSON.stringify({ ok: true, deleted: res.changes, memory_id: args.memory_id });
   }
 
-  // Auto-sweep — also respect importance=1.0 as protection
+  // Auto-sweep — also respect pin (importance >= 0.9) as protection
   const rows = db
     .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected
               FROM memories
-              WHERE protected = 0 AND importance < 1.0`)
+              WHERE protected = 0 AND importance < 0.9`)
     .all() as any[];
 
   const now = Math.floor(Date.now() / 1000);
@@ -572,7 +572,7 @@ function handleConsolidate(args: any): string {
       FROM memories m
       JOIN entities e ON e.id = m.entity_id
       WHERE m.protected = 0
-        AND m.importance < 1.0
+        AND m.importance < 0.9
         AND m.layer IN ('context', 'emotion', 'implementation')
         AND m.created_at <= ?
       GROUP BY m.entity_id, m.layer
@@ -629,7 +629,7 @@ function handleUpdateMemory(args: any): string {
   if (args.importance !== undefined) {
     const imp = Math.min(1, Math.max(0, Number(args.importance)));
     patch.importance = imp;
-    patch.protected = imp >= 1.0 || existing.protected === 1 ? 1 : 0;
+    patch.protected = imp >= 0.9 || existing.protected === 1 ? 1 : 0;
   }
 
   const keys = Object.keys(patch);
@@ -651,7 +651,7 @@ function handleUpdateMemory(args: any): string {
     ok: true,
     memory_id: memoryId,
     updated_fields: keys,
-    pinned: (patch.importance ?? existing.importance) >= 1.0,
+    pinned: (patch.importance ?? existing.importance) >= 0.9,
   });
 }
 
@@ -670,7 +670,7 @@ function handleListEntities(args: any): string {
            SUM(CASE WHEN m.layer = 'caveat' THEN 1 ELSE 0 END) as caveat_count,
            SUM(CASE WHEN m.layer = 'learning' THEN 1 ELSE 0 END) as learning_count,
            SUM(CASE WHEN m.layer = 'implementation' THEN 1 ELSE 0 END) as impl_count,
-           SUM(CASE WHEN m.importance >= 1.0 THEN 1 ELSE 0 END) as pinned_count
+           SUM(CASE WHEN m.importance >= 0.9 THEN 1 ELSE 0 END) as pinned_count
     FROM entities e
     LEFT JOIN memories m ON m.entity_id = e.id
     WHERE 1=1

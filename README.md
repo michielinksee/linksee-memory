@@ -296,6 +296,22 @@ Caveat and active-goal layers are always preserved. Consider scheduling a weekly
 
 ## Changelog
 
+### v0.1.1 — Pin threshold tweak (2026-04-19)
+
+Based on real-world feedback that `importance=0.95` memories were not
+being treated as pinned despite intent.
+
+- **Pin threshold lowered from `>= 1.0` to `>= 0.9`.** Memories with
+  `importance >= 0.9` are now exempt from the auto-forget sweep and
+  surface `pinned: true` in `recall` and `remember` responses. This
+  matches the natural mental model ("0.9 = high importance = should
+  survive cleanup") without requiring exact `1.0`.
+- All existing memories with `importance >= 0.9` (including older ones
+  set to `0.9` or `0.95`) become pinned automatically — no migration
+  needed.
+- Updated tool descriptions and error messages to reflect the new
+  threshold.
+
 ### v0.1.0 — Major UX update (2026-04-18)
 
 Based on one week of dogfooding, here's what changed:

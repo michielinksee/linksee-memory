@@ -91,7 +91,7 @@ async function run() {
   });
   assert(pastedForced.ok, 'force:true bypasses quality check');
 
-  // ═══ pin via importance:1.0 ═══
+  // ═══ pin via importance>=0.9 (v0.1.1) ═══
   const pinned = await call('remember', {
     entity_name: 'gamma', entity_kind: 'project',
     layer: 'goal',
@@ -99,6 +99,24 @@ async function run() {
     importance: 1.0,
   });
   assert(pinned.pinned === true, 'importance:1.0 marks memory as pinned');
+
+  // v0.1.1: 0.9 should also pin
+  const pinnedSoft = await call('remember', {
+    entity_name: 'gamma', entity_kind: 'project',
+    layer: 'goal',
+    content: 'a high-importance goal',
+    importance: 0.9,
+  });
+  assert(pinnedSoft.pinned === true, 'v0.1.1: importance:0.9 also pins');
+
+  // 0.85 should NOT pin (just below threshold)
+  const notPinned = await call('remember', {
+    entity_name: 'gamma', entity_kind: 'project',
+    layer: 'context',
+    content: 'an important-but-not-pinned context',
+    importance: 0.85,
+  });
+  assert(notPinned.pinned === false, 'v0.1.1: importance:0.85 below pin threshold (0.9)');
 
   // ═══ update_memory ═══
   const upd = await call('update_memory', {
