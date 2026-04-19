@@ -5,11 +5,11 @@
   "description": "Local-first agent memory MCP — cross-agent brain with 6-layer structured memory + token-saving file diff cache",
   "type": "module",
   "bin": {
-    "linksee-memory": "./dist/mcp/server.js",
-    "linksee-memory-import": "./dist/bin/import-sessions.js",
-    "linksee-memory-sync": "./dist/bin/sync-session.js",
-    "linksee-memory-install-skill": "./dist/bin/install-skill.js",
-    "linksee-memory-stats": "./dist/bin/stats.js"
+    "linksee-memory": "dist/mcp/server.js",
+    "linksee-memory-import": "dist/bin/import-sessions.js",
+    "linksee-memory-sync": "dist/bin/sync-session.js",
+    "linksee-memory-install-skill": "dist/bin/install-skill.js",
+    "linksee-memory-stats": "dist/bin/stats.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
@@ -48,7 +48,7 @@
   "homepage": "https://github.com/michielinksee/linksee-memory",
   "repository": {
     "type": "git",
-    "url": "https://github.com/michielinksee/linksee-memory.git"
+    "url": "git+https://github.com/michielinksee/linksee-memory.git"
   },
   "bugs": {
     "url": "https://github.com/michielinksee/linksee-memory/issues"
