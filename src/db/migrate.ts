@@ -52,6 +52,25 @@ export function runMigrations(db: Database.Database): void {
   if (currentVersion > 0 && currentVersion < 4) {
     db.exec(`INSERT INTO memories_fts(rowid, content) SELECT id, content FROM memories;`);
   }
+
+  // v0.1.1 data migration: pin threshold lowered from 1.0 to 0.9.
+  //
+  // Before v0.1.1, `remember()` only set `protected = 1` for memories
+  // inserted with importance >= 1.0. After v0.1.1, the threshold is 0.9.
+  // Existing rows written under the old rule need to be reconciled so that
+  // `recall().pinned`, `list_entities.pinned_count`, and the auto-forget
+  // guard (`WHERE protected = 0 AND importance < 0.9`) all agree.
+  //
+  // This runs on every startup but is a no-op after the first successful
+  // run (UPDATE filter excludes already-protected rows).
+  const hasMemories = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories'"
+  ).get() as { name?: string } | undefined;
+  if (hasMemories?.name) {
+    db.prepare(
+      `UPDATE memories SET protected = 1 WHERE importance >= 0.9 AND protected = 0`
+    ).run();
+  }
 }
 
 // CLI entrypoint
