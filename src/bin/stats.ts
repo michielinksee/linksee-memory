@@ -86,7 +86,7 @@ function main() {
     .prepare("SELECT kind, COUNT(*) as c FROM entities GROUP BY kind ORDER BY c DESC")
     .all() as Array<{ kind: string; c: number }>;
 
-  const pinned = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE importance >= 1.0').get() as any).c as number;
+  const pinned = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE importance >= 0.9').get() as any).c as number;
   const protectedCount = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE protected = 1').get() as any).c as number;
 
   const oldest = (db.prepare('SELECT MIN(created_at) as t FROM memories').get() as any).t as number | null;
