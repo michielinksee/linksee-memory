@@ -6,12 +6,12 @@
     "url": "https://github.com/michielinksee/linksee-memory",
     "source": "github"
   },
-  "version": "0.0.5",
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "linksee-memory",
-      "version": "0.0.5",
+      "version": "0.1.0",
       "transport": {
         "type": "stdio"
       }
