@@ -1,6 +1,8 @@
 # linksee-memory
 
 > Local-first agent memory MCP. A cross-agent brain for Claude Code, Cursor, and ChatGPT Desktop — with a token-saving file diff cache that nobody else does.
+>
+> **v0.1.0** adds `update_memory`, `list_entities`, `match_reasons` on recall, pagination, pin-via-importance, layer aliases, consolidate dry-run, `linksee-memory-stats` CLI, and a momentum-refresh fix. See [CHANGELOG](#changelog).
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -85,12 +87,24 @@ Each turn end takes ~100 ms. Failures are silent (Claude Code never blocks). Log
 
 | Tool | Purpose |
 |---|---|
-| `remember` | Store memory in 1 of 6 layers for an entity |
-| `recall` | FTS5 + heat-score + momentum composite ranking, JP/EN trigram search |
-| `recall_file` | Get the COMPLETE edit history of a file across all sessions, with per-edit user-intent context |
-| `read_smart` | Diff-only file read. Returns full content on first read, ~50 tokens on unchanged re-reads, only changed chunks on real edits |
-| `forget` | Explicit delete OR auto-sweep based on forgettingRisk (importance × heat × age) |
-| `consolidate` | Sleep-mode compression: cluster cold low-importance memories → protected learning-layer summary |
+| `remember` | Store memory in 1 of 6 layers for an entity. Rejects pasted assistant output / CI logs unless `force=true`. Set `importance=1.0` to pin (survives auto-forget). |
+| `recall` | FTS5 + heat × momentum × importance composite ranking with `match_reasons` explaining WHY each row matched. Supports pagination (`offset`/`has_more`), `band` filter, layer aliases (`decisions`/`warnings`/`how`/...), and `mark_accessed=false` for passive previews. |
+| `recall_file` | Complete edit history of a file across all sessions, with per-edit user-intent context. |
+| `update_memory` | **v0.1.0** Atomic edit of an existing memory. Preserves `memory_id` (session_file_edits links stay intact). Prefer over forget+remember. |
+| `list_entities` | **v0.1.0** List what the memory knows about — cheapest "what do I know?" primitive. Filter by `kind`/`min_memories`; returns layer breakdown per entity. |
+| `read_smart` | Diff-only file read. Returns full content on first read, ~50 tokens on unchanged re-reads, only changed chunks on real edits. |
+| `forget` | Explicit delete OR auto-sweep based on `forgettingRisk`. Pinned (`importance>=1.0`) and caveat-layer memories are always preserved. |
+| `consolidate` | Sleep-mode compression: cluster cold low-importance memories → protected learning-layer summary. Supports `dry_run` preview. |
+
+### CLI utilities
+
+| Command | Purpose |
+|---|---|
+| `npx linksee-memory` | MCP server (stdio) |
+| `npx linksee-memory-sync` | Claude Code Stop-hook entry point |
+| `npx linksee-memory-import` | Batch-import Claude Code session JSONL history |
+| `npx linksee-memory-install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
+| `npx linksee-memory-stats` | **v0.1.0** Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
 
 ## The 6 memory layers
 
@@ -279,6 +293,49 @@ Caveat and active-goal layers are always preserved. Consider scheduling a weekly
 - **Feature requests**: open an issue with the `enhancement` label
 - **Security concerns**: see [SECURITY.md](./SECURITY.md) if present, or file a private advisory on GitHub
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
+
+## Changelog
+
+### v0.1.0 — Major UX update (2026-04-18)
+
+Based on one week of dogfooding, here's what changed:
+
+**New tools**
+- `update_memory` — atomic edit with preserved `memory_id`. Solves the "forget+remember breaks session_file_edits links" bug.
+- `list_entities` — fast "what do I know about?" primitive for session init. Supports `kind`/`min_memories` filters and returns layer breakdown.
+- `npx linksee-memory-stats` — local DB summary CLI.
+
+**`recall` enhancements**
+- `match_reasons` array on each memory: e.g. `["content_match_fts", "heat:hot", "pinned"]`.
+- `score_breakdown` with per-dimension scores (relevance / heat / momentum / importance).
+- Pagination via `offset` / `has_more` / `stopped_by`.
+- `limit` parameter (hard cap, complements `max_tokens` budget).
+- `band` filter to request only hot/warm/cold/frozen memories.
+- `mark_accessed=false` for preview queries that shouldn't bump heat.
+- **Layer aliases**: `decisions` → `learning`, `warnings` → `caveat`, `how` → `implementation`, etc.
+- **Fix**: opportunistic refresh of stale entity momentum scores. Entities recalled >1 h after last remember() no longer return stale momentum.
+
+**`remember` enhancements**
+- Quality check: rejects pasted assistant output / CI logs / stack traces unless `force=true`.
+- `importance=1.0` now implicitly pins the memory (survives auto-forget).
+- Layer aliases accepted.
+
+**`forget` changes**
+- Pinned memories (importance=1.0) now preserved alongside caveat-layer memories.
+- Clear error response when attempting to delete a protected or missing memory.
+- dry-run now includes `sample_ids_to_drop`.
+
+**`consolidate` changes**
+- `dry_run: true` preview mode — reports cluster count + candidates without writing.
+
+**Infra**
+- Fixed fresh-DB migration bug (was querying `meta` table before it existed).
+- Bumped to Node 20+ for structured language feature usage.
+
+All changes are **backward compatible** — existing integrations continue to work. Server.ts version banner now reports `v0.1.0`.
+
+### Older versions
+See [GitHub Releases](https://github.com/michielinksee/linksee-memory/releases).
 
 ## License
 

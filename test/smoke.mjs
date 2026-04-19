@@ -67,7 +67,13 @@ async function run() {
   server.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
 
   const tools = await rpc('tools/list', {});
-  assert(tools.result.tools.length === 5, `5 tools registered (got ${tools.result.tools.length})`);
+  assert(tools.result.tools.length >= 5, `>=5 tools registered (got ${tools.result.tools.length})`);
+  const toolNames = tools.result.tools.map(t => t.name).sort();
+  const must = ['remember','recall','forget','consolidate','read_smart'];
+  for (const m of must) assert(toolNames.includes(m), `tool "${m}" present`);
+  // v0.1.0 new tools
+  assert(toolNames.includes('update_memory'), 'v0.1.0: update_memory present');
+  assert(toolNames.includes('list_entities'), 'v0.1.0: list_entities present');
 
   // === Day 1: basic remember/recall/caveat protection ===
   const r1 = await remember({

@@ -25,10 +25,20 @@ export function runMigrations(db: Database.Database): void {
   const schemaPath = join(dirname(__filename), 'schema.sql');
   const sql = readFileSync(schemaPath, 'utf8');
 
-  // v3 → v4: rebuild memories_fts with trigram tokenizer for JP/CJK support
-  const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
-  if (versionRow && Number(versionRow.value) < 4) {
-    // Drop old triggers + table; CREATE statements below will recreate them
+  // Safely read current schema version. On a fresh DB the meta table doesn't
+  // exist yet, which is fine — treat that as "version 0, full schema apply".
+  let currentVersion = 0;
+  const metaTable = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+  ).get() as { name?: string } | undefined;
+  if (metaTable?.name) {
+    const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+    if (versionRow) currentVersion = Number(versionRow.value) || 0;
+  }
+
+  // v3 → v4: rebuild memories_fts with trigram tokenizer for JP/CJK support.
+  // Only runs when upgrading an existing DB from schema v1-3.
+  if (currentVersion > 0 && currentVersion < 4) {
     db.exec(`
       DROP TRIGGER IF EXISTS trg_memories_fts_ai;
       DROP TRIGGER IF EXISTS trg_memories_fts_ad;
@@ -39,8 +49,7 @@ export function runMigrations(db: Database.Database): void {
 
   db.exec(sql);
 
-  // After v4 schema is applied, repopulate FTS index from existing memories
-  if (versionRow && Number(versionRow.value) < 4) {
+  if (currentVersion > 0 && currentVersion < 4) {
     db.exec(`INSERT INTO memories_fts(rowid, content) SELECT id, content FROM memories;`);
   }
 }
