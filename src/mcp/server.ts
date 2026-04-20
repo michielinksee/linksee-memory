@@ -501,11 +501,14 @@ function handleForget(args: any): string {
       return JSON.stringify({ ok: false, error: `memory_id ${args.memory_id} not found` });
     }
     if (target.protected === 1 || target.importance >= 0.9) {
+      const isLayerProtected = target.protected === 1;
       return JSON.stringify({
         ok: false,
         preserved: true,
-        reason: target.protected === 1 ? `${target.layer}-layer is auto-protected` : 'pinned (importance>=0.9)',
-        hint: 'Use update_memory to lower importance below 0.9 first, then forget.',
+        reason: isLayerProtected ? `${target.layer}-layer is auto-protected` : 'pinned (importance>=0.9)',
+        hint: isLayerProtected
+          ? `${target.layer} memories are permanently protected (the whole point — pain lessons must not be lost). If you truly need to delete, copy its content to another layer via remember() first, then drop the DB row manually via a SQLite client.`
+          : 'Use update_memory to lower importance below 0.9 first, then forget.',
       });
     }
     const res = db.prepare('DELETE FROM memories WHERE id = ?').run(args.memory_id);

@@ -60,11 +60,11 @@ function findFirstIntent(session: ParsedSession): SessionTurn | null {
 // ============================================================
 const DECISION_PATTERNS = [
   /決めた|採用|確定|これで(いい|進め)|OK進めて|やろう|行こう/,
-  /learn(ed)?|decide|chose|picked|going with/i,
+  /learn(ed)?|decid(?:e|ed|ing)|chose|picked|going with|let'?s\s+go|pivot(?:ing|ed)?|switch(?:ing)?\s+to|settled\s+on|approved|we'?ll\s+use|commit(?:ting)?\s+to/i,
 ];
 const FAILURE_PATTERNS = [
-  /失敗|バグ|エラー|直して|修正|戻して/,
-  /error|bug|fail|broken|revert|rollback/i,
+  /失敗|バグ|エラー|直して|修正|戻して|うまくいかない|ハマった/,
+  /error|bug|fail(?:ed|ing|ure)?|broken|broke|revert|rollback|doesn'?t\s+work|not\s+working|stuck|same\s+error\s+again|hit\s+(?:an?\s+|the\s+)?(?:error|bug|issue)|debug/i,
 ];
 // Caveats must be EXPLICIT warnings/prohibitions the user wants preserved.
 // Previous bare patterns (/注意/ /やらない/ /避けて/) caught descriptive usage

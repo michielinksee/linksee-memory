@@ -2,7 +2,7 @@
 
 > Local-first agent memory MCP. A cross-agent brain for Claude Code, Cursor, and ChatGPT Desktop — with a token-saving file diff cache that nobody else does.
 >
-> **v0.1.x** adds `update_memory`, `list_entities`, `match_reasons` on recall, pagination, pin-via-importance, layer aliases, consolidate dry-run, `linksee-memory-stats` CLI, and a momentum-refresh fix. See [CHANGELOG](#changelog).
+> **v0.2.0** makes the package English-first for global launch: the bundled auto-invocation skill is now bilingual (EN + JP), session-extractor patterns cover common English keywords (`let's go`, `pivot`, `doesn't work`, `same error again`, etc.), and the install CLI shows test examples in both languages. No API changes. See [CHANGELOG](#changelog).
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -429,6 +429,19 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
 
 ## Changelog
+
+### v0.2.0 — English-first launch readiness (2026-04-20)
+
+Prepares the package for a broader (primarily English-speaking) audience on Reddit, Hacker News, and Anthropic Discord. No breaking API changes.
+
+- **Bilingualized `SKILL.md`** (auto-invocation skill). The bundled skill that `linksee-memory-install-skill` copies into `~/.claude/skills/linksee-memory/SKILL.md` was Japanese-first; it is now English-primary with Japanese trigger phrases preserved inline. English speakers now get the skill firing on natural English phrases ("how did we solve this before?", "same error again", "remember this") in addition to the existing JP triggers.
+- **Install-skill CLI output is bilingual**: example test phrases shown after installation include both English and Japanese.
+- **Session-extractor EN coverage** (`linksee-memory-import`): expanded regex patterns for decisions, failures, and caveats so English Claude Code session logs get auto-tagged correctly. Additions include `let's go`, `pivot`, `switch to`, `settled on`, `approved`, `doesn't work`, `stuck`, `same error again`, `hit an error`, `debug`, `broke`, `revert`.
+- **Clearer caveat-forget error hint**: the previous message said "lower importance below 0.9 first, then forget" which was misleading — caveat-layer memories are permanently protected regardless of importance. The hint now correctly distinguishes layer-protection from pin-protection.
+- **README rework** for launch readiness: added a "See it in action" before/after scenario, ASCII 6-layer diagram, MCP Official Registry + Glama score badges, landing-page link, and an 8-item FAQ covering questions that surface during public launches.
+- Internal: SKILL.md now documents pairing with KanseiLink skill as an English workflow example.
+
+No code changes to the MCP protocol surface; all existing MCP clients continue to work unchanged.
 
 ### v0.1.1 — Pin threshold tweak (2026-04-19)
 

@@ -8,8 +8,9 @@
 //   npx linksee-memory-install-skill --dry-run (show what would happen)
 //
 // Why: installing the MCP server alone doesn't teach Claude Code WHEN to call
-// recall/remember/read_smart/etc. The skill provides trigger phrases ("前に...",
-// "また同じエラー", new task start, file edits, etc.) so the agent auto-fires
+// recall/remember/read_smart/etc. The skill provides trigger phrases (EN:
+// "before", "last time", "same error again"; JP: "前に", "また同じエラー";
+// new task start, file edits, etc.) so the agent auto-fires
 // without the user having to type "use linksee-memory".
 
 import { mkdirSync, existsSync, copyFileSync, readFileSync } from 'node:fs';
@@ -94,8 +95,11 @@ console.log('');
 console.log('  2. Restart Claude Code (the skill auto-loads on next turn).');
 console.log('');
 console.log('  3. Test by saying something like:');
-console.log('       "前にこの問題どう解決したっけ"');
-console.log('       "また同じエラーが出た"');
-console.log('       "覚えておいて: ..."');
+console.log('       "How did we solve this before?"');
+console.log('       "Same error again"');
+console.log('       "Remember: I prefer TypeScript over JavaScript"');
+console.log('     or in Japanese:');
+console.log('       「前にこの問題どう解決したっけ」');
+console.log('       「覚えておいて: ...」');
 console.log('');
 console.log('The skill will trigger and call recall/remember automatically.');

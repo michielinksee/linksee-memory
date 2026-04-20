@@ -1,61 +1,69 @@
 ---
 name: linksee-memory
 description: |
+  The bridge to the agent's "past self". Before any new task, file edit, decision, or right after a failure, recall past caveats (pain records) / learnings (growth log) / implementation history from linksee-memory.
+  This is the only way to solve Claude Code's "memory amnesia every session" problem. The "never repeat the same mistake" mechanism that Mem0 / Letta / Zep can't provide.
   エージェントの「過去の自分」への橋。新しい作業・ファイル編集・意思決定・失敗の前後で、linksee-memory から過去の caveat（痛みの記録）/ learning（成長ログ）/ implementation（成功失敗）を recall する。
-  これは Claude Code の「毎セッション記憶喪失」問題を解決する唯一の方法。Mem0/Letta/Zep にはできない「同じ失敗を二度としない」仕組み。
-  以下のタイミングで必ずこのスキルを使うこと：
-  ①作業開始時・新タスク開始時（「実装しよう」「始めよう」「新しく〜作る」）
-  ②ファイル編集する前（同じファイルを過去に触ってる可能性がある）
-  ③エラー・失敗した瞬間（remember で caveat 記録）
-  ④成功した瞬間・新しいこと学んだ瞬間（remember で learning 記録）
-  ⑤ユーザーが「前に」「同じ」「覚えてる？」「覚えておいて」と言ったとき
-  ⑥「なぜそうした」「いつ決めた」「どこで議論した」と聞かれたとき
-  ⑦別プロジェクトから戻ってきたとき・セッション切り替え時
-  トリガー: 記憶/覚えて/忘れて/過去/前回/前に/そういえば/覚えてる/memory/remember/recall/forget
-  エラーキーワード: 失敗/エラー/うまくいかない/ハマった/同じ/また/繰り返し/debug
-  決定キーワード: 決めた/方針/戦略/ピボット/やめよう/方向転換
+
+  ALWAYS use this skill at the following moments / 以下のタイミングで必ずこのスキルを使うこと:
+  ① Task start / new task begins — "let's implement...", "let's start", "build a new...", 「実装しよう」「始めよう」「新しく〜作る」
+  ② Before editing a file — same file may have been touched before / 同じファイルを過去に触ってる可能性がある
+  ③ The moment an error/failure happens — remember as caveat / エラー・失敗した瞬間
+  ④ The moment something succeeds or is learned — remember as learning / 成功した瞬間・学んだ瞬間
+  ⑤ When the user says "before", "earlier", "last time", "same as", "remember?", "remember this" / 「前に」「同じ」「覚えてる？」「覚えておいて」
+  ⑥ When asked "why did we do that", "when was this decided", "where did we discuss this" / 「なぜそうした」「いつ決めた」「どこで議論した」
+  ⑦ Returning from another project / switching sessions / 別プロジェクトから戻ってきたとき
+
+  Triggers (EN): remember/recall/forget/memory/before/earlier/last time/previously/remember when/same as before/history
+  Triggers (JP): 記憶/覚えて/忘れて/過去/前回/前に/そういえば/覚えてる
+  Error keywords (EN): failed/broken/stuck/error/bug/doesn't work/not working/same error again/again/repeated/debug
+  Error keywords (JP): 失敗/エラー/うまくいかない/ハマった/同じ/また/繰り返し
+  Decision keywords (EN): decided/let's go with/approved/settled on/pivot/strategy/switch to/abandon
+  Decision keywords (JP): 決めた/方針/戦略/ピボット/やめよう/方向転換
 ---
 
-# Linksee Memory Skill — エージェントの過去と未来をつなぐ
+# Linksee Memory Skill — Connecting the agent's past and future
 
 ## 🧠 Core Principle
 
-**このスキルは「エージェントの成長が session を跨いで永続するための唯一の手段」**。
+**This skill is the only way to persist agent growth across sessions.**
 
-Claude Code は session が終わると全部忘れる。Michieさんが昨日教えてくれた解決策、今日やった失敗、3日前の決定——すべて普通は消える。**linksee-memory は「消えない記憶」を作る装置**。
+Claude Code forgets everything when a session ends. The solution the user taught yesterday, the failure you hit today, the decision made three days ago — all of it is normally lost. **linksee-memory is the "memory that doesn't disappear" device.**
 
-書き込みは Stop hook が自動でやってくれる（もう動いてる）。でも**読み出しはエージェントが能動的にやらないと使われない**。この skill がその「読みにいく習慣」をエージェントに植え付ける。
+Writes are handled automatically by the Stop hook (already running). But **reads require the agent to actively pull**. This skill instills that "go look first" habit in the agent.
+
+*JP: Claude Code は session が終わると全部忘れる。linksee-memory は「消えない記憶」を作る装置。書き込みは Stop hook が自動でやってくれるが、読み出しはエージェントが能動的にやる必要がある。*
 
 ---
 
-## 📐 6レイヤーの役割分担
+## 📐 The 6 layers — what goes where
 
-どのレイヤーに記録するかで、後の検索精度が変わる。
+Which layer you record into determines later retrieval accuracy.
 
-| レイヤー | いつ使うか | 例 |
+| Layer | When to use | Example |
 |---|---|---|
-| 🎯 `goal` | ユーザーが明確なゴールを言ったとき | "freeeと連携させたい" "npm publishしたい" |
-| 📍 `context` | いつ・なぜそれをしてるかの背景 | "X社との商談が水曜にあるから" |
-| 💭 `emotion` | ユーザーの温度感・感情 | "疲れた" "嬉しい" "焦ってる" |
-| 🔧 `implementation` | コードを書いた、設定した、動いた/動かなかった | 成功: "OAuth flow が通った" / 失敗: "auth_expired で止まった" |
-| ⚠️ `caveat` | **二度と繰り返したくない教訓**（忘却保護） | "freeeのOAuthは24hで切れる" "このファイルは絶対編集しない" |
-| 📈 `learning` | 新しいこと学んだ、前の考えが更新された | "AST chunking の方が line diff より効く" |
+| 🎯 `goal` | The user states a clear goal | "want to integrate with freee", "want to npm publish" |
+| 📍 `context` | Background on when/why this is happening | "because there's a meeting with company X on Wednesday" |
+| 💭 `emotion` | User's temperature / tone | "tired", "excited", "stressed", 「疲れた」「焦ってる」 |
+| 🔧 `implementation` | Code written, configured, worked / didn't work | success: "OAuth flow works" / failure: "stopped with auth_expired" |
+| ⚠️ `caveat` | **Lessons you never want to repeat** (auto-protected from forgetting) | "freee OAuth expires in 24h", "never edit this file" |
+| 📈 `learning` | Learned something new, prior belief updated | "AST chunking beats line diff for token savings" |
 
-**重要:** `caveat` は自動で忘却保護される。痛みの記録は絶対消えない。
+**Important:** `caveat` layer is automatically protected from forgetting. Pain records are never deleted.
 
-**v0.1.0: 別のpin方法** — `importance: 1.0` で remember すれば、caveat層じゃなくても auto-forget から保護される。「絶対忘れさせたくない goal」「重要な判断」等で使う:
+**Pin-via-importance (v0.1.0+):** Calling `remember` with `importance: 1.0` pins the memory across all layers, protecting it from auto-forget even outside the caveat layer. Use for "mission-critical goals", "key decisions", etc.:
 
 ```
 remember({
   entity_name: "KanseiLink", entity_kind: "project",
-  layer: "goal", content: "Plugin Marketplace 申請中",
+  layer: "goal", content: "Plugin Marketplace submission under review",
   importance: 1.0  // pin
 })
 ```
 
-**Layer alias 対応** — canonical layer 名覚えなくても、自然な言い方で呼べる:
+**Layer aliases** — no need to memorize canonical names. Natural language aliases resolve automatically:
 
-| 自然語 | → canonical |
+| Natural alias | → canonical |
 |---|---|
 | `decisions` / `insights` / `learned` | `learning` |
 | `warnings` / `rules` / `pitfalls` / `dont` | `caveat` |
@@ -66,159 +74,157 @@ remember({
 
 ---
 
-## 🔄 実行フロー（5つのタイミング）
+## 🔄 Execution flow — 5 canonical moments
 
-### ① Task Start — 作業開始前に必ず recall
+### ① Task Start — Always recall before starting work
 
-新しい作業を始める**前**に、過去のコンテキストを注入する。
+Before starting any new task, inject past context.
 
-**v0.1.0 新フロー: 超-セッション冒頭は `list_entities` から**
-
-会話の一番最初（ユーザーが最初の発話をしてきた時点）で、「自分が何を知ってるか」を把握する:
+**At the very beginning of a conversation**, use `list_entities` first to understand what you know:
 
 ```
 mcp__linksee__list_entities({ min_memories: 5, limit: 10 })
 ```
 
-これで返ってくる "momentum 高い entity" = 今まさに話題に上りそうなプロジェクト。各entityの `layer_breakdown` を見れば「このprojectはcaveatが多い」「goalが未完」等が分かる。
+The returned "high-momentum entities" are the projects likely to be discussed. Each entity's `layer_breakdown` reveals patterns ("this project has many caveats", "goal is unfinished", etc.).
 
-その後、具体的な作業が始まったら recall:
+Then, once a specific task starts, recall:
 
 ```
 mcp__linksee__recall({
-  query: "<現タスクのキーワード。プロジェクト名 + 技術名>",
+  query: "<keywords of current task — project name + technology>",
   max_tokens: 2000
 })
 ```
 
-**例**: ユーザーが「KanseiLinkに新しいツール追加したい」と言ったら：
+**Example**: User says "let's add a new tool to KanseiLink":
 ```
 recall({ query: "KanseiLink new tool", max_tokens: 2000 })
 ```
 
-返ってきた memories から、特に以下に注目：
-- **`caveat` 層** — 絶対避けるべき罠
-- **`learning` 層** — 前に得た結論
-- **`implementation.failure`** — 過去の失敗パターン
+In the returned memories, pay special attention to:
+- **`caveat` layer** — traps to absolutely avoid
+- **`learning` layer** — previously-reached conclusions
+- **`implementation.failure`** — past failure patterns
 
-**例の結果の使い方:**
+**Using the results:**
 ```
-過去の caveat から: "同じMCPのtool名の衝突に気をつけろ"
-→ 新しいツール追加前に既存tool名を確認する流れで作業開始
+From past caveat: "Watch out for MCP tool name collisions"
+→ Before adding a new tool, check existing tool names first.
 ```
 
-### ② File Edit — ファイル編集前に recall_file
+### ② File Edit — Use recall_file before touching a file
 
-特定ファイルを触る前に、そのファイルの過去の編集履歴を確認：
+Before touching a specific file, check its edit history:
 
 ```
 mcp__linksee__recall_file({
-  path_substring: "<ファイルのパス or 部分一致する名前>",
+  path_substring: "<file path or substring match>",
   max_intents: 5
 })
 ```
 
-返ってくる: そのファイルの全編集履歴 + **各編集を引き起こしたユーザー発言**
+Returns: the file's entire edit history + **the user message that drove each edit**.
 
-**これがキモ**: Mem0/Lettaにはない機能。「このファイル、前になぜ変更されたか」が残ってる。
+**This is the key differentiator.** Mem0 / Letta don't have this. "Why was this file changed last time" is preserved.
 
-### ③ Before Reading — 既読ファイルなら read_smart
+### ③ Before Reading — Use read_smart for files already read
 
-ファイルを読む必要があるとき、**Read ツールの代わりに read_smart を使う**:
+When you need to read a file, **use `read_smart` instead of the standard `Read` tool**:
 
 ```
 mcp__linksee__read_smart({
-  path: "<絶対パス>"
+  path: "<absolute path>"
 })
 ```
 
-**効果**:
-- 初回読み: 通常 Read と同じトークン（chunk metadata 付き）
-- 2回目以降・変更なし: **~50 トークンだけ返る**（99% 節約）
-- 2回目以降・変更あり: 変更 chunk だけ返る（50-90% 節約）
+**Effect**:
+- First read: same tokens as normal Read (with chunk metadata)
+- Subsequent reads, unchanged: **~50 tokens returned** (99% savings)
+- Subsequent reads, changed: only changed chunks returned (50–90% savings)
 
-特に大きなファイル（1000行超えるもの）で効果絶大。
+Especially effective for large files (>1000 lines).
 
-### ③.5 Updating existing memory — v0.1.0 新: forget+remember の代わりに update_memory
+### ③.5 Updating existing memory — use update_memory, not forget+remember
 
-事実が変わった / 目標が更新された / caveat の細部を修正したい場合、**forget して remember すると memory_id が変わって session_file_edits のリンクが切れる**。代わりに `update_memory`:
+When facts change / goal updated / caveat detail needs correction: **`forget` + `remember` breaks `memory_id` continuity, cutting the `session_file_edits` links.** Use `update_memory` instead:
 
 ```
 update_memory({
   memory_id: 1234,
-  content: '{"primary": "Plugin Marketplace 申請中(審査7日目)", "deadline": "2026-04-25"}',
-  importance: 1.0  // pin 強化
+  content: '{"primary": "Plugin Marketplace under review (day 7)", "deadline": "2026-04-25"}',
+  importance: 1.0  // strengthen pin
 })
 ```
 
-`layer` も変更可能だが、caveat → 他への demotion は不可(auto-protectedのため)。
+`layer` can also be changed, but demoting from caveat to another layer is **not allowed** (auto-protected).
 
-### ④ Failure — エラー発生時に caveat 記録
+### ④ Failure — Record caveat the moment an error hits
 
-エラー・失敗・「うまくいかない」が発生した瞬間、すぐ記録する：
+The moment an error, failure, or "doesn't work" happens, record immediately:
 
 ```
 mcp__linksee__remember({
-  entity_name: "<プロジェクト名 or サービス名>",
+  entity_name: "<project name or service name>",
   entity_kind: "project",
   layer: "caveat",
-  content: '{"rule_or_warning":"<失敗内容 + 回避策>","when":"<ISO日時>"}',
-  importance: 0.8  // 失敗は重要度高め
+  content: '{"rule_or_warning":"<what failed + workaround>","when":"<ISO datetime>"}',
+  importance: 0.8  // failures are high-importance
 })
 ```
 
-**例**:
+**Example**:
 ```json
 {
-  "rule_or_warning": "freee MCPは24時間でOAuth token切れる。refresh_token使って再取得する必要あり。access_tokenを直接使い回すと401で止まる",
-  "from_incident": "session 02759-...で auth_expired エラー",
-  "workaround": "24h毎に refresh token → 新しい access token"
+  "rule_or_warning": "freee MCP OAuth token expires in 24 hours. Must refresh via refresh_token. Reusing access_token directly causes 401.",
+  "from_incident": "session 02759-... hit auth_expired error",
+  "workaround": "every 24h: refresh token → new access token"
 }
 ```
 
-**なぜ重要か**: `caveat` は**自動で忘却保護**される。この記録があれば、別セッションの別エージェントも同じ失敗を避けられる。
+**Why this matters**: `caveat` is **auto-protected from forgetting**. Once recorded, a future agent in a different session avoids the same failure.
 
-### ⑤ Success/Learning — 成功・学習時に記録
+### ⑤ Success / Learning — Record the moment of insight
 
-新しいこと理解した、アプローチ変えた、問題解決した瞬間：
+When you understand something new, change approaches, or solve a problem:
 
 ```
 mcp__linksee__remember({
   entity_name: "<entity>",
   entity_kind: "project | concept | ...",
   layer: "learning",
-  content: '{"at":"<日時>","learned":"<何を学んだか>","prior_belief":"<前はこう思ってた>"}',
+  content: '{"at":"<datetime>","learned":"<what was learned>","prior_belief":"<what we used to think>"}',
   importance: 0.7
 })
 ```
 
-`prior_belief` を書くことで「**信念の更新履歴**」が残る。これは後で「なぜこの決定をしたのか」の根拠になる。
+Recording `prior_belief` leaves a **belief-update history**. Later, this becomes the evidence for "why was this decision made".
 
 ---
 
-## 🎯 絶対ルール
+## 🎯 Hard rules
 
-### ✅ やるべきこと
+### ✅ Do
 
-1. **新タスク開始時、必ず最初に `recall` を呼ぶ**（たとえ短くても）
-2. **同じファイルを触る前に `recall_file` で過去履歴を確認**
-3. **大きなファイルは `Read` より `read_smart` を優先**
-4. **エラーが出たら即座に `caveat` 記録**（その場で記録、後回しにしない）
-5. **ユーザーが驚いたり「なるほど」と言ったら `learning` 記録**
+1. **At any new task start, always call `recall` first** (even briefly)
+2. **Before touching the same file, verify history via `recall_file`**
+3. **Prefer `read_smart` over `Read` for larger files**
+4. **When an error occurs, record a `caveat` immediately** (on the spot — don't defer)
+5. **When the user is surprised or says "interesting", record a `learning`**
 
-### ❌ やってはいけないこと
+### ❌ Don't
 
-1. ❌ 作業開始時に recall せず、いきなり手を動かす
-2. ❌ エラーをその場で解決したのに記録しない → 未来の自分（or 他のエージェント）が同じ失敗を繰り返す
-3. ❌ `Read` ばかり使って `read_smart` を使わない（トークン無駄）
-4. ❌ caveat をふざけた軽い tone で書く（真面目に残す）
-5. ❌ 長期作業中は consolidate を忘れない（週1は `consolidate()` 呼ぶべき）
+1. ❌ Start a task without recalling first
+2. ❌ Solve an error on the spot without recording — future you (or another agent) will hit the same failure
+3. ❌ Use `Read` everywhere instead of `read_smart` (wastes tokens)
+4. ❌ Write caveats in a flippant tone — preserve them seriously
+5. ❌ Skip `consolidate` during long-running work — run it weekly
 
 ---
 
-## 🔁 Consolidate — 記憶の定期整理
+## 🔁 Consolidate — periodic memory tidy-up
 
-メモリが膨張してきたら（目安: DB 20MB超、memories 15,000件超）：
+When memory has grown (rough guideline: DB > 20MB, memories > 15,000):
 
 ```
 mcp__linksee__consolidate({
@@ -227,142 +233,142 @@ mcp__linksee__consolidate({
 })
 ```
 
-これで 7日前より古く、importance低く、cold バンドになった memories が自動でクラスタ化 → learning 層に1件に圧縮 → 元データ削除。
+This clusters cold, low-importance memories older than 7 days → compresses them into a single `learning`-layer entry → deletes originals.
 
-**caveat と active goal は消えない**。睡眠中の脳の記憶整理と同じ。
+**`caveat` memories and active `goal` memories are never consolidated away.** Equivalent to sleep-time memory reorganization.
 
 ---
 
-## 🧭 Skill 発火シナリオ集
+## 🧭 Skill firing scenarios
 
-### Case A: 新しいプロジェクトに入る
+### Case A — Returning to a project
 
-ユーザー: "今日は XYZ プロジェクトに戻るよ"
+User: "Today I'm back on the XYZ project"
 
 ```
 1. recall({ query: "XYZ", max_tokens: 2500 })
-2. 返ってきた caveat/learning/goal を確認
-3. ユーザーに「前回の続きで...」と状況を1行で示す
-4. その文脈の上で作業開始
+2. Review returned caveat / learning / goal
+3. Tell user "Picking up from last time..." with a one-line status
+4. Resume work grounded in that context
 ```
 
-### Case B: 同じエラーが出た（デジャブ感）
+### Case B — Déjà-vu error
 
-ユーザー: "あれ、このエラー前も見たような..."
+User: "Wait, I feel like I've seen this error before..."
 
 ```
-1. recall({ query: "<エラーメッセージの核キーワード>", max_tokens: 1000 })
-2. 過去の caveat から workaround 取得
-3. 「前回（日時）同じエラーで、X で解決した」と回答
-4. workaround を適用
+1. recall({ query: "<core keywords of the error message>", max_tokens: 1000 })
+2. Pull workaround from past caveat
+3. Reply: "Last time (DATE), we hit the same error and solved it with X."
+4. Apply the workaround
 ```
 
-### Case C: ファイル編集前の確認
+### Case C — Pre-edit check
 
-ユーザー: "server.ts を直して"
+User: "Fix server.ts"
 
 ```
 1. recall_file({ path_substring: "server.ts" })
-2. 過去の編集頻度・理由を確認
-3. 「このファイル過去 N 回編集されてる。最後は ○○ 目的」と報告
-4. その文脈で今回の編集を行う
-5. 編集後、implementation.success / failure で記録
+2. Review past edit frequency and reasons
+3. Report: "This file has been edited N times. Last edit was to <reason>."
+4. Perform the edit in that context
+5. After editing, record success / failure via implementation layer
 ```
 
-### Case D: 決定した瞬間
+### Case D — Decision made
 
-ユーザー: "じゃあ Sonnet に切り替えるわ"
+User: "Alright, let's switch to Sonnet"
 
 ```
 1. remember({
-     entity_name: "<プロジェクト>",
+     entity_name: "<project>",
      entity_kind: "project",
      layer: "learning",
-     content: '{"at":"...", "learned":"このプロジェクトは Sonnet で行く", "prior_belief":"Opus使ってた"}',
+     content: '{"at":"...", "learned":"This project uses Sonnet", "prior_belief":"Was using Opus"}',
      importance: 0.8
    })
-2. 「記録しました」と一言
-3. 次からの作業は Sonnet 前提で進める
+2. Brief confirmation: "Recorded."
+3. From here, proceed assuming Sonnet
 ```
 
-### Case E: 長時間作業の終盤
+### Case E — End of long session
 
-ユーザー: "今日はここまで"
+User: "That's it for today"
 
 ```
-1. 今日のハイライトを remember で記録:
-   - 主要な decision を learning 層
-   - 発生した失敗を caveat 層
-   - 完成した成果物を implementation.success
-2. 「記録完了。次回 recall で取れる状態です」と報告
-3. 必要なら consolidate({scope:"session", min_age_days: 14}) を提案
+1. Record today's highlights via remember:
+   - Major decisions → learning layer
+   - Failures hit → caveat layer
+   - Finished deliverables → implementation.success
+2. Report: "Recorded. Retrievable via recall next session."
+3. Optionally suggest: consolidate({scope:"session", min_age_days: 14})
 ```
 
-### Case F: ユーザーが「覚えて」と明示
+### Case F — User explicitly says "remember this"
 
-ユーザー: "これは覚えておいて: cloudsign より DocuSign の方が安定"
+User: "Remember this: DocuSign is more stable than CloudSign"
 
 ```
 1. remember({
-     entity_name: "cloudsign vs DocuSign",
+     entity_name: "CloudSign vs DocuSign",
      entity_kind: "concept",
      layer: "caveat",
-     content: '{"rule_or_warning":"cloudsign (61% success) より DocuSign-JP (100%) の方が安定。カスタマーに提案するときは DocuSign 推奨"}',
-     importance: 0.9  // ユーザー明示指示は高優先度
+     content: '{"rule_or_warning":"CloudSign (61% success) is less reliable than DocuSign-JP (100%). Recommend DocuSign when advising customers."}',
+     importance: 0.9  // user-explicit instruction = high priority
    })
-2. 「記憶しました。caveat 層なので忘れません」と確認
+2. Confirm: "Recorded. Since it's in the caveat layer, it won't be forgotten."
 ```
 
 ---
 
-## 🔐 プライバシー（ユーザーに聞かれたとき）
+## 🔐 Privacy (when the user asks)
 
-linksee-memory は **完全ローカル**:
-- DB: `~/.linksee-memory/memory.db` （ユーザーのPC内）
-- 外部送信: なし（telemetry は opt-in、デフォルト OFF）
-- バックアップ: ファイルコピーで完結
+linksee-memory is **fully local**:
+- DB: `~/.linksee-memory/memory.db` (inside the user's PC)
+- External transmission: none (telemetry is opt-in, OFF by default)
+- Backup: a simple file copy is sufficient
 
-「私たちのデータは外に出てる？」と聞かれたら：
-「**デフォルトで一切出てません。** telemetry を明示的に enable していない限り、すべてローカルDB。`~/.linksee-memory/memory.db` のコピーが唯一のバックアップ。」と答える。
-
----
-
-## 🚀 KanseiLink Skill との連携
-
-KanseiLink skill と linksee-memory skill は**セットで動く**と最大効果：
-
-```
-ユーザー: "freeeで請求書作って"
-↓
-[linksee-memory skill 発火] recall({query: "freee"})
-  → 過去の caveat: "company_id 最初に取る必要あり"
-  → 過去の learning: "OAuth 24h refresh"
-↓
-[kansei-link skill 発火] search_services({intent: "invoice"})
-  → freee verified、trust 0.9
-  → get_service_tips で pitfall 確認
-↓
-両方の集合知を持った状態で実装開始
-```
-
-**KanseiLink = 外部SaaSの集合知 / linksee-memory = 自分の過去の集合知**。両輪。
+If the user asks "does our data leave my machine?", answer:
+"**By default, nothing leaves.** Unless you explicitly enable telemetry, everything is in a local DB. A copy of `~/.linksee-memory/memory.db` is the only backup you need."
 
 ---
 
-## 📊 使うほど精度が上がる原理
+## 🚀 Pairing with KanseiLink Skill
 
-| 時点 | recall 精度 | なぜ |
+The KanseiLink skill and linksee-memory skill **work best together**:
+
+```
+User: "Create an invoice via freee"
+↓
+[linksee-memory skill fires] recall({query: "freee"})
+  → past caveat: "fetch company_id first"
+  → past learning: "OAuth 24h refresh required"
+↓
+[kansei-link skill fires] search_services({intent: "invoice"})
+  → freee verified, trust 0.9
+  → get_service_tips reveals pitfalls
+↓
+Now you have both bodies of knowledge before starting
+```
+
+**KanseiLink = collective knowledge about external SaaS / linksee-memory = collective knowledge about your own past**. Two wheels of the same cart.
+
+---
+
+## 📊 Precision grows with usage
+
+| Moment | recall precision | Why |
 |---|---|---|
-| Day 1 | 低（データ少） | Stop hook が貯めてる最中 |
-| Week 1 | 中 | 数千件 memories、FTS5 が効き出す |
-| Month 1 | 高 | heat_score が安定、重要メモリが浮上 |
-| Month 3+ | 最強 | consolidate 走って、learnings が結晶化 |
+| Day 1 | low (little data) | Stop hook is still collecting |
+| Week 1 | medium | thousands of memories, FTS5 kicks in |
+| Month 1 | high | heat_score stabilizes, important memories surface |
+| Month 3+ | strongest | consolidate has run, learnings crystallized |
 
-**「使うほど賢くなる」は時間が味方してくれる**。今日の記録は 3ヶ月後の自分が読む。
+**"Gets smarter with use"** — time is on your side. Today's record is read by tomorrow's you.
 
 ---
 
-*このスキルは linksee-memory MCP v0.0.5+ の上で動く。*
-*Stop hook 経由で自動記録、recall 経由で手動取り出し。*
-*MCP Registry 登録済み、Glama/LobeHub 申請中（2026-04-17 時点）*
+*This skill runs on top of linksee-memory MCP v0.2.0+.*
+*Auto-write via Stop hook, explicit read via recall.*
+*Listed in MCP Official Registry, PulseMCP, mcpservers.org, Glama.*
 *MIT License — Synapse Arrows PTE. LTD.*
