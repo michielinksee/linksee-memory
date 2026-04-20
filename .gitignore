@@ -35,3 +35,6 @@ credentials*
 # Logs
 *.log
 .tmp-tools/
+
+# MCP registry publisher CLI (downloaded on demand)
+.mcp-publisher/
