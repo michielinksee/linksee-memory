@@ -2,10 +2,74 @@
 
 > Local-first agent memory MCP. A cross-agent brain for Claude Code, Cursor, and ChatGPT Desktop — with a token-saving file diff cache that nobody else does.
 >
-> **v0.1.0** adds `update_memory`, `list_entities`, `match_reasons` on recall, pagination, pin-via-importance, layer aliases, consolidate dry-run, `linksee-memory-stats` CLI, and a momentum-refresh fix. See [CHANGELOG](#changelog).
+> **v0.1.x** adds `update_memory`, `list_entities`, `match_reasons` on recall, pagination, pin-via-importance, layer aliases, consolidate dry-run, `linksee-memory-stats` CLI, and a momentum-refresh fix. See [CHANGELOG](#changelog).
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
+[![mcp-registry](https://img.shields.io/badge/MCP-Official_Registry-6366f1)](https://registry.modelcontextprotocol.io/)
+[![glama-score](https://glama.ai/mcp/servers/michielinksee/linksee-memory/badges/score.svg)](https://glama.ai/mcp/servers/michielinksee/linksee-memory)
+
+🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code)
+
+---
+
+## 🎬 See it in action
+
+**Without linksee-memory** — Monday morning, new Claude session:
+
+```
+You:    We deployed last week but it crashed. How did we fix it?
+Claude: I don't have access to previous sessions. Can you describe
+        what happened and walk me through the problem?
+
+[30 minutes of log-spelunking and re-explanation]
+```
+
+**With linksee-memory** — Same question, different outcome:
+
+```
+You:    We deployed last week but it crashed. How did we fix it?
+Claude: Let me check my caveats...
+
+        🧠 [caveat] NextAuth sessions invalidate when JWT_SECRET
+           rotates — redeploy all affected projects in parallel.
+           (from session 2026-04-13, importance: 0.9)
+
+        Is this the deploy you're asking about? We hit it when
+        we rotated secrets mid-flow.
+
+You:    Yes, exactly. Let's not repeat that.
+```
+
+That single `caveat` memory is what separates "flat fact storage" from "the agent actually remembers the WHY". linksee-memory stores it across **six explicit layers** so retrieval stays explainable.
+
+---
+
+## 🧠 The 6-layer structure
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 🎯 goal           ← what the user is working toward         │
+├─────────────────────────────────────────────────────────────┤
+│ 🧭 context        ← why this, why now — constraints, people │
+├─────────────────────────────────────────────────────────────┤
+│ 💗 emotion        ← user tone signals (frustration, etc.)   │
+├─────────────────────────────────────────────────────────────┤
+│ 🛠  implementation ← how it was done (+ what failed)         │
+├─────────────────────────────────────────────────────────────┤
+│ ⚠️  caveat         ← "never do this again" · auto-protected │
+├─────────────────────────────────────────────────────────────┤
+│ 🌱 learning       ← patterns distilled from cold memories   │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+           Ranked recall via relevance × heat × momentum × importance
+                  Returns match_reasons explaining each hit
+```
+
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories get compressed into `learning` entries via `consolidate()`.
+
+---
 
 ## What it does
 
@@ -285,6 +349,76 @@ Run consolidate — it clusters old cold memories into compressed learning-layer
 consolidate({ scope: "all", min_age_days: 7 })
 ```
 Caveat and active-goal layers are always preserved. Consider scheduling a weekly run via cron / Task Scheduler.
+</details>
+
+## FAQ
+
+<details>
+<summary><strong>How is this different from Mem0 / Letta / Zep?</strong></summary>
+
+Three axes:
+1. **Local-first**: those tools require cloud accounts and send your data to their servers. linksee-memory runs entirely on your machine — one SQLite file, no network calls by default.
+2. **WHY-layered**: they store flat facts or knowledge-graph nodes. linksee-memory has 6 explicit layers (`goal`/`context`/`emotion`/`implementation`/`caveat`/`learning`) so retrieval returns structured reasoning, not just data.
+3. **File diff cache**: `read_smart` tool saves 86–99% of tokens on file re-reads via AST-aware chunking. None of the memory services do this — it's a feature usually shipped in IDEs.
+</details>
+
+<details>
+<summary><strong>Why not just use Claude's built-in auto-memory?</strong></summary>
+
+Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor or ChatGPT Desktop) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
+- Works across Claude Code, Cursor, ChatGPT Desktop (shared SQLite)
+- Structured 6-layer format makes recall explainable
+- Provides explicit forget/consolidate primitives rather than the agent guessing
+</details>
+
+<details>
+<summary><strong>Is 86% token savings real? Where does it come from?</strong></summary>
+
+Yes — see `tools/bench-read-smart.ts` in the repo. The `read_smart` tool:
+1. Hashes file content on first read, returns full content + chunk metadata (AST/heading/indent boundaries).
+2. On re-read with unchanged mtime+sha256, returns `~50 tokens` of "unchanged" confirmation instead of re-sending the file.
+3. On real edits, returns only the changed chunks as full content + unchanged chunks as metadata-only references.
+
+For a typical TypeScript file edit in an agentic loop, this cuts round-trip token costs by ~86%. On pure re-reads (user navigating back to a previously-read file), savings exceed 99%.
+</details>
+
+<details>
+<summary><strong>Does "local-first" mean no way to sync across my machines?</strong></summary>
+
+The default is no sync — the SQLite file lives at `~/.linksee-memory/memory.db` and stays there. If you want multi-machine sync, put that directory under Syncthing / iCloud Drive / Dropbox / Google Drive — it's a single file, so any file-sync tool works. (Avoid simultaneous edits from two machines while the MCP server is running on both; SQLite's WAL mode handles single-writer well but multi-writer conflicts can corrupt.)
+</details>
+
+<details>
+<summary><strong>What happens when the DB gets huge?</strong></summary>
+
+Two mechanisms:
+1. **Ebbinghaus forgetting**: cold low-importance memories decay naturally, eligible for auto-forget sweeps. `caveat` layer and memories with `importance ≥ 0.9` are always protected.
+2. **`consolidate()`**: compresses clusters of cold low-importance memories by entity into a single `learning`-layer summary, then deletes the originals. Run via `linksee-memory-consolidate` CLI (or schedule weekly).
+
+In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old DB I tested with 80K memories still recalls in <10ms.
+</details>
+
+<details>
+<summary><strong>Can I use this without Claude Code?</strong></summary>
+
+Yes — any MCP-compatible client works:
+- **Claude Code**: `claude mcp add -s user linksee -- npx -y linksee-memory`
+- **Claude Desktop**: add to `claude_desktop_config.json` (see [onboarding on the LP](https://linksee-site.vercel.app))
+- **Cursor**: add to MCP settings in Cursor
+- **ChatGPT Desktop**: same pattern once MCP support ships
+- **Custom agent**: the MCP stdio protocol is documented at modelcontextprotocol.io
+</details>
+
+<details>
+<summary><strong>What telemetry does it send?</strong></summary>
+
+**By default: zero network calls, zero telemetry.** There's an optional Level-1 telemetry mode you can enable that sends anonymized aggregate metrics (tool call counts, error rates, latency percentiles — never memory content, never file paths, never queries). The exact payload schema is documented in the [Telemetry section](#telemetry-opt-in-off-by-default) and you see every byte before opting in.
+</details>
+
+<details>
+<summary><strong>How do I verify it's actually working?</strong></summary>
+
+After install, in a new Claude session ask: *"Can you remember that I prefer TypeScript over JavaScript?"* Claude should confirm it called `mcp__linksee__remember` and stored this. Then in a **different session** ask: *"What languages do I prefer?"* It should recall via `mcp__linksee__recall` and return the preference with `match_reasons` showing why.
 </details>
 
 ## Support
