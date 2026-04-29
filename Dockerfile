@@ -46,10 +46,15 @@ RUN mkdir -p /data/linksee-memory \
 
 USER node
 
-# Smoke-check: fail the container early if node can't even load the entrypoint.
-# (Glama's introspection will still send MCP messages; this is just an extra guard.)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('./dist/mcp/server.js')" || exit 1
+# NOTE: no HEALTHCHECK on purpose.
+# This is an MCP server that speaks JSON-RPC over stdio — there's no port
+# to ping and no idle state to verify. The earlier HEALTHCHECK using
+# `require('./dist/mcp/server.js')` failed on every run because the
+# package is ESM-only ("type":"module" in package.json) and `require()`
+# of an ESM module throws ERR_REQUIRE_ESM on Node 20. Three consecutive
+# healthcheck failures marked the container unhealthy and broke Glama's
+# introspection runs. The MCP handshake itself (initialize → tools/list)
+# is the only meaningful liveness check; Glama performs it directly.
 
 # stdio server. Glama's check sends `initialize` + `tools/list` via stdin.
 CMD ["node", "dist/mcp/server.js"]
