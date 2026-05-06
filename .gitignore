@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 
+# Lockfile policy: pnpm-lock.yaml is canonical (Glama uses pnpm).
+# package-lock.json is intentionally ignored to avoid drift between
+# npm/pnpm resolutions of the `overrides` field.
+package-lock.json
+
 # Build output (shipped via package.json "files")
 dist/
 
