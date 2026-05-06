@@ -1,0 +1,73 @@
+name: CI
+
+# Build, security audit, and MCP handshake check for linksee-memory.
+# Status visible at https://github.com/michielinksee/linksee-memory/actions
+# Glama uses CI status as a maintenance signal.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build + handshake test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Security audit (moderate+)
+        run: pnpm audit --audit-level moderate
+
+      - name: Build
+        run: pnpm run build
+
+      - name: MCP initialize + tools/list handshake
+        run: |
+          set -euo pipefail
+          OUTPUT=$(printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1.0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | timeout 15 node dist/mcp/server.js)
+
+          echo "--- Server output ---"
+          echo "$OUTPUT"
+          echo "---------------------"
+
+          # Verify initialize response
+          if ! echo "$OUTPUT" | grep -q '"protocolVersion":"2024-11-05"'; then
+            echo "::error::initialize response missing or wrong protocol version"
+            exit 1
+          fi
+
+          # Verify tools/list response (8 tools expected)
+          if ! echo "$OUTPUT" | grep -q '"name":"recall"'; then
+            echo "::error::tools/list missing 'recall' tool"
+            exit 1
+          fi
+
+          if ! echo "$OUTPUT" | grep -q '"name":"remember"'; then
+            echo "::error::tools/list missing 'remember' tool"
+            exit 1
+          fi
+
+          echo "✓ MCP handshake passed"
