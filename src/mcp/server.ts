@@ -5,7 +5,15 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { decideForgetting } from '../lib/forgetting.js';
@@ -13,15 +21,29 @@ import { refreshMomentumForEntity } from '../lib/momentum.js';
 import { consolidate as runConsolidate } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
 import { handleReadSmart as handleReadSmartImpl } from './read-smart.js';
+import { STATIC_RESOURCES, RESOURCE_TEMPLATES, readResource } from './resources.js';
+import { PROMPTS, getPrompt } from './prompts.js';
+import { fetchRoots, isInsideRoots } from './roots.js';
+import { sampleConsolidation } from './sampling.js';
+import { confirmForget } from './elicitation.js';
 
-const SERVER_VERSION = '0.1.1';
+const SERVER_VERSION = '0.3.0';
 
 const db = openDb();
 runMigrations(db);
 
 const server = new Server(
   { name: 'linksee-memory', version: SERVER_VERSION },
-  { capabilities: { tools: {} } }
+  {
+    capabilities: {
+      tools: {},
+      resources: { subscribe: false, listChanged: false },
+      prompts: { listChanged: false },
+      // Sampling, Roots, Elicitation are CLIENT capabilities the server consumes.
+      // We don't declare them under "capabilities" — we just call them via server.request
+      // and gracefully degrade when the client doesn't support them.
+    },
+  }
 );
 
 // ============================================================
@@ -791,6 +813,156 @@ function handleReadSmart(args: any): string {
 }
 
 // ============================================================
+// v0.3.0 — five-blocks helpers (sampling / roots / elicitation in handlers)
+// ============================================================
+
+async function handleRecallFileWithRoots(args: any): Promise<string> {
+  const baseJson = handleRecallFile(args);
+  if (!args?.scope_to_roots) return baseJson;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(baseJson);
+  } catch {
+    return baseJson;
+  }
+  if (!parsed?.ok || !Array.isArray(parsed.paths_matched)) return baseJson;
+  const roots = await fetchRoots(server);
+  if (roots.length === 0) {
+    parsed.roots_filter = { applied: false, reason: 'client provided no roots' };
+    return JSON.stringify(parsed);
+  }
+  const filtered = parsed.paths_matched.filter((p: any) => isInsideRoots(p.file_path, roots));
+  parsed.roots_filter = { applied: true, root_count: roots.length, before: parsed.paths_matched.length, after: filtered.length };
+  parsed.paths_matched = filtered;
+  return JSON.stringify(parsed);
+}
+
+async function handleConsolidateWithSampling(args: any): Promise<string> {
+  // Sampling only applies on a real run (not dry-run) and only when explicitly opted in.
+  if (!args?.use_llm || args?.dry_run) return handleConsolidate(args);
+
+  // 1. Snapshot all candidate memories BEFORE consolidate runs so we can recover
+  //    their content (the originals are deleted by consolidate).
+  const ageCutoff = Math.floor(Date.now() / 1000) - (typeof args?.min_age_days === 'number' ? args.min_age_days : 7) * 86400;
+  const snapshot = new Map<number, { id: number; content: string; entity_name: string }>();
+  const candidateRows = db
+    .prepare(
+      `SELECT m.id, m.content, e.name as entity_name
+       FROM memories m JOIN entities e ON e.id = m.entity_id
+       WHERE m.protected = 0
+         AND m.layer IN ('context','emotion','implementation')
+         AND m.created_at <= ?`
+    )
+    .all(ageCutoff) as any[];
+  for (const r of candidateRows) snapshot.set(r.id, r);
+
+  // 2. Run the normal heuristic consolidate (creates learning entries, deletes source).
+  const baseJson = handleConsolidate(args);
+  let parsed: any;
+  try {
+    parsed = JSON.parse(baseJson);
+  } catch {
+    return baseJson;
+  }
+  if (!parsed?.ok || !Array.isArray(parsed.learningIdsCreated)) {
+    parsed = parsed ?? {};
+    parsed.sampling = { applied: false, reason: 'consolidate returned no learning entries' };
+    return JSON.stringify(parsed);
+  }
+
+  // 3. For each new learning entry, look up its replaced_ids from the audit table,
+  //    gather source contents from the snapshot, and request a sampled summary.
+  let upgraded = 0;
+  let declined = 0;
+  const declineReasons: string[] = [];
+  for (const learningId of parsed.learningIdsCreated as number[]) {
+    const audit = db.prepare('SELECT replaced_ids FROM consolidations WHERE learning_id = ?').get(learningId) as any;
+    if (!audit) {
+      declined++;
+      continue;
+    }
+    let replaced: number[];
+    try {
+      replaced = JSON.parse(audit.replaced_ids);
+    } catch {
+      declined++;
+      continue;
+    }
+    if (!Array.isArray(replaced) || replaced.length < 2) {
+      declined++;
+      continue;
+    }
+    const sources = replaced
+      .map((id) => snapshot.get(id))
+      .filter((s): s is NonNullable<typeof s> => Boolean(s));
+    if (sources.length < 2) {
+      declined++;
+      continue;
+    }
+    const entityName = sources[0]?.entity_name ?? '<entity>';
+    const result = await sampleConsolidation(server, sources.map((s) => s.content), entityName);
+    if (result.ok && result.text) {
+      db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(result.text.trim(), learningId);
+      upgraded++;
+    } else {
+      declined++;
+      if (result.reason && declineReasons.length < 3) declineReasons.push(result.reason);
+    }
+  }
+  parsed.sampling = {
+    applied: true,
+    upgraded,
+    declined,
+    ...(declineReasons.length ? { decline_reasons: declineReasons } : {}),
+  };
+  return JSON.stringify(parsed);
+}
+
+async function handleForgetInteractive(args: any): Promise<string> {
+  if (!args?.interactive || !args?.memory_id) return handleForget(args);
+  const id = Number(args.memory_id);
+  const row = db
+    .prepare(`SELECT m.id, m.layer, m.content, m.importance, e.name as entity FROM memories m JOIN entities e ON e.id = m.entity_id WHERE m.id = ?`)
+    .get(id) as any;
+  if (!row) return JSON.stringify({ ok: false, error: `memory ${id} not found` });
+  const ok = await confirmForget(server, {
+    id: row.id,
+    entity: row.entity,
+    layer: row.layer,
+    importance: row.importance,
+    preview: row.content,
+  });
+  if (!ok) return JSON.stringify({ ok: false, declined: true, memory_id: id, reason: 'user declined elicitation' });
+  return handleForget({ memory_id: id });
+}
+
+// Append new optional flags to existing tools (backward-compatible).
+const RECALL_FILE_TOOL = TOOLS.find((t) => t.name === 'recall_file');
+if (RECALL_FILE_TOOL && (RECALL_FILE_TOOL.inputSchema as any).properties) {
+  (RECALL_FILE_TOOL.inputSchema as any).properties.scope_to_roots = {
+    type: 'boolean',
+    default: false,
+    description: 'If true, filter results to files inside the client-provided roots (Roots block). Skip silently when client provides no roots.',
+  };
+}
+const CONSOLIDATE_TOOL = TOOLS.find((t) => t.name === 'consolidate');
+if (CONSOLIDATE_TOOL && (CONSOLIDATE_TOOL.inputSchema as any).properties) {
+  (CONSOLIDATE_TOOL.inputSchema as any).properties.use_llm = {
+    type: 'boolean',
+    default: false,
+    description: 'If true, request the client LLM (Sampling block) to write the consolidated summary instead of the heuristic. Falls back gracefully if the client refuses.',
+  };
+}
+const FORGET_TOOL = TOOLS.find((t) => t.name === 'forget');
+if (FORGET_TOOL && (FORGET_TOOL.inputSchema as any).properties) {
+  (FORGET_TOOL.inputSchema as any).properties.interactive = {
+    type: 'boolean',
+    default: false,
+    description: 'If true, ask the user to confirm via Elicitation before deleting. Only applies when memory_id is set.',
+  };
+}
+
+// ============================================================
 // MCP wiring
 // ============================================================
 
@@ -805,9 +977,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'recall': text = handleRecall(args); break;
       case 'update_memory': text = handleUpdateMemory(args); break;
       case 'list_entities': text = handleListEntities(args); break;
-      case 'forget': text = handleForget(args); break;
-      case 'consolidate': text = handleConsolidate(args); break;
-      case 'recall_file': text = handleRecallFile(args); break;
+      case 'forget': text = await handleForgetInteractive(args); break;
+      case 'consolidate': text = await handleConsolidateWithSampling(args); break;
+      case 'recall_file': text = await handleRecallFileWithRoots(args); break;
       case 'read_smart': text = handleReadSmart(args); break;
       default: throw new Error(`Unknown tool: ${name}`);
     }
@@ -818,6 +990,26 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       isError: true,
     };
   }
+});
+
+// ============================================================
+// Resources block
+// ============================================================
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: STATIC_RESOURCES }));
+server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: RESOURCE_TEMPLATES }));
+server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+  const { uri } = req.params;
+  const result = readResource(db, uri);
+  return { contents: [result] };
+});
+
+// ============================================================
+// Prompts block
+// ============================================================
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPTS }));
+server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+  const { name, arguments: promptArgs } = req.params;
+  return getPrompt(name, promptArgs as Record<string, string> | undefined);
 });
 
 const transport = new StdioServerTransport();
