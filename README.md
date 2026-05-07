@@ -2,7 +2,7 @@
 
 > Local-first agent memory MCP. A cross-agent brain for Claude Code, Cursor, and ChatGPT Desktop — with a token-saving file diff cache that nobody else does.
 >
-> **v0.2.0** makes the package English-first for global launch: the bundled auto-invocation skill is now bilingual (EN + JP), session-extractor patterns cover common English keywords (`let's go`, `pivot`, `doesn't work`, `same error again`, etc.), and the install CLI shows test examples in both languages. No API changes. See [CHANGELOG](#changelog).
+> **v0.3.0** ships the **Five Blocks**: Tools + Resources + Prompts + Sampling + Roots, plus the newer **Elicitation** primitive. Most public MCP servers expose only Tools; v0.3.0 moves linksee-memory into the differentiated tier. Backward compatible — all 8 v0.2.x tools keep their signatures. See [CHANGELOG.md](./CHANGELOG.md).
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -147,18 +147,29 @@ Add to `~/.claude/settings.json` to record every Claude Code session to your loc
 
 Each turn end takes ~100 ms. Failures are silent (Claude Code never blocks). Logs at `~/.linksee-memory/hook.log`.
 
+## v0.3.0 — Five Blocks at a glance
+
+| MCP Block | Surface |
+|---|---|
+| **Tools** | 8 tools (unchanged signatures since v0.2). |
+| **Resources** | 4 static URIs (`memory://stats`, `memory://hot`, `memory://recent`, `memory://caveats`) + 3 templates (`memory://entity/{name}`, `memory://layer/{layer}`, `memory://memory/{id}`). Browseable via `@-mention` in clients that support it. |
+| **Prompts** | 5 reusable templates: `summarize-session`, `extract-caveats`, `weekly-consolidation`, `recall-and-write`, `entity-handoff`. |
+| **Sampling** *(client opt-in)* | `consolidate{use_llm:true}` asks the client LLM to rewrite consolidated cluster summaries into prose. Falls back to the heuristic when the client declines. |
+| **Roots** *(client opt-in)* | `recall_file{scope_to_roots:true}` filters path matches to files inside any client-provided working root. |
+| **Elicitation** *(client opt-in, newer primitive)* | `forget{interactive:true, memory_id:N}` asks the user to confirm via the client UI before deleting. |
+
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `remember` | Store memory in 1 of 6 layers for an entity. Rejects pasted assistant output / CI logs unless `force=true`. Set `importance=1.0` to pin (survives auto-forget). |
 | `recall` | FTS5 + heat × momentum × importance composite ranking with `match_reasons` explaining WHY each row matched. Supports pagination (`offset`/`has_more`), `band` filter, layer aliases (`decisions`/`warnings`/`how`/...), and `mark_accessed=false` for passive previews. |
-| `recall_file` | Complete edit history of a file across all sessions, with per-edit user-intent context. |
+| `recall_file` | Complete edit history of a file across all sessions, with per-edit user-intent context. **v0.3.0** `scope_to_roots` flag filters by client roots. |
 | `update_memory` | **v0.1.0** Atomic edit of an existing memory. Preserves `memory_id` (session_file_edits links stay intact). Prefer over forget+remember. |
 | `list_entities` | **v0.1.0** List what the memory knows about — cheapest "what do I know?" primitive. Filter by `kind`/`min_memories`; returns layer breakdown per entity. |
 | `read_smart` | Diff-only file read. Returns full content on first read, ~50 tokens on unchanged re-reads, only changed chunks on real edits. |
-| `forget` | Explicit delete OR auto-sweep based on `forgettingRisk`. Pinned (`importance>=1.0`) and caveat-layer memories are always preserved. |
-| `consolidate` | Sleep-mode compression: cluster cold low-importance memories → protected learning-layer summary. Supports `dry_run` preview. |
+| `forget` | Explicit delete OR auto-sweep based on `forgettingRisk`. Pinned (`importance>=1.0`) and caveat-layer memories are always preserved. **v0.3.0** `interactive` flag asks the user via Elicitation before deleting a specific memory_id. |
+| `consolidate` | Sleep-mode compression: cluster cold low-importance memories → protected learning-layer summary. Supports `dry_run` preview. **v0.3.0** `use_llm` flag asks the client LLM (Sampling) to rewrite cluster summaries into prose. |
 
 ### CLI utilities
 
