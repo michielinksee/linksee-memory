@@ -84,14 +84,14 @@ const SELECT_MEMORY_BASE = `
   FROM memories m JOIN entities e ON e.id = m.entity_id
 `;
 
-export function readResource(db: Database.Database, uri: string): { uri: string; mimeType: string; text: string } {
+export function readResource(db: Database.Database, uri: string, userId = 'default'): { uri: string; mimeType: string; text: string } {
   // Static endpoints
   if (uri === 'memory://stats') {
-    const entityCount = (db.prepare('SELECT COUNT(*) as c FROM entities').get() as any).c;
-    const memCount = (db.prepare('SELECT COUNT(*) as c FROM memories').get() as any).c;
-    const byLayer = db.prepare('SELECT layer, COUNT(*) as c FROM memories GROUP BY layer').all() as any[];
-    const byKind = db.prepare('SELECT kind, COUNT(*) as c FROM entities GROUP BY kind').all() as any[];
-    const pinned = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE importance >= 0.9 OR protected = 1').get() as any).c;
+    const entityCount = (db.prepare('SELECT COUNT(*) as c FROM entities WHERE user_id = ?').get(userId) as any).c;
+    const memCount = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE user_id = ?').get(userId) as any).c;
+    const byLayer = db.prepare('SELECT layer, COUNT(*) as c FROM memories WHERE user_id = ? GROUP BY layer').all(userId) as any[];
+    const byKind = db.prepare('SELECT kind, COUNT(*) as c FROM entities WHERE user_id = ? GROUP BY kind').all(userId) as any[];
+    const pinned = (db.prepare('SELECT COUNT(*) as c FROM memories WHERE user_id = ? AND (importance >= 0.9 OR protected = 1)').get(userId) as any).c;
     return {
       uri,
       mimeType: 'application/json',
@@ -115,11 +115,11 @@ export function readResource(db: Database.Database, uri: string): { uri: string;
     const rows = db
       .prepare(
         `${SELECT_MEMORY_BASE}
-         WHERE m.last_accessed_at IS NOT NULL
+         WHERE m.last_accessed_at IS NOT NULL AND m.user_id = ?
          ORDER BY m.access_count DESC, m.last_accessed_at DESC
          LIMIT 50`
       )
-      .all() as any[];
+      .all(userId) as any[];
     return {
       uri,
       mimeType: 'application/json',
@@ -132,11 +132,11 @@ export function readResource(db: Database.Database, uri: string): { uri: string;
   }
   if (uri === 'memory://recent') {
     const cutoff = Math.floor(Date.now() / 1000) - 7 * 24 * 3600;
-    const rows = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.last_accessed_at >= ? ORDER BY m.last_accessed_at DESC LIMIT 50`).all(cutoff) as any[];
+    const rows = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.last_accessed_at >= ? AND m.user_id = ? ORDER BY m.last_accessed_at DESC LIMIT 50`).all(cutoff, userId) as any[];
     return { uri, mimeType: 'application/json', text: JSON.stringify({ count: rows.length, memories: rows.map(fmtMemory) }, null, 2) };
   }
   if (uri === 'memory://caveats') {
-    const rows = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.layer = 'caveat' ORDER BY m.importance DESC, m.created_at DESC`).all() as any[];
+    const rows = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.layer = 'caveat' AND m.user_id = ? ORDER BY m.importance DESC, m.created_at DESC`).all(userId) as any[];
     return { uri, mimeType: 'application/json', text: JSON.stringify({ count: rows.length, memories: rows.map(fmtMemory) }, null, 2) };
   }
 
@@ -145,8 +145,8 @@ export function readResource(db: Database.Database, uri: string): { uri: string;
   if (entityMatch) {
     const name = decodeURIComponent(entityMatch[1]);
     const rows = db
-      .prepare(`${SELECT_MEMORY_BASE} WHERE LOWER(e.name) = LOWER(?) ORDER BY m.importance DESC, m.created_at DESC`)
-      .all(name) as any[];
+      .prepare(`${SELECT_MEMORY_BASE} WHERE LOWER(e.name) = LOWER(?) AND m.user_id = ? ORDER BY m.importance DESC, m.created_at DESC`)
+      .all(name, userId) as any[];
     return {
       uri,
       mimeType: 'application/json',
@@ -160,8 +160,8 @@ export function readResource(db: Database.Database, uri: string): { uri: string;
       throw new Error(`unknown layer "${layer}". Known: goal, context, emotion, implementation, caveat, learning`);
     }
     const rows = db
-      .prepare(`${SELECT_MEMORY_BASE} WHERE m.layer = ? ORDER BY m.importance DESC, m.created_at DESC LIMIT 200`)
-      .all(layer) as any[];
+      .prepare(`${SELECT_MEMORY_BASE} WHERE m.layer = ? AND m.user_id = ? ORDER BY m.importance DESC, m.created_at DESC LIMIT 200`)
+      .all(layer, userId) as any[];
     return {
       uri,
       mimeType: 'application/json',
@@ -171,7 +171,7 @@ export function readResource(db: Database.Database, uri: string): { uri: string;
   const idMatch = uri.match(/^memory:\/\/memory\/(\d+)$/);
   if (idMatch) {
     const id = Number(idMatch[1]);
-    const row = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.id = ?`).get(id) as any;
+    const row = db.prepare(`${SELECT_MEMORY_BASE} WHERE m.id = ? AND m.user_id = ?`).get(id, userId) as any;
     if (!row) throw new Error(`memory id ${id} not found`);
     return { uri, mimeType: 'application/json', text: JSON.stringify(fmtMemory(row), null, 2) };
   }

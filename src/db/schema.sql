@@ -1,16 +1,17 @@
--- linksee-memory schema v0.0.2
+-- linksee-memory schema v0.0.3
 -- Single-file SQLite store for cross-agent structured memory.
 -- Layers: 1=facts (entities), 2=associations (edges), 3=patterns (meanings), 4=events (time-series), 5=file-state (diff cache).
--- v2 adds: FTS5 full-text search, consolidations audit, momentum cache on entities.
+-- v3 adds: multi-user support via user_id column on all user-data tables.
 
 -- ============================================================
 -- Layer 1: Facts — entities (people / companies / projects / concepts)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS entities (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         TEXT NOT NULL DEFAULT 'default',
   kind            TEXT NOT NULL CHECK (kind IN ('person', 'company', 'project', 'concept', 'file', 'other')),
   name            TEXT NOT NULL,
-  canonical_key   TEXT UNIQUE,
+  canonical_key   TEXT,
   attributes      TEXT,
   momentum_score  REAL NOT NULL DEFAULT 0.0,      -- 0-10 cached; refreshed on event insert
   momentum_at     INTEGER,                         -- when momentum was last computed
@@ -19,13 +20,17 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
-CREATE INDEX IF NOT EXISTS idx_entities_key  ON entities(canonical_key);
+CREATE INDEX IF NOT EXISTS idx_entities_user ON entities(user_id);
+-- Canonical key is unique per user
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical_key ON entities(user_id, canonical_key)
+  WHERE canonical_key IS NOT NULL;
 
 -- ============================================================
 -- Layer 3: Meanings — 6-layer structured memory per entity
 -- ============================================================
 CREATE TABLE IF NOT EXISTS memories (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         TEXT NOT NULL DEFAULT 'default',
   entity_id       INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   layer           TEXT NOT NULL CHECK (layer IN (
                     'goal', 'context', 'emotion', 'implementation', 'caveat', 'learning'
@@ -43,6 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_entity     ON memories(entity_id);
 CREATE INDEX IF NOT EXISTS idx_memories_layer      ON memories(layer);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_protected  ON memories(protected);
+CREATE INDEX IF NOT EXISTS idx_memories_user       ON memories(user_id);
 
 CREATE TRIGGER IF NOT EXISTS trg_protect_caveat
   AFTER INSERT ON memories
@@ -82,6 +88,7 @@ CREATE TRIGGER IF NOT EXISTS trg_memories_fts_au
 
 -- ============================================================
 -- Layer 2: Associations — graph edges between entities
+-- (Scoped implicitly via entity FK — no separate user_id needed)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS edges (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_rel  ON edges(relation);
 -- ============================================================
 CREATE TABLE IF NOT EXISTS events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       TEXT NOT NULL DEFAULT 'default',
   entity_id     INTEGER REFERENCES entities(id) ON DELETE CASCADE,
   kind          TEXT NOT NULL,
   payload       TEXT,
@@ -112,25 +120,32 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_entity   ON events(entity_id);
 CREATE INDEX IF NOT EXISTS idx_events_occurred ON events(occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind     ON events(kind);
+CREATE INDEX IF NOT EXISTS idx_events_user     ON events(user_id);
 
 -- ============================================================
 -- Layer 5: File snapshots — diff cache for read_smart (Day 3)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS file_snapshots (
-  path           TEXT PRIMARY KEY,
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id        TEXT NOT NULL DEFAULT 'default',
+  path           TEXT NOT NULL,
   content_hash   TEXT NOT NULL,
   mtime          INTEGER NOT NULL,
   size_bytes     INTEGER,
   chunks         TEXT,
   last_read_at   INTEGER NOT NULL DEFAULT (unixepoch()),
-  read_count     INTEGER NOT NULL DEFAULT 1
+  read_count     INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(user_id, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_mtime ON file_snapshots(mtime);
+CREATE INDEX IF NOT EXISTS idx_file_user  ON file_snapshots(user_id);
 
+-- file_facts: no FK to file_snapshots since path is no longer PK; query by (user_id, file_path)
 CREATE TABLE IF NOT EXISTS file_facts (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_path       TEXT NOT NULL REFERENCES file_snapshots(path) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL DEFAULT 'default',
+  file_path       TEXT NOT NULL,
   chunk_hash      TEXT,
   fact            TEXT NOT NULL,
   layer           TEXT CHECK (layer IN ('goal', 'context', 'emotion', 'implementation', 'caveat', 'learning')),
@@ -138,25 +153,27 @@ CREATE TABLE IF NOT EXISTS file_facts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_facts_path ON file_facts(file_path);
+CREATE INDEX IF NOT EXISTS idx_file_facts_user ON file_facts(user_id, file_path);
 
 -- ============================================================
 -- Sessions — track which agent / conversation produced memories
 -- ============================================================
 CREATE TABLE IF NOT EXISTS sessions (
   id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL DEFAULT 'default',
   agent_kind    TEXT,
   started_at    INTEGER NOT NULL DEFAULT (unixepoch()),
   last_seen_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
 -- ============================================================
 -- Session file edits (v3) — conversation↔file linkage.
--- Each row: "during session S, at turn T, memory M mentions editing file F".
--- This is the table that breaks the Mem0 "flat metatag" wall:
--- memories describe WHY, file_edits tie the WHY to concrete filesystem changes.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS session_file_edits (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         TEXT NOT NULL DEFAULT 'default',
   session_id      TEXT NOT NULL,                    -- Claude Code session uuid
   memory_id       INTEGER REFERENCES memories(id) ON DELETE SET NULL,
   file_path       TEXT NOT NULL,
@@ -170,12 +187,14 @@ CREATE INDEX IF NOT EXISTS idx_sfe_session ON session_file_edits(session_id);
 CREATE INDEX IF NOT EXISTS idx_sfe_file    ON session_file_edits(file_path);
 CREATE INDEX IF NOT EXISTS idx_sfe_memory  ON session_file_edits(memory_id);
 CREATE INDEX IF NOT EXISTS idx_sfe_when    ON session_file_edits(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sfe_user    ON session_file_edits(user_id);
 
 -- ============================================================
 -- Consolidations audit (Day 2) — trail of what got compressed into what
 -- ============================================================
 CREATE TABLE IF NOT EXISTS consolidations (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id         TEXT NOT NULL DEFAULT 'default',
   learning_id     INTEGER REFERENCES memories(id) ON DELETE SET NULL,
   replaced_ids    TEXT NOT NULL,         -- JSON array of deleted memory ids
   replaced_count  INTEGER NOT NULL,
@@ -185,6 +204,7 @@ CREATE TABLE IF NOT EXISTS consolidations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_consolidations_entity ON consolidations(entity_id);
+CREATE INDEX IF NOT EXISTS idx_consolidations_user   ON consolidations(user_id);
 
 -- ============================================================
 -- Meta — schema version tracking
@@ -194,6 +214,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '4');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '5');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '4' WHERE key = 'schema_version' AND value IN ('1', '2', '3');
+UPDATE meta SET value = '5' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4');

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { createLinkseeServer } from './create-server.js';
+import { authEnabled, resolveUser } from '../lib/users.js';
 
 const PORT = Number(process.env.LINKSEE_HTTP_PORT ?? 8000);
 
@@ -16,6 +17,7 @@ runMigrations(db);
 
 interface Session {
   transport: StreamableHTTPServerTransport;
+  userId: string;
 }
 
 const sessions = new Map<string, Session>();
@@ -50,6 +52,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // Resolve user_id from Bearer token (when auth is enabled)
+    let userId = 'default';
+    if (authEnabled) {
+      const authHeader = req.headers['authorization'] ?? '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const resolved = resolveUser(token);
+      if (!resolved) {
+        send(res, 401, { error: 'Unauthorized: valid Authorization: Bearer <key> header required' });
+        return;
+      }
+      userId = resolved;
+    }
+
     if (req.method === 'POST') {
       const rawBody = await readBody(req);
       const contentType = req.headers['content-type'] ?? '';
@@ -75,7 +90,7 @@ const server = http.createServer(async (req, res) => {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
-          sessions.set(sid, { transport });
+          sessions.set(sid, { transport, userId });
         },
       });
 
@@ -84,7 +99,7 @@ const server = http.createServer(async (req, res) => {
         if (sid) sessions.delete(sid);
       };
 
-      const mcpServer = createLinkseeServer(db);
+      const mcpServer = createLinkseeServer(db, userId);
       await mcpServer.connect(transport);
       await transport.handleRequest(req, res, parsedBody);
       return;

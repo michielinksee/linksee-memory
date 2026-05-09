@@ -53,6 +53,57 @@ export function runMigrations(db: Database.Database): void {
     db.exec(`INSERT INTO memories_fts(rowid, content) SELECT id, content FROM memories;`);
   }
 
+  // v4 → v5: add user_id to all user-data tables for multi-user support.
+  // file_snapshots requires a full table rebuild (PK changes from path → id + UNIQUE(user_id,path)).
+  // file_facts loses its FK to file_snapshots(path) since path is no longer unique by itself.
+  if (currentVersion > 0 && currentVersion < 5) {
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      -- Simple ADD COLUMN migrations (existing rows get user_id = 'default')
+      ALTER TABLE entities          ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE memories          ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE events            ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE sessions          ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE session_file_edits ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE consolidations    ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+      ALTER TABLE file_facts        ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default';
+
+      -- Rebuild file_snapshots: path TEXT PRIMARY KEY → id AUTOINCREMENT + UNIQUE(user_id, path)
+      CREATE TABLE file_snapshots_v5 (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id        TEXT NOT NULL DEFAULT 'default',
+        path           TEXT NOT NULL,
+        content_hash   TEXT NOT NULL,
+        mtime          INTEGER NOT NULL,
+        size_bytes     INTEGER,
+        chunks         TEXT,
+        last_read_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+        read_count     INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(user_id, path)
+      );
+      INSERT INTO file_snapshots_v5(user_id, path, content_hash, mtime, size_bytes, chunks, last_read_at, read_count)
+        SELECT 'default', path, content_hash, mtime, size_bytes, chunks, last_read_at, read_count
+        FROM file_snapshots;
+      DROP TABLE file_snapshots;
+      ALTER TABLE file_snapshots_v5 RENAME TO file_snapshots;
+
+      -- Indexes for new user_id columns
+      CREATE INDEX IF NOT EXISTS idx_entities_user      ON entities(user_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical_key ON entities(user_id, canonical_key)
+        WHERE canonical_key IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_memories_user      ON memories(user_id);
+      CREATE INDEX IF NOT EXISTS idx_events_user        ON events(user_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_user      ON sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_sfe_user           ON session_file_edits(user_id);
+      CREATE INDEX IF NOT EXISTS idx_consolidations_user ON consolidations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_file_facts_user    ON file_facts(user_id, file_path);
+      CREATE INDEX IF NOT EXISTS idx_file_user          ON file_snapshots(user_id);
+
+      UPDATE meta SET value = '5' WHERE key = 'schema_version';
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+
   // v0.1.1 data migration: pin threshold lowered from 1.0 to 0.9.
   //
   // Before v0.1.1, `remember()` only set `protected = 1` for memories

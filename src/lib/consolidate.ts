@@ -42,7 +42,8 @@ const MIN_CLUSTER_SIZE = 2;
 
 export function consolidate(
   db: Database.Database,
-  opts: { scope?: 'all' | 'session'; min_age_days?: number } = {}
+  opts: { scope?: 'all' | 'session'; min_age_days?: number } = {},
+  userId = 'default'
 ): ConsolidateResult {
   const now = Math.floor(Date.now() / 1000);
   const minAgeDays = opts.min_age_days ?? DEFAULT_MIN_AGE_DAYS;
@@ -63,10 +64,11 @@ export function consolidate(
       WHERE m.protected = 0
         AND m.layer IN (${layerPlaceholders})
         AND m.created_at <= ?
+        AND m.user_id = ?
       ORDER BY m.entity_id, m.layer, m.created_at
       `
     )
-    .all(...CLUSTER_LAYERS, ageCutoff) as Candidate[];
+    .all(...CLUSTER_LAYERS, ageCutoff, userId) as Candidate[];
 
   // Filter to cold-heat memories
   const cold = rows.filter((r) => {
@@ -99,16 +101,16 @@ export function consolidate(
   };
 
   const insertLearning = db.prepare(
-    `INSERT INTO memories (entity_id, layer, content, importance, protected, source)
-     VALUES (?, 'learning', ?, ?, 1, ?)`
+    `INSERT INTO memories (entity_id, layer, content, importance, protected, source, user_id)
+     VALUES (?, 'learning', ?, ?, 1, ?, ?)`
   );
   const deleteMemory = db.prepare('DELETE FROM memories WHERE id = ?');
   const insertAudit = db.prepare(
-    `INSERT INTO consolidations (learning_id, replaced_ids, replaced_count, entity_id, original_layer)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO consolidations (learning_id, replaced_ids, replaced_count, entity_id, original_layer, user_id)
+     VALUES (?, ?, ?, ?, ?, ?)`
   );
   const insertEvent = db.prepare(
-    'INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)'
+    'INSERT INTO events (entity_id, kind, payload, user_id) VALUES (?, ?, ?, ?)'
   );
 
   const tx = db.transaction(() => {
@@ -150,7 +152,8 @@ export function consolidate(
         entityId,
         JSON.stringify(summary, null, 2),
         learningImportance,
-        sourceMeta
+        sourceMeta,
+        userId
       );
       const learningId = Number(ins.lastInsertRowid);
       result.learningIdsCreated.push(learningId);
@@ -160,11 +163,12 @@ export function consolidate(
         JSON.stringify(cluster.map((c) => c.id)),
         cluster.length,
         entityId,
-        layer
+        layer,
+        userId
       );
 
       for (const c of cluster) deleteMemory.run(c.id);
-      insertEvent.run(entityId, 'memory_consolidated', JSON.stringify({ learning_id: learningId, count: cluster.length, layer }));
+      insertEvent.run(entityId, 'memory_consolidated', JSON.stringify({ learning_id: learningId, count: cluster.length, layer }), userId);
 
       result.clustersCompressed++;
       result.memoriesReplaced += cluster.length;
@@ -174,8 +178,8 @@ export function consolidate(
 
   // Post-consolidate: forget-sweep remaining non-clustered cold memories
   const remaining = db
-    .prepare('SELECT id, layer, importance, access_count, last_accessed_at, protected FROM memories WHERE protected = 0')
-    .all() as any[];
+    .prepare('SELECT id, layer, importance, access_count, last_accessed_at, protected FROM memories WHERE protected = 0 AND user_id = ?')
+    .all(userId) as any[];
 
   const toDrop: number[] = [];
   for (const r of remaining) {

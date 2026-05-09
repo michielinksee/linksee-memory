@@ -8,7 +8,8 @@ import { createLinkseeServer } from './create-server.js';
 
 const db = openDb();
 runMigrations(db);
-const server = createLinkseeServer(db);
+const userId = process.env['LINKSEE_USER_ID'] ?? 'default';
+const server = createLinkseeServer(db, userId);
 const transport = new StdioServerTransport();
 await server.connect(transport);
 process.stderr.write('[linksee-memory] MCP server ready on stdio\n');

@@ -37,9 +37,9 @@ function toMeta(c: Chunk): StoredChunkMeta {
 
 export function handleReadSmart(
   db: Database.Database,
-  args: { path: string; force?: boolean }
+  args: { path: string; force?: boolean; userId?: string }
 ): string {
-  const { path, force = false } = args;
+  const { path, force = false, userId = 'default' } = args;
 
   let stat;
   try {
@@ -51,7 +51,7 @@ export function handleReadSmart(
   const mtime = Math.floor(stat.mtimeMs / 1000);
   const size = stat.size;
 
-  const prior = db.prepare('SELECT * FROM file_snapshots WHERE path = ?').get(path) as SnapshotRow | undefined;
+  const prior = db.prepare('SELECT * FROM file_snapshots WHERE path = ? AND user_id = ?').get(path, userId) as SnapshotRow | undefined;
 
   // --- CASE A: first read or force ---
   if (!prior || force) {
@@ -61,16 +61,16 @@ export function handleReadSmart(
     const chunkMeta = chunks.map(toMeta);
 
     db.prepare(
-      `INSERT INTO file_snapshots (path, content_hash, mtime, size_bytes, chunks, last_read_at, read_count)
-       VALUES (?, ?, ?, ?, ?, unixepoch(), 1)
-       ON CONFLICT(path) DO UPDATE SET
+      `INSERT INTO file_snapshots (path, content_hash, mtime, size_bytes, chunks, last_read_at, read_count, user_id)
+       VALUES (?, ?, ?, ?, ?, unixepoch(), 1, ?)
+       ON CONFLICT(user_id, path) DO UPDATE SET
          content_hash = excluded.content_hash,
          mtime = excluded.mtime,
          size_bytes = excluded.size_bytes,
          chunks = excluded.chunks,
          last_read_at = unixepoch(),
          read_count = read_count + 1`
-    ).run(path, fileHash, mtime, size, JSON.stringify(chunkMeta));
+    ).run(path, fileHash, mtime, size, JSON.stringify(chunkMeta), userId);
 
     return JSON.stringify({
       ok: true,
@@ -86,10 +86,10 @@ export function handleReadSmart(
 
   // --- CASE B: mtime unchanged → content guaranteed unchanged (fast path) ---
   if (prior.mtime === mtime) {
-    db.prepare('UPDATE file_snapshots SET last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ?').run(path);
+    db.prepare('UPDATE file_snapshots SET last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ? AND user_id = ?').run(path, userId);
 
     const storedChunks = JSON.parse(prior.chunks) as StoredChunkMeta[];
-    const factRows = db.prepare('SELECT fact, layer, chunk_hash FROM file_facts WHERE file_path = ?').all(path);
+    const factRows = db.prepare('SELECT fact, layer, chunk_hash FROM file_facts WHERE file_path = ? AND user_id = ?').all(path, userId);
 
     // Token savings = what a full read would have cost
     const savedTokens = Math.round(size * TOKENS_PER_CHAR);
@@ -112,7 +112,7 @@ export function handleReadSmart(
   const fileHash = hashFile(content);
 
   if (fileHash === prior.content_hash) {
-    db.prepare('UPDATE file_snapshots SET mtime = ?, last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ?').run(mtime, path);
+    db.prepare('UPDATE file_snapshots SET mtime = ?, last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ? AND user_id = ?').run(mtime, path, userId);
     return JSON.stringify({
       ok: true,
       status: 'unchanged_content',
@@ -149,8 +149,8 @@ export function handleReadSmart(
 
   const newChunkMeta = newChunks.map(toMeta);
   db.prepare(
-    `UPDATE file_snapshots SET content_hash = ?, mtime = ?, size_bytes = ?, chunks = ?, last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ?`
-  ).run(fileHash, mtime, size, JSON.stringify(newChunkMeta), path);
+    `UPDATE file_snapshots SET content_hash = ?, mtime = ?, size_bytes = ?, chunks = ?, last_read_at = unixepoch(), read_count = read_count + 1 WHERE path = ? AND user_id = ?`
+  ).run(fileHash, mtime, size, JSON.stringify(newChunkMeta), path, userId);
 
   const fullTokens = estimateTokens(content);
   const returnedTokens = changedChunks.reduce((s, c) => s + estimateTokens(c.content), 0) + 80; // ~80 for the envelope

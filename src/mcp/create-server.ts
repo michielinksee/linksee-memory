@@ -170,7 +170,7 @@ const TOOLS = [
   },
 ];
 
-export function createLinkseeServer(db: Database.Database): Server {
+export function createLinkseeServer(db: Database.Database, userId: string = 'default'): Server {
   const server = new Server(
     { name: 'linksee-memory', version: SERVER_VERSION },
     {
@@ -192,12 +192,12 @@ export function createLinkseeServer(db: Database.Database): Server {
 
   function upsertEntity(args: { name: string; kind: string; key?: string }): number {
     if (args.key) {
-      const byKey = db.prepare('SELECT id FROM entities WHERE canonical_key = ?').get(args.key) as { id: number } | undefined;
+      const byKey = db.prepare('SELECT id FROM entities WHERE canonical_key = ? AND user_id = ?').get(args.key, userId) as { id: number } | undefined;
       if (byKey) return byKey.id;
     }
     const byName = db
-      .prepare('SELECT id FROM entities WHERE kind = ? AND LOWER(name) = LOWER(?)')
-      .get(args.kind, args.name) as { id: number } | undefined;
+      .prepare('SELECT id FROM entities WHERE kind = ? AND LOWER(name) = LOWER(?) AND user_id = ?')
+      .get(args.kind, args.name, userId) as { id: number } | undefined;
     if (byName) {
       if (args.key) {
         db.prepare('UPDATE entities SET canonical_key = ?, updated_at = unixepoch() WHERE id = ? AND canonical_key IS NULL').run(args.key, byName.id);
@@ -205,8 +205,8 @@ export function createLinkseeServer(db: Database.Database): Server {
       return byName.id;
     }
     const result = db
-      .prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)')
-      .run(args.kind, args.name, args.key ?? null);
+      .prepare('INSERT INTO entities (kind, name, canonical_key, user_id) VALUES (?, ?, ?, ?)')
+      .run(args.kind, args.name, args.key ?? null, userId);
     return Number(result.lastInsertRowid);
   }
 
@@ -230,12 +230,13 @@ export function createLinkseeServer(db: Database.Database): Server {
     const entityId = upsertEntity({ name: args.entity_name, kind: args.entity_kind, key: args.entity_key });
     const importance = Math.min(1, Math.max(0, Number(args.importance ?? 0.5)));
     const result = db
-      .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected) VALUES (?, ?, ?, ?, ?)')
-      .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0);
-    db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
+      .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected, user_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0, userId);
+    db.prepare('INSERT INTO events (entity_id, kind, payload, user_id) VALUES (?, ?, ?, ?)').run(
       entityId,
       'memory_stored',
-      JSON.stringify({ layer, memory_id: result.lastInsertRowid })
+      JSON.stringify({ layer, memory_id: result.lastInsertRowid }),
+      userId
     );
     const mom = refreshMomentumForEntity(db, entityId);
     return JSON.stringify({
@@ -264,9 +265,9 @@ export function createLinkseeServer(db: Database.Database): Server {
       FROM memories_fts
       JOIN memories m ON m.id = memories_fts.rowid
       JOIN entities e ON e.id = m.entity_id
-      WHERE memories_fts MATCH ?
+      WHERE memories_fts MATCH ? AND m.user_id = ?
     `;
-    const params: any[] = [query];
+    const params: any[] = [query, userId];
     if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
     sql += ' ORDER BY bm25_score ASC LIMIT ?';
     params.push(limit);
@@ -280,9 +281,9 @@ export function createLinkseeServer(db: Database.Database): Server {
              0 as bm25_score
       FROM memories m
       JOIN entities e ON e.id = m.entity_id
-      WHERE 1=1
+      WHERE m.user_id = ?
     `;
-    const params: any[] = [];
+    const params: any[] = [userId];
     if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
     if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
     if (query && !entityName) {
@@ -452,7 +453,7 @@ export function createLinkseeServer(db: Database.Database): Server {
 
   function handleForget(args: any): string {
     if (args.memory_id) {
-      const target = db.prepare('SELECT id, layer, importance, protected FROM memories WHERE id = ?').get(args.memory_id) as any;
+      const target = db.prepare('SELECT id, layer, importance, protected FROM memories WHERE id = ? AND user_id = ?').get(args.memory_id, userId) as any;
       if (!target) return JSON.stringify({ ok: false, error: `memory_id ${args.memory_id} not found` });
       if (target.protected === 1 || target.importance >= 0.9) {
         const isLayerProtected = target.protected === 1;
@@ -465,13 +466,13 @@ export function createLinkseeServer(db: Database.Database): Server {
             : 'Use update_memory to lower importance below 0.9 first, then forget.',
         });
       }
-      const res = db.prepare('DELETE FROM memories WHERE id = ?').run(args.memory_id);
+      const res = db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(args.memory_id, userId);
       return JSON.stringify({ ok: true, deleted: res.changes, memory_id: args.memory_id });
     }
 
     const rows = db
-      .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected FROM memories WHERE protected = 0 AND importance < 0.9`)
-      .all() as any[];
+      .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected FROM memories WHERE protected = 0 AND importance < 0.9 AND user_id = ?`)
+      .all(userId) as any[];
     const now = Math.floor(Date.now() / 1000);
     const actions: { id: number; action: string }[] = [];
     for (const r of rows) {
@@ -518,9 +519,9 @@ export function createLinkseeServer(db: Database.Database): Server {
         FROM memories m JOIN entities e ON e.id = m.entity_id
         WHERE m.protected = 0 AND m.importance < 0.9
           AND m.layer IN ('context', 'emotion', 'implementation')
-          AND m.created_at <= ?
+          AND m.created_at <= ? AND m.user_id = ?
         GROUP BY m.entity_id, m.layer HAVING c >= 2 ORDER BY c DESC
-      `).all(ageCutoff) as any[];
+      `).all(ageCutoff, userId) as any[];
       const totalReplaced = candidates.reduce((s, c) => s + c.c, 0);
       return JSON.stringify({
         ok: true,
@@ -534,14 +535,14 @@ export function createLinkseeServer(db: Database.Database): Server {
     const result = runConsolidate(db, {
       scope: args?.scope ?? 'session',
       min_age_days: typeof args?.min_age_days === 'number' ? args.min_age_days : undefined,
-    });
+    }, userId);
     return JSON.stringify({ ok: true, ...result });
   }
 
   function handleUpdateMemory(args: any): string {
     const memoryId = Number(args.memory_id);
     if (!Number.isFinite(memoryId)) return JSON.stringify({ ok: false, error: 'memory_id (number) required' });
-    const existing = db.prepare('SELECT id, entity_id, layer, content, importance, protected FROM memories WHERE id = ?').get(memoryId) as any;
+    const existing = db.prepare('SELECT id, entity_id, layer, content, importance, protected FROM memories WHERE id = ? AND user_id = ?').get(memoryId, userId) as any;
     if (!existing) return JSON.stringify({ ok: false, error: `memory_id ${memoryId} not found` });
     const patch: Record<string, any> = {};
     if (typeof args.content === 'string') patch.content = args.content;
@@ -564,9 +565,9 @@ export function createLinkseeServer(db: Database.Database): Server {
     if (keys.length === 0) return JSON.stringify({ ok: false, error: 'no fields to update (provide content, layer, or importance)' });
     const setClause = keys.map((k) => `${k} = ?`).join(', ');
     const values = keys.map((k) => patch[k]);
-    db.prepare(`UPDATE memories SET ${setClause} WHERE id = ?`).run(...values, memoryId);
-    db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
-      existing.entity_id, 'memory_updated', JSON.stringify({ memory_id: memoryId, changed: keys })
+    db.prepare(`UPDATE memories SET ${setClause} WHERE id = ? AND user_id = ?`).run(...values, memoryId, userId);
+    db.prepare('INSERT INTO events (entity_id, kind, payload, user_id) VALUES (?, ?, ?, ?)').run(
+      existing.entity_id, 'memory_updated', JSON.stringify({ memory_id: memoryId, changed: keys }), userId
     );
     return JSON.stringify({ ok: true, memory_id: memoryId, updated_fields: keys, pinned: (patch.importance ?? existing.importance) >= 0.9 });
   }
@@ -586,9 +587,9 @@ export function createLinkseeServer(db: Database.Database): Server {
              SUM(CASE WHEN m.layer = 'learning' THEN 1 ELSE 0 END) as learning_count,
              SUM(CASE WHEN m.layer = 'implementation' THEN 1 ELSE 0 END) as impl_count,
              SUM(CASE WHEN m.importance >= 0.9 THEN 1 ELSE 0 END) as pinned_count
-      FROM entities e LEFT JOIN memories m ON m.entity_id = e.id WHERE 1=1
+      FROM entities e LEFT JOIN memories m ON m.entity_id = e.id AND m.user_id = ? WHERE e.user_id = ?
     `;
-    const params: any[] = [];
+    const params: any[] = [userId, userId];
     if (kind) { sql += ' AND e.kind = ?'; params.push(kind); }
     sql += ' GROUP BY e.id';
     if (minMemories > 1) { sql += ' HAVING memory_count >= ?'; params.push(minMemories); }
@@ -597,8 +598,8 @@ export function createLinkseeServer(db: Database.Database): Server {
     params.push(limit, offset);
     const rows = db.prepare(sql).all(...params) as any[];
     const totalRow = db.prepare(
-      kind ? 'SELECT COUNT(*) as c FROM entities WHERE kind = ?' : 'SELECT COUNT(*) as c FROM entities'
-    ).get(...(kind ? [kind] : [])) as { c: number };
+      kind ? 'SELECT COUNT(*) as c FROM entities WHERE kind = ? AND user_id = ?' : 'SELECT COUNT(*) as c FROM entities WHERE user_id = ?'
+    ).get(...(kind ? [kind, userId] : [userId])) as { c: number };
     return JSON.stringify({
       ok: true,
       total: totalRow.c,
@@ -621,21 +622,21 @@ export function createLinkseeServer(db: Database.Database): Server {
     if (!sub) return JSON.stringify({ ok: false, error: 'path_substring required' });
     const maxIntents = Math.max(1, Math.min(50, args.max_intents ?? 10));
     const totalRow = db.prepare(
-      `SELECT COUNT(*) as c, MIN(occurred_at) as first_at, MAX(occurred_at) as last_at, COUNT(DISTINCT session_id) as sessions FROM session_file_edits WHERE file_path LIKE ?`
-    ).get(`%${sub}%`) as any;
+      `SELECT COUNT(*) as c, MIN(occurred_at) as first_at, MAX(occurred_at) as last_at, COUNT(DISTINCT session_id) as sessions FROM session_file_edits WHERE file_path LIKE ? AND user_id = ?`
+    ).get(`%${sub}%`, userId) as any;
     if (!totalRow || totalRow.c === 0) return JSON.stringify({ ok: true, count: 0, note: 'No edits found for that path substring.' });
     const daily = db.prepare(
-      `SELECT DATE(occurred_at, 'unixepoch') as day, operation, COUNT(*) as edits FROM session_file_edits WHERE file_path LIKE ? GROUP BY day, operation ORDER BY day`
-    ).all(`%${sub}%`) as any[];
+      `SELECT DATE(occurred_at, 'unixepoch') as day, operation, COUNT(*) as edits FROM session_file_edits WHERE file_path LIKE ? AND user_id = ? GROUP BY day, operation ORDER BY day`
+    ).all(`%${sub}%`, userId) as any[];
     const intents = db.prepare(
-      `SELECT DISTINCT context_snippet, MAX(occurred_at) as last_at, COUNT(*) as freq FROM session_file_edits WHERE file_path LIKE ? AND context_snippet IS NOT NULL AND LENGTH(context_snippet) > 20 GROUP BY context_snippet ORDER BY last_at DESC LIMIT ?`
-    ).all(`%${sub}%`, maxIntents) as any[];
+      `SELECT DISTINCT context_snippet, MAX(occurred_at) as last_at, COUNT(*) as freq FROM session_file_edits WHERE file_path LIKE ? AND user_id = ? AND context_snippet IS NOT NULL AND LENGTH(context_snippet) > 20 GROUP BY context_snippet ORDER BY last_at DESC LIMIT ?`
+    ).all(`%${sub}%`, userId, maxIntents) as any[];
     const memories = db.prepare(
-      `SELECT DISTINCT m.id, m.layer, m.content, m.importance, e.name as entity_name FROM session_file_edits sfe JOIN memories m ON m.id = sfe.memory_id JOIN entities e ON e.id = m.entity_id WHERE sfe.file_path LIKE ? ORDER BY m.importance DESC LIMIT 20`
-    ).all(`%${sub}%`) as any[];
+      `SELECT DISTINCT m.id, m.layer, m.content, m.importance, e.name as entity_name FROM session_file_edits sfe JOIN memories m ON m.id = sfe.memory_id JOIN entities e ON e.id = m.entity_id WHERE sfe.file_path LIKE ? AND sfe.user_id = ? ORDER BY m.importance DESC LIMIT 20`
+    ).all(`%${sub}%`, userId) as any[];
     const paths = db.prepare(
-      `SELECT file_path, COUNT(*) as edits FROM session_file_edits WHERE file_path LIKE ? GROUP BY file_path ORDER BY edits DESC`
-    ).all(`%${sub}%`) as any[];
+      `SELECT file_path, COUNT(*) as edits FROM session_file_edits WHERE file_path LIKE ? AND user_id = ? GROUP BY file_path ORDER BY edits DESC`
+    ).all(`%${sub}%`, userId) as any[];
     return JSON.stringify({
       ok: true,
       path_substring: sub,
@@ -656,7 +657,7 @@ export function createLinkseeServer(db: Database.Database): Server {
   }
 
   function handleReadSmart(args: any): string {
-    return handleReadSmartImpl(db, { path: args.path, force: args.force });
+    return handleReadSmartImpl(db, { path: args.path, force: args.force, userId });
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -685,8 +686,8 @@ export function createLinkseeServer(db: Database.Database): Server {
     const ageCutoff = Math.floor(Date.now() / 1000) - (typeof args?.min_age_days === 'number' ? args.min_age_days : 7) * 86400;
     const snapshot = new Map<number, { id: number; content: string; entity_name: string }>();
     const candidateRows = db.prepare(
-      `SELECT m.id, m.content, e.name as entity_name FROM memories m JOIN entities e ON e.id = m.entity_id WHERE m.protected = 0 AND m.layer IN ('context','emotion','implementation') AND m.created_at <= ?`
-    ).all(ageCutoff) as any[];
+      `SELECT m.id, m.content, e.name as entity_name FROM memories m JOIN entities e ON e.id = m.entity_id WHERE m.protected = 0 AND m.layer IN ('context','emotion','implementation') AND m.created_at <= ? AND m.user_id = ?`
+    ).all(ageCutoff, userId) as any[];
     for (const r of candidateRows) snapshot.set(r.id, r);
     const baseJson = handleConsolidate(args);
     let parsed: any;
@@ -790,7 +791,7 @@ export function createLinkseeServer(db: Database.Database): Server {
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: RESOURCE_TEMPLATES }));
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const { uri } = req.params;
-    const result = readResource(db, uri);
+    const result = readResource(db, uri, userId);
     return { contents: [result] };
   });
 
