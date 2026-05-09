@@ -47,15 +47,9 @@ export function runMigrations(db: Database.Database): void {
     `);
   }
 
-  db.exec(sql);
-
-  if (currentVersion > 0 && currentVersion < 4) {
-    db.exec(`INSERT INTO memories_fts(rowid, content) SELECT id, content FROM memories;`);
-  }
-
-  // v4 → v5: add user_id to all user-data tables for multi-user support.
-  // file_snapshots requires a full table rebuild (PK changes from path → id + UNIQUE(user_id,path)).
-  // file_facts loses its FK to file_snapshots(path) since path is no longer unique by itself.
+  // v4 → v5: add user_id to all user-data tables BEFORE applying schema.sql,
+  // because schema.sql contains CREATE INDEX statements that reference user_id
+  // on existing tables. Running ALTER TABLE first ensures those indexes succeed.
   if (currentVersion > 0 && currentVersion < 5) {
     db.pragma('foreign_keys = OFF');
     db.exec(`
@@ -87,21 +81,15 @@ export function runMigrations(db: Database.Database): void {
       DROP TABLE file_snapshots;
       ALTER TABLE file_snapshots_v5 RENAME TO file_snapshots;
 
-      -- Indexes for new user_id columns
-      CREATE INDEX IF NOT EXISTS idx_entities_user      ON entities(user_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_canonical_key ON entities(user_id, canonical_key)
-        WHERE canonical_key IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_memories_user      ON memories(user_id);
-      CREATE INDEX IF NOT EXISTS idx_events_user        ON events(user_id);
-      CREATE INDEX IF NOT EXISTS idx_sessions_user      ON sessions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_sfe_user           ON session_file_edits(user_id);
-      CREATE INDEX IF NOT EXISTS idx_consolidations_user ON consolidations(user_id);
-      CREATE INDEX IF NOT EXISTS idx_file_facts_user    ON file_facts(user_id, file_path);
-      CREATE INDEX IF NOT EXISTS idx_file_user          ON file_snapshots(user_id);
-
       UPDATE meta SET value = '5' WHERE key = 'schema_version';
     `);
     db.pragma('foreign_keys = ON');
+  }
+
+  db.exec(sql);
+
+  if (currentVersion > 0 && currentVersion < 4) {
+    db.exec(`INSERT INTO memories_fts(rowid, content) SELECT id, content FROM memories;`);
   }
 
   // v0.1.1 data migration: pin threshold lowered from 1.0 to 0.9.
