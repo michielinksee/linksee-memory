@@ -176,10 +176,69 @@ Each turn end takes ~100 ms. Failures are silent (Claude Code never blocks). Log
 | Command | Purpose |
 |---|---|
 | `npx linksee-memory` | MCP server (stdio) |
+| `npx linksee-memory-http` | MCP server (HTTP/StreamableHTTP — multiple clients simultaneously) |
 | `npx linksee-memory-sync` | Claude Code Stop-hook entry point |
 | `npx linksee-memory-import` | Batch-import Claude Code session JSONL history |
 | `npx linksee-memory-install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
 | `npx linksee-memory-stats` | **v0.1.0** Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
+
+## HTTP / Network mode
+
+By default linksee-memory runs on **stdio** — one process per MCP client. If you want to connect **multiple clients at the same time** (e.g. Claude Code + Cursor simultaneously, or a remote agent), use the HTTP transport instead.
+
+### Quick start with pm2
+
+```bash
+npm install -g pm2 linksee-memory
+
+# Create ecosystem.config.cjs
+cat > ecosystem.config.cjs << 'EOF'
+module.exports = {
+  apps: [{
+    name: 'linksee-memory-http',
+    script: 'node_modules/linksee-memory/dist/mcp/http-server.js',
+    env: { LINKSEE_HTTP_PORT: '8300' },
+  }],
+};
+EOF
+
+pm2 start ecosystem.config.cjs
+pm2 save
+```
+
+### Register with Claude Code (HTTP)
+
+```bash
+claude mcp add --transport http -s user linksee http://localhost:8300/mcp
+```
+
+### Docker
+
+```bash
+docker build -f Dockerfile.http -t linksee-memory-http .
+docker run -p 8300:8000 -v linksee-data:/data/linksee-memory linksee-memory-http
+claude mcp add --transport http -s user linksee http://localhost:8300/mcp
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Returns `{"ok":true,"sessions":N}` — use for load-balancer / Docker HEALTHCHECK |
+| `POST` | `/mcp` | New or existing MCP session (pass `mcp-session-id` header to resume) |
+| `GET` | `/mcp` | SSE reconnect for an existing session |
+| `DELETE` | `/mcp` | Close a session |
+
+**Note**: All sessions share one SQLite DB (WAL mode). You can run stdio and HTTP servers simultaneously against the same file during migration — no downtime required.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LINKSEE_HTTP_PORT` | `8000` | Port the HTTP server listens on |
+| `LINKSEE_MEMORY_DIR` | `~/.linksee-memory` | Directory for `memory.db` |
+
+---
 
 ## The 6 memory layers
 
@@ -218,7 +277,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 
 - **Local-first** — your conversation history is private. Nothing leaves your machine.
 - **Single file** — `memory.db` is one portable artifact. Backup = file copy.
-- **MCP stdio** — works with every agent that speaks MCP, no plugins per host.
+- **Dual transport** — stdio for single-client setups; HTTP/StreamableHTTP for multi-client or network access. Same logic (`createLinkseeServer`), different entry points.
 - **Reuses proven schemas** — `heat_score` / `momentum_score` ported from a production sales-intelligence codebase. Rule-based, no LLM dependency in the hot path.
 
 ## Roadmap
@@ -226,6 +285,8 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ Core 6 MCP tools (`remember` / `recall` / `recall_file` / `forget` / `consolidate` / `read_smart`)
 - ✅ Stop-hook auto-capture for Claude Code
 - ✅ JP/EN trigram FTS5
+- ✅ HTTP/StreamableHTTP transport (`linksee-memory-http`) for multi-client access
+- ✅ Docker image (`Dockerfile.http`) with `/health` endpoint
 - 🚧 `PreToolUse` hook to auto-intercept `Read` (zero-config token savings)
 - 🚧 Cursor + ChatGPT Desktop adapters
 - 🔮 Vector search via `sqlite-vec` once an embedding backend is chosen (Ollama / API / etc.)
@@ -440,6 +501,19 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
 
 ## Changelog
+
+### v0.3.1 — HTTP / StreamableHTTP transport (2026-05-09)
+
+Adds a network-accessible MCP server entry point so multiple clients can share one memory store simultaneously.
+
+- **New binary `linksee-memory-http`** — HTTP server (`StreamableHTTP` transport from MCP SDK v1.29.0). Each POST `/mcp` without a session header spawns a new `Server` + transport pair; subsequent requests carry `mcp-session-id` to resume the same session.
+- **`GET /health`** endpoint returns `{"ok":true,"sessions":N}` — compatible with Docker `HEALTHCHECK` and load-balancer probes.
+- **`Dockerfile.http`** — multi-stage Docker image (`node:20-slim`). Environment variables: `LINKSEE_HTTP_PORT` (default 8000), `LINKSEE_MEMORY_DIR` (default `/data/linksee-memory`).
+- **`src/mcp/create-server.ts`** — new factory function `createLinkseeServer(db)` that returns a fully-wired `Server` not yet connected to any transport. Both stdio and HTTP entry points use this factory; per-session `RootsCache` isolation is handled inside the factory.
+- **`src/mcp/roots.ts`** — `makeRootsCache()` factory added; `fetchRoots` and `invalidateRootsCache` now accept an optional cache argument (backward-compatible default preserves stdio behaviour).
+- **`package.json`** — `bin.linksee-memory-http` and `scripts.start:http` / `scripts.dev:http` added.
+
+All changes are **backward compatible**: stdio (`linksee-memory`) keeps its existing behaviour. Both transports share one SQLite file (WAL mode) and can run simultaneously during migration.
 
 ### v0.2.0 — English-first launch readiness (2026-04-20)
 

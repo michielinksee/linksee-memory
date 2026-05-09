@@ -6,6 +6,7 @@
   "type": "module",
   "bin": {
     "linksee-memory": "dist/mcp/server.js",
+    "linksee-memory-http": "dist/mcp/http-server.js",
     "linksee-memory-import": "dist/bin/import-sessions.js",
     "linksee-memory-sync": "dist/bin/sync-session.js",
     "linksee-memory-install-skill": "dist/bin/install-skill.js",
@@ -23,7 +24,9 @@
   "scripts": {
     "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql'); require('fs').mkdirSync('dist/skill',{recursive:true}); require('fs').copyFileSync('src/skill/SKILL.md','dist/skill/SKILL.md')\"",
     "start": "node dist/mcp/server.js",
+    "start:http": "node dist/mcp/http-server.js",
     "dev": "tsx src/mcp/server.ts",
+    "dev:http": "tsx src/mcp/http-server.ts",
     "migrate": "node dist/db/migrate.js",
     "migrate:dev": "tsx src/db/migrate.ts",
     "prepublishOnly": "npm run build"

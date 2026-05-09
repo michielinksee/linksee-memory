@@ -14,28 +14,37 @@ interface Root {
   name?: string;
 }
 
-let cachedRoots: Root[] | null = null;
-let lastFetched = 0;
-const STALE_MS = 60_000; // re-fetch at most once a minute
-
-export async function fetchRoots(server: Server): Promise<Root[]> {
-  const now = Date.now();
-  if (cachedRoots && now - lastFetched < STALE_MS) return cachedRoots;
-  try {
-    const res: any = await (server as any).request({ method: 'roots/list', params: {} }, ListRootsRequestSchema);
-    cachedRoots = Array.isArray(res?.roots) ? res.roots : [];
-    lastFetched = now;
-  } catch {
-    // Client may not support roots; treat as empty.
-    cachedRoots = [];
-    lastFetched = now;
-  }
-  return cachedRoots ?? [];
+export interface RootsCache {
+  roots: Root[] | null;
+  fetchedAt: number;
 }
 
-export function invalidateRootsCache() {
-  cachedRoots = null;
-  lastFetched = 0;
+export function makeRootsCache(): RootsCache {
+  return { roots: null, fetchedAt: 0 };
+}
+
+// Backward-compat global cache used by the stdio single-session path (cache arg omitted).
+const _globalCache: RootsCache = { roots: null, fetchedAt: 0 };
+const STALE_MS = 60_000; // re-fetch at most once a minute
+
+export async function fetchRoots(server: Server, cache: RootsCache = _globalCache): Promise<Root[]> {
+  const now = Date.now();
+  if (cache.roots && now - cache.fetchedAt < STALE_MS) return cache.roots;
+  try {
+    const res: any = await (server as any).request({ method: 'roots/list', params: {} }, ListRootsRequestSchema);
+    cache.roots = Array.isArray(res?.roots) ? res.roots : [];
+    cache.fetchedAt = now;
+  } catch {
+    // Client may not support roots; treat as empty.
+    cache.roots = [];
+    cache.fetchedAt = now;
+  }
+  return cache.roots ?? [];
+}
+
+export function invalidateRootsCache(cache: RootsCache = _globalCache): void {
+  cache.roots = null;
+  cache.fetchedAt = 0;
 }
 
 // Convert "file:///C:/Users/HP/foo" → "C:/Users/HP/foo" (or "/Users/foo" on POSIX)

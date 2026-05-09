@@ -1,0 +1,43 @@
+# Dockerfile.http — linksee-memory MCP server (HTTP/StreamableHTTP transport).
+# Use this when you want to run linksee-memory as a network service reachable
+# by multiple MCP clients simultaneously (instead of the default stdio mode).
+#
+# Build:  docker build -f Dockerfile.http -t linksee-memory-http .
+# Run:    docker run -p 8000:8000 -v linksee-data:/data/linksee-memory linksee-memory-http
+# MCP:    claude mcp add --transport http linksee http://localhost:8000/mcp
+
+# ── Build stage ─────────────────────────────────────────────────────────────
+FROM node:20-slim AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY src ./src
+RUN npm run build \
+ && npm prune --omit=dev
+
+# ── Runtime image ───────────────────────────────────────────────────────────
+FROM node:20-slim
+
+WORKDIR /app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/package.json ./package.json
+
+ENV LINKSEE_MEMORY_DIR=/data/linksee-memory
+ENV LINKSEE_HTTP_PORT=8000
+
+RUN mkdir -p /data/linksee-memory \
+ && chown -R node:node /data /app
+
+USER node
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://localhost:8000/health').then(r=>r.json()).then(j=>{if(!j.ok)process.exit(1)}).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/mcp/http-server.js"]
