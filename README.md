@@ -1,6 +1,6 @@
 # linksee-memory
 
-> Local-first agent memory MCP. A cross-agent brain for Claude Code, Cursor, and ChatGPT Desktop — with a token-saving file diff cache that nobody else does.
+> Local-first agent memory MCP. A cross-agent brain for **Claude Code, Cursor, OpenAI Codex, and Gemini CLI** — with a token-saving file diff cache that nobody else does. One SQLite file, all your LLMs read the same memory.
 >
 > **v0.3.0** ships the **Five Blocks**: Tools + Resources + Prompts + Sampling + Roots, plus the newer **Elicitation** primitive. Most public MCP servers expose only Tools; v0.3.0 moves linksee-memory into the differentiated tier. Backward compatible — all 8 v0.2.x tools keep their signatures. See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -9,7 +9,17 @@
 [![mcp-registry](https://img.shields.io/badge/MCP-Official_Registry-6366f1)](https://registry.modelcontextprotocol.io/)
 [![glama-score](https://glama.ai/mcp/servers/michielinksee/linksee-memory/badges/score.svg)](https://glama.ai/mcp/servers/michielinksee/linksee-memory)
 
-🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code)
+🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
+
+## 📣 As featured on
+
+- **Zenn**: [あなたの Claude Code、 実は前回のセッションを完全に忘れている](https://zenn.dev/kanseilink/articles/linksee-memory-claude-code-recall-20260508) — 73 ♡ on Zenn, **165+ users on Hatena Bookmark**, picked up by tech blogs + YouTube shorts (May 2026)
+- **Zenn**: [あなたの MCP server、 実は Tools しか使ってない (5 blocks 全実装 / v0.3.0)](https://zenn.dev/kanseilink/articles/linksee-memory-mcp-five-blocks-20260507) — the 1% of MCP servers that implement all 5 blocks
+- **Zenn**: [あなたの Claude memory、 実は Claude にしか残らない (5 LLM 横断する方法)](https://zenn.dev/kanseilink/articles/linksee-memory-claude-cross-llm-20260511) — cross-LLM memory pattern (May 12, 2026)
+- **Zenn**: [Glama listing で 3 週間止まった話 (5 つの罠と解決策)](https://zenn.dev/michielinksee/articles/linksee-memory-mcp-publish-glama-traps-20260506) — npm + Glama deployment retrospective
+
+> 「Cordex/Cursor/Code/Gemini 全部につなげられるから、 横断的にできてる MCP ってところがこれのすごいところ」
+> — [Hatena Bookmark, May 2026](https://b.hatena.ne.jp/entry/s/zenn.dev/kanseilink/articles/linksee-memory-claude-code-recall-20260508) (165+ users)
 
 ---
 
@@ -88,7 +98,7 @@ It is a Model Context Protocol (MCP) server that gives any AI agent four superpo
 ## Three pillars
 
 1. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
-2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, ChatGPT Desktop.
+2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, OpenAI Codex, Gemini CLI. (ChatGPT app needs Remote MCP — on roadmap for v0.4.)
 3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
 
 ## Install
@@ -226,9 +236,12 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ Core 6 MCP tools (`remember` / `recall` / `recall_file` / `forget` / `consolidate` / `read_smart`)
 - ✅ Stop-hook auto-capture for Claude Code
 - ✅ JP/EN trigram FTS5
+- ✅ Five Blocks (v0.3.0): Tools + Resources + Prompts + Sampling + Roots + Elicitation
+- ✅ Cursor + OpenAI Codex + Gemini CLI adapters (stdio MCP, same `npx -y linksee-memory`)
 - 🚧 `PreToolUse` hook to auto-intercept `Read` (zero-config token savings)
-- 🚧 Cursor + ChatGPT Desktop adapters
-- 🔮 Vector search via `sqlite-vec` once an embedding backend is chosen (Ollama / API / etc.)
+- 🔮 ChatGPT app (web/mobile) support via `linksee-memory-remote` (Remote MCP over HTTPS, v0.4)
+- 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
+- 🔮 Cross-device cloud sync (Pro tier, summer 2026)
 - 🔮 Optional anonymized telemetry → MCP-quality intelligence layer
 
 ## Comparison with Claude Code auto-memory
@@ -376,8 +389,8 @@ Three axes:
 <details>
 <summary><strong>Why not just use Claude's built-in auto-memory?</strong></summary>
 
-Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor or ChatGPT Desktop) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
-- Works across Claude Code, Cursor, ChatGPT Desktop (shared SQLite)
+Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor, OpenAI Codex, or Gemini CLI) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
+- Works across Claude Code, Cursor, OpenAI Codex, Gemini CLI (shared SQLite)
 - Structured 6-layer format makes recall explainable
 - Provides explicit forget/consolidate primitives rather than the agent guessing
 </details>
@@ -415,8 +428,10 @@ In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old
 Yes — any MCP-compatible client works:
 - **Claude Code**: `claude mcp add -s user linksee -- npx -y linksee-memory`
 - **Claude Desktop**: add to `claude_desktop_config.json` (see [onboarding on the LP](https://linksee-site.vercel.app))
-- **Cursor**: add to MCP settings in Cursor
-- **ChatGPT Desktop**: same pattern once MCP support ships
+- **Cursor**: add to MCP settings in Cursor → Settings → Features → Model Context Protocol
+- **OpenAI Codex**: `codex mcp add linksee -- npx -y linksee-memory` (or `~/.codex/config.toml` with `[mcp_servers.linksee]` block)
+- **Gemini CLI**: add to `~/.gemini/settings.json` mcpServers section
+- **ChatGPT (web/mobile app)**: stdio MCP not supported by the consumer app — requires Remote MCP server over HTTPS. `linksee-memory-remote` planned for v0.4.
 - **Custom agent**: the MCP stdio protocol is documented at modelcontextprotocol.io
 </details>
 
