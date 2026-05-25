@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS entities (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   kind            TEXT NOT NULL CHECK (kind IN ('person', 'company', 'project', 'concept', 'file', 'other')),
   name            TEXT NOT NULL,
+  normalized_name TEXT,                            -- lowercased, separator-normalized for dedup matching
   canonical_key   TEXT UNIQUE,
   attributes      TEXT,
   momentum_score  REAL NOT NULL DEFAULT 0.0,      -- 0-10 cached; refreshed on event insert
@@ -18,8 +19,9 @@ CREATE TABLE IF NOT EXISTS entities (
   updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
-CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
-CREATE INDEX IF NOT EXISTS idx_entities_key  ON entities(canonical_key);
+CREATE INDEX IF NOT EXISTS idx_entities_kind       ON entities(kind);
+CREATE INDEX IF NOT EXISTS idx_entities_key        ON entities(canonical_key);
+CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(kind, normalized_name);
 
 -- ============================================================
 -- Layer 3: Meanings — 6-layer structured memory per entity
@@ -194,6 +196,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '4');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '5');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '4' WHERE key = 'schema_version' AND value IN ('1', '2', '3');
+UPDATE meta SET value = '5' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4');

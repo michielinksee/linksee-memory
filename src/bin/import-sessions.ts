@@ -14,6 +14,7 @@ import { homedir } from 'node:os';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { parseSessionFile, projectNameFromCwd, detectProjectName } from '../lib/session-parser.js';
 import { extractSession, type ExtractedFileEdit } from '../lib/session-extractor.js';
+import { normalizeEntityName } from '../lib/normalize.js';
 
 const CLAUDE_PROJECTS = join(homedir(), '.claude', 'projects');
 
@@ -89,11 +90,14 @@ async function main() {
     // different sessions/cwds collapses to one entity)
     let projectEntityId: number;
     const canonicalKey = `project:${projectName.toLowerCase()}`;
-    const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', projectName) as { id: number } | undefined;
+    const normalized = normalizeEntityName(projectName);
+    const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND normalized_name = ?) OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', normalized, 'project', projectName) as { id: number } | undefined;
     if (existing) {
       projectEntityId = existing.id;
+      // Backfill normalized_name if missing
+      db.prepare('UPDATE entities SET normalized_name = ? WHERE id = ? AND normalized_name IS NULL').run(normalized, projectEntityId);
     } else {
-      const ins = db.prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)').run('project', projectName, canonicalKey);
+      const ins = db.prepare('INSERT INTO entities (kind, name, normalized_name, canonical_key) VALUES (?, ?, ?, ?)').run('project', projectName, normalized, canonicalKey);
       projectEntityId = Number(ins.lastInsertRowid);
     }
 
@@ -202,11 +206,13 @@ async function main() {
       // Resolve entity per-SESSION (not per-project-dir) since each session may
       // belong to a different project based on its file ops.
       const canonicalKey = `project:${projectName.toLowerCase()}`;
-      const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', projectName) as { id: number } | undefined;
+      const normalized = normalizeEntityName(projectName);
+      const existing = db.prepare('SELECT id FROM entities WHERE canonical_key = ? OR (kind = ? AND normalized_name = ?) OR (kind = ? AND LOWER(name) = LOWER(?))').get(canonicalKey, 'project', normalized, 'project', projectName) as { id: number } | undefined;
       if (existing) {
         projectEntityId = existing.id;
+        db.prepare('UPDATE entities SET normalized_name = ? WHERE id = ? AND normalized_name IS NULL').run(normalized, projectEntityId);
       } else {
-        const ins = db.prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)').run('project', projectName, canonicalKey);
+        const ins = db.prepare('INSERT INTO entities (kind, name, normalized_name, canonical_key) VALUES (?, ?, ?, ?)').run('project', projectName, normalized, canonicalKey);
         projectEntityId = Number(ins.lastInsertRowid);
       }
 

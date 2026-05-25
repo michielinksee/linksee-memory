@@ -20,6 +20,7 @@ import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
 import { consolidate as runConsolidate } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
+import { normalizeEntityName } from '../lib/normalize.js';
 import { handleReadSmart as handleReadSmartImpl } from './read-smart.js';
 import { STATIC_RESOURCES, RESOURCE_TEMPLATES, readResource } from './resources.js';
 import { PROMPTS, getPrompt } from './prompts.js';
@@ -206,22 +207,43 @@ const TOOLS = [
 // ============================================================
 
 function upsertEntity(args: { name: string; kind: string; key?: string }): number {
+  // 1. Fastest path: canonical_key exact match (e.g. project path)
   if (args.key) {
     const byKey = db.prepare('SELECT id FROM entities WHERE canonical_key = ?').get(args.key) as { id: number } | undefined;
     if (byKey) return byKey.id;
   }
+
+  // 2. Normalized name match (prevents "CockpitMCP" / "Cockpit MCP" / "cockpit-mcp" dups)
+  const normalized = normalizeEntityName(args.name);
+  const byNorm = db
+    .prepare('SELECT id FROM entities WHERE kind = ? AND normalized_name = ?')
+    .get(args.kind, normalized) as { id: number } | undefined;
+  if (byNorm) {
+    if (args.key) {
+      db.prepare('UPDATE entities SET canonical_key = ?, updated_at = unixepoch() WHERE id = ? AND canonical_key IS NULL').run(args.key, byNorm.id);
+    }
+    return byNorm.id;
+  }
+
+  // 3. Fallback: exact case-insensitive match (covers names that normalize differently
+  //    but the user typed the exact same string — shouldn't happen after v5 migration
+  //    but keeps backward compat if normalized_name is NULL for some row)
   const byName = db
     .prepare('SELECT id FROM entities WHERE kind = ? AND LOWER(name) = LOWER(?)')
     .get(args.kind, args.name) as { id: number } | undefined;
   if (byName) {
+    // Backfill normalized_name while we're here
+    db.prepare('UPDATE entities SET normalized_name = ?, updated_at = unixepoch() WHERE id = ? AND normalized_name IS NULL').run(normalized, byName.id);
     if (args.key) {
       db.prepare('UPDATE entities SET canonical_key = ?, updated_at = unixepoch() WHERE id = ? AND canonical_key IS NULL').run(args.key, byName.id);
     }
     return byName.id;
   }
+
+  // 4. Insert new entity with normalized_name
   const result = db
-    .prepare('INSERT INTO entities (kind, name, canonical_key) VALUES (?, ?, ?)')
-    .run(args.kind, args.name, args.key ?? null);
+    .prepare('INSERT INTO entities (kind, name, normalized_name, canonical_key) VALUES (?, ?, ?, ?)')
+    .run(args.kind, args.name, normalized, args.key ?? null);
   return Number(result.lastInsertRowid);
 }
 

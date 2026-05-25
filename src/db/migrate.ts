@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { normalizeEntityName } from '../lib/normalize.js';
 
 const DEFAULT_DB_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const DB_PATH = join(DEFAULT_DB_DIR, 'memory.db');
@@ -47,6 +48,15 @@ export function runMigrations(db: Database.Database): void {
     `);
   }
 
+  // v4 → v5: add normalized_name column BEFORE schema.sql runs,
+  // so the CREATE INDEX IF NOT EXISTS on (kind, normalized_name) succeeds.
+  if (currentVersion > 0 && currentVersion < 5) {
+    const cols = db.prepare("PRAGMA table_info(entities)").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'normalized_name')) {
+      db.exec('ALTER TABLE entities ADD COLUMN normalized_name TEXT');
+    }
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {
@@ -70,6 +80,104 @@ export function runMigrations(db: Database.Database): void {
     db.prepare(
       `UPDATE memories SET protected = 1 WHERE importance >= 0.9 AND protected = 0`
     ).run();
+  }
+
+  // v4 → v5: entity name normalization for dedup prevention.
+  // Adds normalized_name column + backfills from existing entity names.
+  if (currentVersion > 0 && currentVersion < 5) {
+    migrateV5EntityNormalization(db);
+  }
+}
+
+/**
+ * v5 migration: add normalized_name column and backfill + merge duplicates.
+ */
+function migrateV5EntityNormalization(db: Database.Database): void {
+  // Column + index already added before db.exec(sql) above.
+  // Now backfill normalized_name for all entities.
+  const entities = db.prepare('SELECT id, name FROM entities').all() as Array<{ id: number; name: string }>;
+  const updateStmt = db.prepare('UPDATE entities SET normalized_name = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const e of entities) {
+      updateStmt.run(normalizeEntityName(e.name), e.id);
+    }
+  })();
+
+  // 4. Auto-merge duplicate entities (same kind + normalized_name)
+  const dupes = db.prepare(`
+    SELECT kind, normalized_name, GROUP_CONCAT(id) as ids
+    FROM entities
+    WHERE normalized_name IS NOT NULL
+    GROUP BY kind, normalized_name
+    HAVING COUNT(*) > 1
+  `).all() as Array<{ kind: string; normalized_name: string; ids: string }>;
+
+  if (dupes.length > 0) {
+    console.log(`[linksee-memory] v5 migration: merging ${dupes.length} duplicate entity clusters`);
+    db.transaction(() => {
+      for (const dupe of dupes) {
+        const ids = dupe.ids.split(',').map(Number);
+        mergeEntityCluster(db, ids);
+      }
+    })();
+  }
+}
+
+/**
+ * Merge a cluster of duplicate entity IDs into one canonical entity.
+ * Picks the entity with the most memories (ties broken by canonical_key presence).
+ * Reassigns all memories, events, edges, consolidations to the kept entity.
+ */
+function mergeEntityCluster(db: Database.Database, ids: number[]): void {
+  if (ids.length < 2) return;
+
+  // Score each entity: prefer most memories, then has canonical_key, then lowest id
+  const rows = db.prepare(`
+    SELECT e.id, e.name, e.canonical_key, COUNT(m.id) as mem_count
+    FROM entities e LEFT JOIN memories m ON m.entity_id = e.id
+    WHERE e.id IN (${ids.map(() => '?').join(',')})
+    GROUP BY e.id
+    ORDER BY mem_count DESC, (e.canonical_key IS NOT NULL) DESC, e.id ASC
+  `).all(...ids) as Array<{ id: number; name: string; canonical_key: string | null; mem_count: number }>;
+
+  const keep = rows[0];
+  const mergeIds = rows.slice(1).map(r => r.id);
+
+  console.log(`  merge: keeping "${keep.name}" (id=${keep.id}, ${keep.mem_count} memories), absorbing ids=[${mergeIds.join(',')}]`);
+
+  // Inherit canonical_key if the kept entity lacks one
+  // Clear donor's key first to avoid UNIQUE constraint violation
+  if (!keep.canonical_key) {
+    const donor = rows.find(r => r.id !== keep.id && r.canonical_key);
+    if (donor) {
+      db.prepare('UPDATE entities SET canonical_key = NULL WHERE id = ?').run(donor.id);
+      db.prepare('UPDATE entities SET canonical_key = ? WHERE id = ?').run(donor.canonical_key, keep.id);
+    }
+  }
+
+  for (const mid of mergeIds) {
+    // Reassign memories
+    db.prepare('UPDATE memories SET entity_id = ? WHERE entity_id = ?').run(keep.id, mid);
+    // Reassign events
+    db.prepare('UPDATE events SET entity_id = ? WHERE entity_id = ?').run(keep.id, mid);
+    // Reassign edges (both directions)
+    // Handle UNIQUE constraint: delete duplicates first
+    db.prepare(`
+      DELETE FROM edges WHERE from_id = ? AND EXISTS (
+        SELECT 1 FROM edges e2 WHERE e2.from_id = ? AND e2.to_id = edges.to_id AND e2.relation = edges.relation
+      )
+    `).run(mid, keep.id);
+    db.prepare('UPDATE edges SET from_id = ? WHERE from_id = ?').run(keep.id, mid);
+    db.prepare(`
+      DELETE FROM edges WHERE to_id = ? AND EXISTS (
+        SELECT 1 FROM edges e2 WHERE e2.to_id = ? AND e2.from_id = edges.from_id AND e2.relation = edges.relation
+      )
+    `).run(mid, keep.id);
+    db.prepare('UPDATE edges SET to_id = ? WHERE to_id = ?').run(keep.id, mid);
+    // Reassign consolidations
+    db.prepare('UPDATE consolidations SET entity_id = ? WHERE entity_id = ?').run(keep.id, mid);
+    // Delete the duplicate entity
+    db.prepare('DELETE FROM entities WHERE id = ?').run(mid);
   }
 }
 
