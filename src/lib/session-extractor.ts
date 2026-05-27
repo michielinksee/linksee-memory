@@ -42,6 +42,73 @@ export interface ExtractionResult {
 }
 
 // ============================================================
+// Structured Content v2 — 3-axis classification helpers
+// ============================================================
+
+type Altitude = 'mission' | 'strategy' | 'architecture' | 'implementation';
+type MemType = 'question' | 'comparison' | 'decision' | 'work' | 'outcome' | 'learning' | 'note';
+type MemState = 'open' | 'decided' | 'in_progress' | 'done' | 'stalled' | 'parked' | 'superseded';
+
+const ALTITUDE_PATTERNS: [RegExp, Altitude][] = [
+  [/mission|ミッション|ビジョン|vision|product\s+direction|事業方針/i, 'mission'],
+  [/strategy|戦略|方針|positioning|GTM|go.to.market|revenue|pricing|ICP|ターゲット|マーケ/i, 'strategy'],
+  [/architect|設計|schema|database|DB設計|migration|API\s+design|system\s+design|layer\s+model|アーキテクチャ/i, 'architecture'],
+];
+
+function inferAltitude(text: string): Altitude {
+  for (const [pattern, altitude] of ALTITUDE_PATTERNS) {
+    if (pattern.test(text)) return altitude;
+  }
+  return 'implementation';
+}
+
+/** Extract a concise title from raw text (first sentence or up to maxLen chars) */
+function makeTitle(text: string, maxLen = 80): string {
+  const cleaned = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  const firstSentence = cleaned.split(/[。！？!?\n]/)[0].trim();
+  if (firstSentence.length <= maxLen) return firstSentence;
+  return firstSentence.slice(0, maxLen - 3) + '...';
+}
+
+/** Extract file paths from surrounding context */
+function extractAffectedPaths(ops: Array<{path: string}>): string[] {
+  const unique = new Set(ops.map((o) => o.path));
+  return Array.from(unique).slice(0, 10);
+}
+
+interface StructuredContent {
+  title: string;
+  altitude: Altitude;
+  type: MemType;
+  state: MemState;
+  what: string;
+  why?: string;
+  affects?: string[];
+  next_action?: string | null;
+  evidence_refs?: Array<{type: string; id: string; label?: string}>;
+  [key: string]: unknown;
+}
+
+function buildStructuredContent(opts: StructuredContent): string {
+  const obj: Record<string, unknown> = {
+    title: opts.title,
+    altitude: opts.altitude,
+    type: opts.type,
+    state: opts.state,
+    what: opts.what,
+  };
+  if (opts.why) obj.why = opts.why;
+  if (opts.affects && opts.affects.length > 0) obj.affects = opts.affects;
+  if (opts.next_action !== undefined) obj.next_action = opts.next_action;
+  if (opts.evidence_refs && opts.evidence_refs.length > 0) obj.evidence_refs = opts.evidence_refs;
+  // Merge any extra fields (session_id, git_branch, etc.)
+  for (const [k, v] of Object.entries(opts)) {
+    if (!(k in obj) && v !== undefined) obj[k] = v;
+  }
+  return JSON.stringify(obj, null, 2);
+}
+
+// ============================================================
 // Intent detection — first non-noise user message in the session.
 // ============================================================
 function findFirstIntent(session: ParsedSession): SessionTurn | null {
@@ -85,7 +152,9 @@ const CAVEAT_PATTERNS = [
   //   sentence terminators 。！!、 / particles ね・よ / whitespace / ください
   // Anything else (e.g. も = concessive「〜ないでも」, 止まる・いる・ほしい etc.)
   // is treated as descriptive and excluded.
-  /気をつけて|注意して|[！!]注意[！!]|避けて(?!いる|いない)|[ぁ-ん一-龯]ないで(?=[。！!、\s]|ください|ね[^い]|よ[^う]|$)|やめて(?!おく|ほし)|禁止|ダメだ(?!った|ろうと|と思)|危険[だです]/,
+  // 心配し・気にし・遠慮し are reassurance ("don't worry / don't mind / don't hesitate")
+  // — semantically opposite to a caveat. Lookbehind excludes them.
+  /気をつけて|注意して|[！!]注意[！!]|避けて(?!いる|いない)|(?<!心配|気に|遠慮)[ぁ-ん一-龯]ないで(?=[。！!、\s]|ください|ね[^い]|よ[^う]|$)|やめて(?!おく|ほし)|禁止|ダメだ(?!った|ろうと|と思)|危険[だです]/,
   // English: require a concrete action after avoid/don't/never — a bare
   // "Avoiding rebuild of unchanged files" in a Vercel log is not a caveat.
   /\b(?:don'?t|do\s+not)\s+(?:do|use|run|call|forget|try|send|share|commit|push|paste|edit)\b|\bnever\s+(?:do|use|call|share|commit|paste|run|push|edit)\b|\bavoid\s+(?:using|running|calling|committing|pushing|sharing|pasting|editing|creating|modifying)\b|\bwatch\s+out\b/i,
@@ -93,6 +162,28 @@ const CAVEAT_PATTERNS = [
 
 function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
+}
+
+/**
+ * Check if a message is mostly chitchat with a decision keyword buried in it.
+ * The サイダー problem: "おお！そうだね。書斎で無糖のサイダーでした。…決めた"
+ * matches DECISION_PATTERNS because of "決めた" at the end, but the message
+ * is primarily casual conversation, not a project decision.
+ *
+ * Heuristic: if the decision keyword appears ONLY in the last 30% of a long
+ * message (>100 chars) AND the first 50 chars match chitchat patterns, skip it.
+ */
+const CHITCHAT_OPENERS = /^(?:おお|うん|そう(?:だね|だよね)|ありがと|はは|笑|www|OK|おー|へー|なるほど|ちなみに|そういえば|あー|えー|まぁ|まあ|ああ)/;
+
+function isChitchatWithBuriedDecision(text: string, patterns: RegExp[]): boolean {
+  if (text.length < 100) return false; // short messages are fine
+  if (!CHITCHAT_OPENERS.test(text.trim())) return false; // doesn't open with chitchat
+
+  // Check if any pattern matches in the first 40% of the text
+  const earlyPortion = text.slice(0, Math.floor(text.length * 0.4));
+  if (patterns.some((p) => p.test(earlyPortion))) return false; // decision is early = legitimate
+
+  return true; // chitchat opening + decision keyword only appears late = noise
 }
 
 // Dedupe successive file edits to the same path within N seconds —
@@ -125,30 +216,38 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   // 1) Goal layer — the first REAL intent (or synthetic marker for automated sessions)
   const firstIntent = findFirstIntent(session);
   if (firstIntent) {
+    const intentText = firstIntent.text.slice(0, 1000);
     memories.push({
       layer: 'goal',
-      content: JSON.stringify({
-        intent: firstIntent.text.slice(0, 1000),
-        when: new Date(firstIntent.timestamp * 1000).toISOString(),
+      content: buildStructuredContent({
+        title: makeTitle(intentText),
+        altitude: inferAltitude(intentText),
+        type: 'work',
+        state: 'in_progress',
+        what: intentText,
+        why: 'Session intent — first user message',
+        evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
         session_id: session.session_id,
         git_branch: session.git_branch,
-      }, null, 2),
-      importance: automated ? 0.3 : 0.8,  // lower for automated runs
+      }),
+      importance: automated ? 0.3 : 0.8,
       source: { session_id: session.session_id, turn_uuid: firstIntent.uuid, kind: 'first_intent' },
     });
   } else if (automated) {
-    // Synthetic goal so the session is still discoverable
     const match = firstRawUserText.match(/<scheduled-task\s+name="([^"]+)"/);
     const taskName = match ? match[1] : 'unknown';
     memories.push({
       layer: 'goal',
-      content: JSON.stringify({
-        intent: `Automated scheduled task run: ${taskName}`,
-        automated: true,
-        when: new Date(session.started_at * 1000).toISOString(),
+      content: buildStructuredContent({
+        title: `Automated: ${taskName}`,
+        altitude: 'implementation',
+        type: 'work',
+        state: 'in_progress',
+        what: `Automated scheduled task run: ${taskName}`,
+        why: 'Scheduled automation',
         session_id: session.session_id,
         git_branch: session.git_branch,
-      }, null, 2),
+      }),
       importance: 0.2,
       source: { session_id: session.session_id, kind: 'automated_task' },
     });
@@ -164,11 +263,17 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
     if (isMetaOrNoise(t.text)) continue;
     if (t.text.trim().length < 40) continue;
     clarifyCount++;
+    const msgText = t.text.slice(0, 600);
     memories.push({
       layer: 'context',
-      content: JSON.stringify({
-        message: t.text.slice(0, 600),
-        when: new Date(t.timestamp * 1000).toISOString(),
+      content: buildStructuredContent({
+        title: makeTitle(msgText, 60),
+        altitude: inferAltitude(msgText),
+        type: 'note',
+        state: 'open',
+        what: msgText,
+        why: 'Clarification during session',
+        evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
         session_id: session.session_id,
       }),
       importance: 0.5,
@@ -188,18 +293,24 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   for (const [path, ops] of byPath) {
     const first = ops[0];
     const opsKinds = Array.from(new Set(ops.map((o) => o.operation))).join('+');
-    const why = (first.preceding_user_text || '(no explicit preceding intent)').slice(0, 400);
+    const userIntent = (first.preceding_user_text || '').slice(0, 400);
     const contentSnippet = ops.map((o) => o.tool_input_preview).slice(0, 2).join(' | ').slice(0, 500);
+    const fileName = path.replace(/\\/g, '/').split('/').pop() || path;
 
-    const memoryContent = JSON.stringify({
-      file: path,
-      ops: opsKinds,
-      op_count: ops.length,
-      why_extracted: why,
+    const memoryContent = buildStructuredContent({
+      title: `${opsKinds} ${fileName} (${ops.length} ops)`,
+      altitude: 'implementation',
+      type: 'work',
+      state: 'done',
+      what: userIntent || `File operation: ${opsKinds} on ${path}`,
+      why: userIntent ? `User intent: ${makeTitle(userIntent, 120)}` : '(no explicit preceding intent)',
+      affects: [path],
+      next_action: null,
+      evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
       sample_change: contentSnippet,
-      when: new Date(first.timestamp * 1000).toISOString(),
+      op_count: ops.length,
       session_id: session.session_id,
-    }, null, 2);
+    });
 
     memories.push({
       layer: 'implementation',
@@ -231,12 +342,20 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
-    if (matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20) {
+    if (matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20 && !isChitchatWithBuriedDecision(t.text, CAVEAT_PATTERNS)) {
+      const caveatText = t.text.slice(0, 500);
       memories.push({
         layer: 'caveat',
-        content: JSON.stringify({
-          rule_or_warning: t.text.slice(0, 500),
-          when: new Date(t.timestamp * 1000).toISOString(),
+        content: buildStructuredContent({
+          title: makeTitle(caveatText, 70),
+          altitude: inferAltitude(caveatText),
+          type: 'learning',
+          state: 'done',
+          what: caveatText,
+          why: 'User-stated warning/prohibition — auto-extracted by caveat pattern match',
+          affects: extractAffectedPaths(session.file_ops),
+          next_action: null,
+          evidence_refs: [{ type: 'session', id: session.session_id, label: 'caveat source' }],
           session_id: session.session_id,
         }),
         importance: 0.75,
@@ -247,16 +366,27 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
 
   // 5) Learning layer — messages matching decision patterns
   //    Same strict filter applies.
+  //    NOTE: Without LLM, we store the raw user text as `what` — this is the best
+  //    heuristic extraction can do. Agent-initiated `remember()` calls should use
+  //    the full structured format with agent_proposal + user_approval_scope.
   for (const t of session.turns) {
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
-    if (matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15) {
+    if (matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS)) {
+      const decisionText = t.text.slice(0, 500);
       memories.push({
         layer: 'learning',
-        content: JSON.stringify({
-          decision: t.text.slice(0, 500),
-          when: new Date(t.timestamp * 1000).toISOString(),
+        content: buildStructuredContent({
+          title: makeTitle(decisionText, 70),
+          altitude: inferAltitude(decisionText),
+          type: 'decision',
+          state: 'decided',
+          what: decisionText,
+          why: 'Decision detected by pattern match — may need agent enrichment',
+          affects: extractAffectedPaths(session.file_ops),
+          next_action: null,
+          evidence_refs: [{ type: 'session', id: session.session_id, label: 'decision source' }],
           session_id: session.session_id,
         }),
         importance: 0.7,
@@ -271,10 +401,15 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   if (session.errors_count > 3) {
     memories.push({
       layer: 'context',
-      content: JSON.stringify({
-        why_now: `This session had ${session.errors_count} tool errors across ${session.turns.length} turns.`,
-        triggering_event: 'high_error_rate',
-        when: new Date(session.started_at * 1000).toISOString(),
+      content: buildStructuredContent({
+        title: `High error session (${session.errors_count} errors / ${session.turns.length} turns)`,
+        altitude: 'implementation',
+        type: 'outcome',
+        state: 'done',
+        what: `This session had ${session.errors_count} tool errors across ${session.turns.length} turns.`,
+        why: 'High error rate may indicate environmental or configuration issues worth investigating',
+        affects: extractAffectedPaths(session.file_ops),
+        evidence_refs: [{ type: 'session', id: session.session_id, label: 'error session' }],
         session_id: session.session_id,
       }),
       importance: 0.4,
@@ -284,20 +419,31 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
 
   // 7) Session summary — one meta-implementation memory per session for overview
   if (memories.length > 0) {
+    const durationMin = Math.round((session.ended_at - session.started_at) / 60);
+    const firstGoalTitle = firstIntent ? makeTitle(firstIntent.text, 60) : 'automated task';
     memories.push({
       layer: 'implementation',
-      content: JSON.stringify({
+      content: buildStructuredContent({
+        title: `Session: ${firstGoalTitle} (${durationMin}min, ${byPath.size} files)`,
+        altitude: 'implementation',
+        type: 'outcome',
+        state: 'done',
+        what: `Session completed: ${durationMin} minutes, ${session.turn_count_user} user turns, ${byPath.size} files touched, ${session.errors_count} errors`,
+        why: 'Session overview for timeline and activity tracking',
+        affects: extractAffectedPaths(session.file_ops),
+        next_action: null,
+        evidence_refs: [{ type: 'session', id: session.session_id, label: 'session overview' }],
         summary_kind: 'session_overview',
         session_id: session.session_id,
         started_at: new Date(session.started_at * 1000).toISOString(),
         ended_at: new Date(session.ended_at * 1000).toISOString(),
-        duration_min: Math.round((session.ended_at - session.started_at) / 60),
+        duration_min: durationMin,
         turns_user: session.turn_count_user,
         turns_assistant: session.turn_count_assistant,
         files_touched: byPath.size,
         errors: session.errors_count,
         git_branch: session.git_branch,
-      }, null, 2),
+      }),
       importance: 0.4,
       source: { session_id: session.session_id, kind: 'session_summary' },
     });

@@ -74,6 +74,103 @@ remember({
 
 ---
 
+## 🏗️ 3-Axis Classification (v2) — REQUIRED for all `remember()` calls
+
+The 6-layer system tells you WHICH DRAWER. The 3-axis system tells you WHAT KIND of memory goes in it. Every `content` field must be a JSON string containing these 3 axes:
+
+### Axis ① Altitude — where in the abstraction hierarchy
+
+| Level | Description | Survives |
+|---|---|---|
+| `mission` | Company/product-level direction ("KanseiLINK is the intelligence layer for the Agent Economy") | Permanent |
+| `strategy` | Approach to achieving mission ("AEO-first, 引き出しカタログ model") | Permanent |
+| `architecture` | System design decisions ("2-layer: Memory=agent-optimized, Dashboard=human-optimized") | Long-lived |
+| `implementation` | Specific code/config changes ("Added FTS5 trigram index") | Auto-archives after 30d if untouched |
+
+### Axis ② Type — what kind of information
+
+| Type | Description |
+|---|---|
+| `question` | User asked something, answer pending or delivered |
+| `comparison` | Multiple options analyzed (e.g., Stripe vs Square) |
+| `decision` | A choice was made — store agent_proposal + user_approval_scope |
+| `work` | Code written, config changed, command run |
+| `outcome` | Result of work (success/failure + what happened) |
+| `learning` | Insight gained, prior belief updated |
+| `note` | General context — **chitchat = DISCARD, do NOT save** |
+
+### Axis ③ State — lifecycle position
+
+```
+open → decided → in_progress → done
+                              → stalled (blocked, can't proceed)
+                              → parked (intentionally paused)
+                              → superseded (replaced by newer decision)
+```
+
+---
+
+## 📝 Structured Content Format — the JSON schema for `content`
+
+**Every `remember()` call MUST use this JSON format in the `content` field:**
+
+```json
+{
+  "title": "<one-line: WHAT this memory IS — future-agent skims this>",
+  "altitude": "strategy",
+  "type": "decision",
+  "state": "decided",
+  "what": "<the actual content — 5W1H extracted, NOT raw chat>",
+  "why": "<why this matters — the reasoning>",
+  "affects": ["src/mcp/server.ts", "lib/db.ts"],
+  "next_action": "Implement the schema migration next session",
+  "supersedes_id": null,
+  "evidence_refs": [
+    {"type": "session", "id": "b78dc5ba", "label": "Architecture discussion"}
+  ]
+}
+```
+
+### Required fields (ALL memories)
+
+| Field | Type | Description |
+|---|---|---|
+| `title` | string | One-line summary. Future agents read ONLY this when scanning. Make it specific: "freee OAuth 24h expiry caveat" not "OAuth issue" |
+| `altitude` | enum | mission / strategy / architecture / implementation |
+| `type` | enum | question / comparison / decision / work / outcome / learning |
+| `state` | enum | open / decided / in_progress / done / stalled / parked / superseded |
+| `what` | string | The semantic content. Extract 5W1H from conversation — NEVER store raw chat like "そうだね。全部やろう。" |
+| `why` | string | Why this matters. Without this, future agents can't judge relevance |
+
+### Required fields (DECISION type only)
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_proposal` | string | What the agent proposed (the full context the user was responding to) |
+| `user_approval_scope` | string | What EXACTLY the user approved — "うん全部やって" → translate to "approved all 6 panels of Agent Brain Dashboard including data layer, API route, and view component" |
+
+### Optional but recommended fields
+
+| Field | Type | Description |
+|---|---|---|
+| `affects` | string[] | File paths or areas this touches. Critical for future `recall_file` accuracy |
+| `next_action` | string / null | What should happen next. Null if done/completed |
+| `supersedes_id` | number / null | Memory ID this replaces (builds pivot chains) |
+| `prior_belief` | string | What we used to think (for learnings — enables belief-update tracking) |
+| `evidence_refs` | object[] | Links to evidence: `{"type": "session"|"file"|"url", "id": "...", "label": "..."}`. Store as REFERENCES, never inline the full content |
+
+### Content quality rules — what NOT to save
+
+| ❌ DO NOT | ✅ INSTEAD |
+|---|---|
+| Store raw chat: `"決めた。それでいこう"` | Extract: `"Decided to use 2-layer architecture splitting Memory (agent-optimized) from Dashboard (human-optimized)"` |
+| Store ambient chat: `"書斎で無糖のサイダー飲んでる"` | Discard. Not a memory. |
+| Store vague approval: `"うん全部やって"` | Extract the SCOPE: `"Approved: (1) agent-brain data layer, (2) API route, (3) 6-panel view component implementation"` |
+| Paste back assistant output as memory | Summarize the KEY INSIGHT from the output in YOUR words |
+| Store without `why` | Always include WHY — without it, memory is noise |
+
+---
+
 ## 🔄 Execution flow — 5 canonical moments
 
 ### ① Task Start — Always recall before starting work
@@ -112,6 +209,30 @@ In the returned memories, pay special attention to:
 From past caveat: "Watch out for MCP tool name collisions"
 → Before adding a new tool, check existing tool names first.
 ```
+
+#### ⚡ Writing effective recall queries
+
+The recall engine uses FTS5 full-text search + heat_score ranking. Your query determines what comes back.
+
+| Pattern | Query style | Example |
+|---|---|---|
+| Entity + topic | `"<entity> <topic keyword>"` | `"KanseiLink OAuth"` |
+| Error recall | `"<error message core> <technology>"` | `"401 freee token expired"` |
+| Decision recall | `"<entity> decided strategy approach"` | `"Linksee Memory plugin vs MCP"` |
+| File-related | Use `recall_file` instead | `recall_file({ path_substring: "server.ts" })` |
+| Cross-entity | Call recall TWICE for each entity | `recall({ query: "KanseiLink" })` then `recall({ query: "Linksee Memory" })` |
+
+**Anti-patterns:**
+- ❌ `recall({ query: "what happened" })` — too vague, FTS5 matches everything
+- ❌ `recall({ query: "the user said to fix the bug in the auth flow" })` — natural language sentences score poorly in FTS5
+- ✅ `recall({ query: "auth bug fix caveat", layer: "caveat" })` — keywords + layer filter = precise
+
+#### 🔇 When NOT to recall (save tokens)
+
+- Same entity already recalled in this session AND no new context arrived → **skip**
+- User is just chatting / thinking aloud / no task yet → **skip** (wait for concrete task)
+- You just wrote a memory 2 turns ago → **skip** (it's still in your context window)
+- The answer is already in your conversation context → **skip** (don't waste a tool call)
 
 ### ② File Edit — Use recall_file before touching a file
 
@@ -168,7 +289,16 @@ mcp__linksee__remember({
   entity_name: "<project name or service name>",
   entity_kind: "project",
   layer: "caveat",
-  content: '{"rule_or_warning":"<what failed + workaround>","when":"<ISO datetime>"}',
+  content: JSON.stringify({
+    title: "<one-line: what failed + the rule>",
+    altitude: "implementation",
+    type: "outcome",
+    state: "done",
+    what: "<what failed + workaround found>",
+    why: "<root cause analysis>",
+    affects: ["<file paths where the error occurred>"],
+    next_action: null
+  }),
   importance: 0.8  // failures are high-importance
 })
 ```
@@ -176,9 +306,15 @@ mcp__linksee__remember({
 **Example**:
 ```json
 {
-  "rule_or_warning": "freee MCP OAuth token expires in 24 hours. Must refresh via refresh_token. Reusing access_token directly causes 401.",
-  "from_incident": "session 02759-... hit auth_expired error",
-  "workaround": "every 24h: refresh token → new access token"
+  "title": "freee OAuth token expires in 24h — must refresh proactively",
+  "altitude": "implementation",
+  "type": "outcome",
+  "state": "done",
+  "what": "freee MCP OAuth token expires in 24 hours. Reusing access_token directly causes 401. Must call refresh_token endpoint proactively.",
+  "why": "freee's OAuth implementation uses short-lived tokens unlike most SaaS (usually 30-90 day expiry)",
+  "affects": ["src/integrations/freee/auth.ts"],
+  "next_action": null,
+  "evidence_refs": [{"type":"session", "id":"02759...", "label":"freee auth_expired incident"}]
 }
 ```
 
@@ -193,7 +329,17 @@ mcp__linksee__remember({
   entity_name: "<entity>",
   entity_kind: "project | concept | ...",
   layer: "learning",
-  content: '{"at":"<datetime>","learned":"<what was learned>","prior_belief":"<what we used to think>"}',
+  content: JSON.stringify({
+    title: "<one-line: what was learned>",
+    altitude: "<strategy|architecture|implementation>",
+    type: "learning",
+    state: "done",
+    what: "<the insight>",
+    why: "<why this changes how we work>",
+    prior_belief: "<what we used to think>",
+    affects: ["<file paths if applicable>"],
+    next_action: "<follow-up action if any>"
+  }),
   importance: 0.7
 })
 ```
@@ -211,6 +357,9 @@ Recording `prior_belief` leaves a **belief-update history**. Later, this becomes
 3. **Prefer `read_smart` over `Read` for larger files**
 4. **When an error occurs, record a `caveat` immediately** (on the spot — don't defer)
 5. **When the user is surprised or says "interesting", record a `learning`**
+6. **Before risky/irreversible actions, proactively recall caveats** (Case H)
+7. **Before finalizing a decision, check for prior decisions on the same topic** (Case D)
+8. **Use keywords + layer filter in recall queries**, not natural language sentences
 
 ### ❌ Don't
 
@@ -219,6 +368,8 @@ Recording `prior_belief` leaves a **belief-update history**. Later, this becomes
 3. ❌ Use `Read` everywhere instead of `read_smart` (wastes tokens)
 4. ❌ Write caveats in a flippant tone — preserve them seriously
 5. ❌ Skip `consolidate` during long-running work — run it weekly
+6. ❌ Recall the same entity twice in one session without new context (wastes tokens)
+7. ❌ Write `recall({ query: "what happened last time" })` — use specific keywords
 
 ---
 
@@ -275,36 +426,104 @@ User: "Fix server.ts"
 5. After editing, record success / failure via implementation layer
 ```
 
-### Case D — Decision made
+### Case D — Before finalizing a decision (pre-decision check)
+
+User: "Let's switch to Stripe for payments"
+
+**Key: BEFORE recording a decision, check if a past decision on the same topic exists. This prevents flip-flopping and builds on prior reasoning.**
+
+```
+1. recall({ query: "<entity> <topic> decided strategy", layer: "learning", max_tokens: 1000 })
+   → Look for: type="decision", state="decided" memories on the same topic
+2. If past decision found:
+   a. Tell user: "Previously we decided <X> because <reason>. Override?"
+   b. If user confirms override → use supersedes_id to link to old decision
+   c. If user says "oh right, keep it" → no new memory needed, proceed
+3. If no past decision found → proceed to record (see Case E below)
+```
+
+**Example**: Past memory says "Decided: Square over Stripe due to SG tax handling". When user now says "switch to Stripe", surface that context FIRST. The user may not remember the original reasoning.
+
+### Case E — Decision made (recording)
 
 User: "Alright, let's switch to Sonnet"
+
+**Key: capture WHAT was decided, WHY, and what the user was responding to — not the raw chat.**
 
 ```
 1. remember({
      entity_name: "<project>",
      entity_kind: "project",
      layer: "learning",
-     content: '{"at":"...", "learned":"This project uses Sonnet", "prior_belief":"Was using Opus"}',
+     content: JSON.stringify({
+       title: "Model switch: Opus → Sonnet for this project",
+       altitude: "architecture",
+       type: "decision",
+       state: "decided",
+       what: "Switched default model from Opus to Sonnet for this project",
+       why: "Sonnet is faster and cheaper for implementation-heavy work; Opus reserved for architecture decisions",
+       agent_proposal: "Suggested Sonnet for faster iteration on implementation tasks",
+       user_approval_scope: "Approved switching default model to Sonnet for all tasks in this project",
+       prior_belief: "Was using Opus for everything",
+       affects: [".claude/settings.json"],
+       next_action: null
+     }),
      importance: 0.8
    })
 2. Brief confirmation: "Recorded."
 3. From here, proceed assuming Sonnet
 ```
 
-### Case E — End of long session
+### Case F — End of long session
 
 User: "That's it for today"
 
+**Key: extract the SEMANTIC decisions and outcomes, not raw chat dumps.**
+
 ```
-1. Record today's highlights via remember:
-   - Major decisions → learning layer
-   - Failures hit → caveat layer
-   - Finished deliverables → implementation.success
-2. Report: "Recorded. Retrievable via recall next session."
-3. Optionally suggest: consolidate({scope:"session", min_age_days: 14})
+1. For each major decision made during the session:
+   remember({
+     entity_name: "<project>",
+     entity_kind: "project",
+     layer: "learning",
+     content: JSON.stringify({
+       title: "<one-line: what was decided>",
+       altitude: "<strategy|architecture|implementation>",
+       type: "decision",
+       state: "decided",
+       what: "<5W1H extraction of the decision>",
+       why: "<reasoning behind it>",
+       agent_proposal: "<what you proposed>",
+       user_approval_scope: "<what exactly user approved>",
+       affects: ["<file paths>"],
+       next_action: "<what's next>",
+       evidence_refs: [{"type":"session", "id":"<current_session_id>", "label":"<topic>"}]
+     }),
+     importance: 0.85
+   })
+
+2. For each failure/lesson:
+   remember({
+     ...,
+     layer: "caveat",
+     content: JSON.stringify({
+       title: "<one-line: what went wrong and the fix>",
+       altitude: "implementation",
+       type: "outcome",
+       state: "done",
+       what: "<what failed + workaround found>",
+       why: "<root cause>",
+       affects: ["<file paths>"],
+       next_action: null
+     }),
+     importance: 0.8
+   })
+
+3. Report: "Recorded N decisions, M caveats. Retrievable via recall."
+4. Optionally suggest: consolidate({scope:"session", min_age_days: 14})
 ```
 
-### Case F — User explicitly says "remember this"
+### Case G — User explicitly says "remember this"
 
 User: "Remember this: DocuSign is more stable than CloudSign"
 
@@ -313,11 +532,49 @@ User: "Remember this: DocuSign is more stable than CloudSign"
      entity_name: "CloudSign vs DocuSign",
      entity_kind: "concept",
      layer: "caveat",
-     content: '{"rule_or_warning":"CloudSign (61% success) is less reliable than DocuSign-JP (100%). Recommend DocuSign when advising customers."}',
+     content: JSON.stringify({
+       title: "DocuSign-JP >> CloudSign for reliability",
+       altitude: "strategy",
+       type: "comparison",
+       state: "decided",
+       what: "CloudSign (61% success) is significantly less reliable than DocuSign-JP (100% success). Recommend DocuSign when advising customers.",
+       why: "Based on KanseiLINK agent success rate data across multiple integrations",
+       affects: [],
+       next_action: null
+     }),
      importance: 0.9  // user-explicit instruction = high priority
    })
 2. Confirm: "Recorded. Since it's in the caveat layer, it won't be forgotten."
 ```
+
+### Case H — Proactive caveat surfacing (the "間違えたらやばい" pattern)
+
+**This is the precision memory killer feature.** When you're about to take an action that could go wrong, check for past caveats BEFORE acting — even if the user didn't ask.
+
+**Trigger**: You are about to do something risky or irreversible:
+- Deploy / publish / push to production
+- Delete / overwrite / destructive operation
+- External API call (payment, email send, etc.)
+- Architecture change affecting multiple files
+- Changing auth/security configuration
+
+```
+1. recall({ query: "<entity> <action keyword>", layer: "caveat", max_tokens: 800 })
+2. If caveat found:
+   a. STOP before acting
+   b. Tell user: "⚠️ Past caveat: <title>. <what>. Proceed anyway?"
+   c. Wait for confirmation
+3. If no caveat → proceed normally
+```
+
+**Example**: About to run `npm publish`:
+```
+recall({ query: "npm publish", layer: "caveat", max_tokens: 500 })
+→ Caveat found: "npm token rotation — always verify token validity before publish"
+→ "⚠️ Past caveat: npm token may need rotation. Want me to check `npm whoami` first?"
+```
+
+**Why this matters**: This is what separates precision memory from ambient memory. Ambient memory passively injects everything. Precision memory **actively intervenes at the moment it matters most** — when you're about to make the same mistake twice.
 
 ---
 
@@ -368,7 +625,7 @@ Now you have both bodies of knowledge before starting
 
 ---
 
-*This skill runs on top of linksee-memory MCP v0.2.0+.*
+*This skill runs on top of linksee-memory MCP v0.4.0+.*
 *Auto-write via Stop hook, explicit read via recall.*
 *Listed in MCP Official Registry, PulseMCP, mcpservers.org, Glama.*
 *MIT License — Synapse Arrows PTE. LTD.*
