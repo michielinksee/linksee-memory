@@ -1,8 +1,10 @@
 # linksee-memory
 
-> Local-first agent memory MCP. A cross-agent brain for **Claude Code, Cursor, OpenAI Codex, and Gemini CLI** — with a token-saving file diff cache that nobody else does. One SQLite file, all your LLMs read the same memory.
+> **Your agent forgets everything when a session ends. Linksee Memory is the fix.**
 >
-> **v0.3.0** ships the **Five Blocks**: Tools + Resources + Prompts + Sampling + Roots, plus the newer **Elicitation** primitive. Most public MCP servers expose only Tools; v0.3.0 moves linksee-memory into the differentiated tier. Backward compatible — all 8 v0.2.x tools keep their signatures. See [CHANGELOG.md](./CHANGELOG.md).
+> Local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY** it happened: 6-layer structured memory with precision recall that surfaces the right context at the right moment.
+>
+> `npx linksee-memory-setup` — one command, done.
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -98,7 +100,7 @@ It is a Model Context Protocol (MCP) server that gives any AI agent four superpo
 ## Three pillars
 
 1. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
-2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, OpenAI Codex, Gemini CLI. (ChatGPT app needs Remote MCP — on roadmap for v0.4.)
+2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI.
 3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
 
 ## Quick Start — One Command
@@ -158,20 +160,103 @@ Each turn end takes ~100 ms. Failures are silent. Logs at `~/.linksee-memory/hoo
 
 </details>
 
+### Other editors / CLIs
+
+Linksee Memory is a standard MCP server (stdio). Any tool that speaks MCP can connect:
+
+<details>
+<summary><strong>Cursor</strong></summary>
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory"]
+    }
+  }
+}
+```
+
+Restart Cursor. Memory tools appear in the agent panel.
+
+</details>
+
+<details>
+<summary><strong>Windsurf</strong></summary>
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>OpenAI Codex CLI</strong></summary>
+
+```bash
+codex --mcp-server "npx -y linksee-memory"
+```
+
+Or add to `~/.codex/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory"]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Gemini CLI</strong></summary>
+
+Add to `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory"]
+    }
+  }
+}
+```
+
+</details>
+
+All editors share the same `~/.linksee-memory/memory.db`. A decision made in Claude Code is recalled in Cursor. A caveat recorded in Windsurf prevents the same mistake in Codex.
+
 ### Database location
 
 Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
-## v0.3.0 — Five Blocks at a glance
+## What's new in v0.4
 
-| MCP Block | Surface |
+| Feature | Detail |
 |---|---|
-| **Tools** | 8 tools (unchanged signatures since v0.2). |
-| **Resources** | 4 static URIs (`memory://stats`, `memory://hot`, `memory://recent`, `memory://caveats`) + 3 templates (`memory://entity/{name}`, `memory://layer/{layer}`, `memory://memory/{id}`). Browseable via `@-mention` in clients that support it. |
-| **Prompts** | 5 reusable templates: `summarize-session`, `extract-caveats`, `weekly-consolidation`, `recall-and-write`, `entity-handoff`. |
-| **Sampling** *(client opt-in)* | `consolidate{use_llm:true}` asks the client LLM to rewrite consolidated cluster summaries into prose. Falls back to the heuristic when the client declines. |
-| **Roots** *(client opt-in)* | `recall_file{scope_to_roots:true}` filters path matches to files inside any client-provided working root. |
-| **Elicitation** *(client opt-in, newer primitive)* | `forget{interactive:true, memory_id:N}` asks the user to confirm via the client UI before deleting. |
+| **One-command setup** | `npx linksee-memory-setup` — registers MCP server, installs skill, configures auto-capture hook. One command instead of three. |
+| **Structured memory v2** | 3-axis classification (altitude × type × state) for every memory. Auto-extraction from sessions produces machine-scannable JSON, not raw chat dumps. |
+| **Precision recall guide** | SKILL.md now teaches agents HOW to write effective queries, WHEN to recall vs skip, and WHEN to proactively surface caveats before risky actions. |
+| **"Use Linksee" trigger** | Add "Use Linksee" to any prompt to force memory recall — same adoption pattern as Context7. |
+| **Five MCP Blocks** | Tools + Resources + Prompts + Sampling + Roots + Elicitation. Most MCP servers expose only Tools; linksee-memory implements all six primitives. |
 
 ## Tools
 
@@ -190,32 +275,33 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 
 | Command | Purpose |
 |---|---|
+| `npx linksee-memory-setup` | **v0.4.1** One-command setup: MCP server + skill + Stop hook. Idempotent — skips what's already done. |
 | `npx linksee-memory` | MCP server (stdio) |
 | `npx linksee-memory-sync` | Claude Code Stop-hook entry point |
 | `npx linksee-memory-import` | Batch-import Claude Code session JSONL history |
 | `npx linksee-memory-install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
-| `npx linksee-memory-stats` | **v0.1.0** Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
+| `npx linksee-memory-stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
 
 ## The 6 memory layers
 
-Each entity (person / company / project / file / concept) can have memories across six layers. The layer encodes meaning, not category:
+Each entity (person / company / project / file / concept) can have memories across six layers. Since v0.4, each memory uses the **3-axis structured format** (altitude × type × state):
 
 ```json
 {
-  "goal":    { "primary": "...", "sub_tasks": [], "deadline": "..." },
-  "context": { "why_now": "...", "triggering_event": "...", "when": "..." },
-  "emotion": { "temperature": "hot|warm|cold", "user_tone": "..." },
-  "implementation": {
-    "success": [{ "what": "...", "evidence": "..." }],
-    "failure": [{ "what": "...", "why_failed": "..." }]
-  },
-  "caveat":  [{ "rule": "...", "reason": "...", "from_incident": "..." }],
-  "learning":[{ "at": "...", "learned": "...", "prior_belief": "..." }]
+  "title": "freee OAuth token expires in 24h",
+  "altitude": "implementation",
+  "type": "outcome",
+  "state": "done",
+  "what": "freee OAuth token expires in 24 hours. Must refresh proactively.",
+  "why": "freee uses short-lived tokens unlike most SaaS (usually 30-90 day expiry)",
+  "affects": ["src/integrations/freee/auth.ts"],
+  "next_action": null
 }
 ```
 
 - `caveat` memories are auto-protected from forgetting (pain lessons, never lost).
 - `goal` memories bypass decay while the goal is active.
+- `state` tracks lifecycle: `open` → `decided` → `in_progress` → `done` / `stalled` / `superseded`.
 
 ## Architecture
 
@@ -238,15 +324,16 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 
 ## Roadmap
 
-- ✅ Core 6 MCP tools (`remember` / `recall` / `recall_file` / `forget` / `consolidate` / `read_smart`)
+- ✅ Core 8 MCP tools + Five Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
 - ✅ Stop-hook auto-capture for Claude Code
 - ✅ JP/EN trigram FTS5
-- ✅ Five Blocks (v0.3.0): Tools + Resources + Prompts + Sampling + Roots + Elicitation
-- ✅ Cursor + OpenAI Codex + Gemini CLI adapters (stdio MCP, same `npx -y linksee-memory`)
-- 🚧 `PreToolUse` hook to auto-intercept `Read` (zero-config token savings)
-- 🔮 ChatGPT app (web/mobile) support via `linksee-memory-remote` (Remote MCP over HTTPS, v0.4)
+- ✅ One-command setup (`npx linksee-memory-setup`)
+- ✅ Structured memory v2 (3-axis classification: altitude × type × state)
+- ✅ Precision recall guide + proactive caveat surfacing
+- ✅ Cross-LLM: Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI
+- 🚧 Landing page + SEO
 - 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
-- 🔮 Cross-device cloud sync (Pro tier, summer 2026)
+- 🔮 Cross-device cloud sync (Pro tier)
 - 🔮 Optional anonymized telemetry → MCP-quality intelligence layer
 
 ## Comparison with Claude Code auto-memory
