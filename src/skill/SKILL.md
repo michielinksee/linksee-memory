@@ -14,8 +14,8 @@ description: |
   ⑥ When asked "why did we do that", "when was this decided", "where did we discuss this" / 「なぜそうした」「いつ決めた」「どこで議論した」
   ⑦ Returning from another project / switching sessions / 別プロジェクトから戻ってきたとき
 
-  Triggers (EN): remember/recall/forget/memory/before/earlier/last time/previously/remember when/same as before/history
-  Triggers (JP): 記憶/覚えて/忘れて/過去/前回/前に/そういえば/覚えてる
+  Triggers (EN): remember/recall/forget/memory/before/earlier/last time/previously/remember when/same as before/history/use linksee/linksee
+  Triggers (JP): 記憶/覚えて/忘れて/過去/前回/前に/そういえば/覚えてる/リンクシー
   Error keywords (EN): failed/broken/stuck/error/bug/doesn't work/not working/same error again/again/repeated/debug
   Error keywords (JP): 失敗/エラー/うまくいかない/ハマった/同じ/また/繰り返し
   Decision keywords (EN): decided/let's go with/approved/settled on/pivot/strategy/switch to/abandon

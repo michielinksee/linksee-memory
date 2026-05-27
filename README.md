@@ -101,44 +101,43 @@ It is a Model Context Protocol (MCP) server that gives any AI agent four superpo
 2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, OpenAI Codex, Gemini CLI. (ChatGPT app needs Remote MCP — on roadmap for v0.4.)
 3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
 
-## Install
+## Quick Start — One Command
 
 ```bash
-npm install -g linksee-memory
-linksee-memory-import --help   # bundled importer for Claude Code session history
+npx linksee-memory-setup
 ```
 
-Or use `npx` ad hoc:
+This does everything:
+1. Registers the MCP server with Claude Code
+2. Installs the agent skill (teaches the agent when to recall/remember)
+3. Configures auto-capture (every session saved to your local brain)
 
-```bash
-npx linksee-memory             # starts the MCP server on stdio
-```
+Restart Claude Code, then just chat normally. Add **"Use Linksee"** to any prompt to trigger memory recall.
 
-The default database lives at `~/.linksee-memory/memory.db`. Override with the `LINKSEE_MEMORY_DIR` environment variable.
+### Manual setup (if you prefer step-by-step)
 
-## Register with Claude Code
+<details>
+<summary>Click to expand manual installation</summary>
+
+**Install & register:**
 
 ```bash
 claude mcp add -s user linksee -- npx -y linksee-memory
 ```
 
-Restart Claude Code. Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee__recall_file`, `mcp__linksee__read_smart`, `mcp__linksee__forget`, `mcp__linksee__consolidate`.
+Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee__recall_file`, `mcp__linksee__read_smart`, `mcp__linksee__forget`, `mcp__linksee__consolidate`.
 
-### Recommended: install the skill (auto-invocation)
-
-Installing the MCP alone doesn't teach Claude Code *when* to call `recall` / `remember`. The bundled skill fixes that:
+**Install the skill (auto-invocation):**
 
 ```bash
 npx -y linksee-memory-install-skill
 ```
 
-This copies a `SKILL.md` to `~/.claude/skills/linksee-memory/`. Claude Code auto-discovers it and fires the skill on phrases like "前に…", "また同じエラー", "覚えておいて", new task starts, file edits, and so on — no need to say "use linksee-memory".
+Copies `SKILL.md` to `~/.claude/skills/linksee-memory/`. Agent auto-fires on phrases like "前に…", "また同じエラー", "覚えておいて", new task starts, file edits, etc.
 
-Flags: `--dry-run`, `--force`, `--help`.
+**Configure auto-capture (Stop hook):**
 
-### Optional: auto-capture every session (Stop hook)
-
-Add to `~/.claude/settings.json` to record every Claude Code session to your local brain automatically:
+Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -155,7 +154,13 @@ Add to `~/.claude/settings.json` to record every Claude Code session to your loc
 }
 ```
 
-Each turn end takes ~100 ms. Failures are silent (Claude Code never blocks). Logs at `~/.linksee-memory/hook.log`.
+Each turn end takes ~100 ms. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
+
+</details>
+
+### Database location
+
+Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
 ## v0.3.0 — Five Blocks at a glance
 
