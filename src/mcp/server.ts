@@ -20,6 +20,7 @@ import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
 import { consolidate as runConsolidate } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
+import { inferAltitude, inferType, inferState } from '../lib/session-extractor.js';
 import { normalizeEntityName } from '../lib/normalize.js';
 import { handleReadSmart as handleReadSmartImpl } from './read-smart.js';
 import { STATIC_RESOURCES, RESOURCE_TEMPLATES, readResource } from './resources.js';
@@ -28,7 +29,7 @@ import { fetchRoots, isInsideRoots } from './roots.js';
 import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 
-const SERVER_VERSION = '0.5.1';
+const SERVER_VERSION = '0.6.0';
 
 const db = openDb();
 runMigrations(db);
@@ -93,6 +94,7 @@ const TOOLS = [
         layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Common aliases (why, decisions, warnings, how, ...) are accepted.' },
         content: { type: 'string', description: 'The memory content (plain text or JSON)' },
         importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set to 0.9 or higher to "pin" a memory (protects from forgetting even outside caveat layer).' },
+        thread_id: { type: 'string', description: 'Optional thread ID to group related memories (e.g. session_id, decision chain ID). Enables decision→implementation→outcome tracing.' },
         force: { type: 'boolean', default: false, description: 'Bypass the paste-back/CI-log quality check. Only set when you are sure the content is original user or agent thought.' },
       },
       required: ['entity_name', 'entity_kind', 'layer', 'content'],
@@ -126,6 +128,7 @@ const TOOLS = [
           enum: ['open', 'decided', 'in_progress', 'done', 'stalled', 'parked', 'superseded'],
           description: 'Filter by lifecycle state. Useful for finding open questions, stalled work, or parked decisions.',
         },
+        thread_id: { type: 'string', description: 'Filter by thread ID — returns all memories in a decision chain or session group.' },
         band: { type: 'string', enum: ['hot', 'warm', 'cold', 'frozen'], description: 'Optional — only return memories whose heat_band matches.' },
         max_tokens: { type: 'number', description: 'Approx token budget. Default 2000. Either max_tokens or limit stops iteration (whichever fires first).', default: 2000 },
         limit: { type: 'number', description: 'Optional hard cap on number of memories. Stops at min(max_tokens-budget, limit).' },
@@ -273,7 +276,7 @@ function handleRemember(args: any): string {
   }
 
   // Quality check — reject pasted external content unless force=true
-  const rawContent = String(args.content ?? '');
+  let rawContent = String(args.content ?? '');
   if (!args.force && isPastedExternalContent(rawContent)) {
     return JSON.stringify({
       ok: false,
@@ -286,9 +289,29 @@ function handleRemember(args: any): string {
   const entityId = upsertEntity({ name: args.entity_name, kind: args.entity_kind, key: args.entity_key });
   const importance = Math.min(1, Math.max(0, Number(args.importance ?? 0.5)));
 
+  // Auto-classify: if content is plain text (not JSON with 3-axis fields),
+  // wrap it in structured JSON so VIRTUAL generated columns can extract axes.
+  let isAlreadyStructured = false;
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (parsed && typeof parsed === 'object' && parsed.altitude && parsed.type && parsed.state) {
+      isAlreadyStructured = true;
+    }
+  } catch { /* not JSON = needs wrapping */ }
+
+  if (!isAlreadyStructured) {
+    const structured = {
+      altitude: inferAltitude(rawContent),
+      type: inferType(rawContent, layer),
+      state: inferState(rawContent, layer),
+      what: rawContent,
+    };
+    rawContent = JSON.stringify(structured);
+  }
+
   const result = db
-    .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected) VALUES (?, ?, ?, ?, ?)')
-    .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0);
+    .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected, thread_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0, args.thread_id ?? null);
 
   db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
     entityId,
@@ -326,12 +349,14 @@ interface AxisFilters {
   altitude?: string;
   mem_type?: string;
   mem_state?: string;
+  thread_id?: string;
 }
 
 function appendAxisFilters(sql: string, params: any[], filters: AxisFilters): string {
   if (filters.altitude) { sql += ' AND m.altitude = ?'; params.push(filters.altitude); }
   if (filters.mem_type) { sql += ' AND m.mem_type = ?'; params.push(filters.mem_type); }
   if (filters.mem_state) { sql += ' AND m.mem_state = ?'; params.push(filters.mem_state); }
+  if (filters.thread_id) { sql += ' AND m.thread_id = ?'; params.push(filters.thread_id); }
   return sql;
 }
 
@@ -339,7 +364,7 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
-           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state,
+           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state, m.thread_id as _thread_id,
            bm25(memories_fts) as bm25_score
     FROM memories_fts
     JOIN memories m ON m.id = memories_fts.rowid
@@ -358,7 +383,7 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
-           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state,
+           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state, m.thread_id as _thread_id,
            0 as bm25_score
     FROM memories m
     JOIN entities e ON e.id = m.entity_id
@@ -411,6 +436,7 @@ function handleRecall(args: any): string {
     altitude: args.altitude,
     mem_type: args.mem_type,
     mem_state: args.mem_state,
+    thread_id: args.thread_id,
   };
 
   // Fetch extra rows for composite re-rank, pagination, and band filtering
@@ -569,6 +595,7 @@ function handleRecall(args: any): string {
           altitude: r._altitude ?? null,
           type: r._mem_type ?? null,
           state: r._mem_state ?? null,
+          thread_id: r._thread_id ?? null,
         },
         content: parsedContent,
         content_raw: r.content,

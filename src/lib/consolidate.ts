@@ -20,6 +20,7 @@ export interface ConsolidateResult {
   memoriesReplaced: number;
   memoriesDropped: number;
   learningIdsCreated: number[];
+  stalledTransitions: number;
 }
 
 interface Candidate {
@@ -98,6 +99,7 @@ export function consolidate(
     memoriesReplaced: 0,
     memoriesDropped: 0,
     learningIdsCreated: [],
+    stalledTransitions: 0,
   };
 
   const insertLearning = db.prepare(
@@ -188,6 +190,19 @@ export function consolidate(
     }
   });
   tx();
+
+  // State transition sweep: in_progress memories untouched for 30+ days → stalled.
+  // Uses json_set() to update the state field in content JSON atomically.
+  const STALLED_THRESHOLD_DAYS = 30;
+  const stalledCutoff = now - STALLED_THRESHOLD_DAYS * 86400;
+  const stalledResult = db.prepare(`
+    UPDATE memories SET content = json_set(content, '$.state', 'stalled')
+    WHERE json_valid(content)
+      AND json_extract(content, '$.state') = 'in_progress'
+      AND last_accessed_at < ?
+      AND protected = 0
+  `).run(stalledCutoff);
+  result.stalledTransitions = stalledResult.changes;
 
   // Post-consolidate: forget-sweep remaining non-clustered cold memories
   const remaining = db

@@ -1,8 +1,9 @@
--- linksee-memory schema v0.0.3
+-- linksee-memory schema v0.0.4
 -- Single-file SQLite store for cross-agent structured memory.
 -- Layers: 1=facts (entities), 2=associations (edges), 3=patterns (meanings), 4=events (time-series), 5=file-state (diff cache).
 -- v2 adds: FTS5 full-text search, consolidations audit, momentum cache on entities.
 -- v6 adds: 3-axis generated columns (altitude/mem_type/mem_state) for queryable classification.
+-- v7 adds: thread_id for decision chains, memory_edges for memory→memory relationships.
 
 -- ============================================================
 -- Layer 1: Facts — entities (people / companies / projects / concepts)
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS memories (
   importance      REAL NOT NULL DEFAULT 0.5,
   protected       INTEGER NOT NULL DEFAULT 0,
   source          TEXT,
+  thread_id       TEXT,                                -- groups related memories (e.g. same session, same decision chain)
   created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
   last_accessed_at INTEGER NOT NULL DEFAULT (unixepoch()),
   access_count    INTEGER NOT NULL DEFAULT 0,
@@ -54,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_protected  ON memories(protected);
 CREATE INDEX IF NOT EXISTS idx_memories_altitude   ON memories(altitude);
 CREATE INDEX IF NOT EXISTS idx_memories_mem_type   ON memories(mem_type);
 CREATE INDEX IF NOT EXISTS idx_memories_mem_state  ON memories(mem_state);
+CREATE INDEX IF NOT EXISTS idx_memories_thread     ON memories(thread_id);
 
 CREATE TRIGGER IF NOT EXISTS trg_protect_caveat
   AFTER INSERT ON memories
@@ -108,6 +111,25 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(to_id);
 CREATE INDEX IF NOT EXISTS idx_edges_rel  ON edges(relation);
+
+-- ============================================================
+-- Memory edges — directed relationships between individual memories
+-- Enables: decision→implementation→outcome chains, supersedes tracking.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS memory_edges (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_memory_id  INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  to_memory_id    INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relation        TEXT NOT NULL CHECK (relation IN (
+                    'supersedes', 'resolves', 'implements', 'contradicts', 'extends'
+                  )),
+  created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(from_memory_id, to_memory_id, relation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_medge_from ON memory_edges(from_memory_id);
+CREATE INDEX IF NOT EXISTS idx_medge_to   ON memory_edges(to_memory_id);
+CREATE INDEX IF NOT EXISTS idx_medge_rel  ON memory_edges(relation);
 
 -- ============================================================
 -- Layer 4: Events — time-series log with importance markers
@@ -205,6 +227,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '6');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '7');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '6' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5');
+UPDATE meta SET value = '7' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6');

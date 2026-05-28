@@ -101,7 +101,7 @@ async function main() {
       projectEntityId = Number(ins.lastInsertRowid);
     }
 
-    const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source) VALUES (?, ?, ?, ?, ?)');
+    const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id) VALUES (?, ?, ?, ?, ?, ?)');
     const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
 
@@ -109,7 +109,7 @@ async function main() {
     db.transaction(() => {
       const memContentToId = new Map<string, number>();
       for (const m of result.memories) {
-        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, JSON.stringify(m.source));
+        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, JSON.stringify(m.source), m.thread_id ?? null);
         memContentToId.set(m.content, Number(res.lastInsertRowid));
         inserted.memories++;
       }
@@ -220,7 +220,7 @@ async function main() {
       wipeSession(db, result.session_id);
 
       // Insert memories + file_edits in a single transaction per session
-      const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source) VALUES (?, ?, ?, ?, ?)');
+      const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id) VALUES (?, ?, ?, ?, ?, ?)');
       const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
       const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
 
@@ -229,7 +229,7 @@ async function main() {
 
         for (const m of result.memories) {
           const srcJson = JSON.stringify(m.source);
-          const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson);
+          const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson, m.thread_id ?? null);
           memContentToId.set(m.content, Number(res.lastInsertRowid));
           agg.memories_inserted++;
         }

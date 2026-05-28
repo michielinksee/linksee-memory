@@ -84,6 +84,21 @@ export function runMigrations(db: Database.Database): void {
     db.exec(`ALTER TABLE memories ADD COLUMN mem_state TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.state') ELSE NULL END) VIRTUAL`);
   }
 
+  // v6 → v7: thread_id column on memories + memory_edges table.
+  // thread_id groups related memories (session-level or decision chains).
+  // memory_edges creates directed relationships between individual memories.
+  if (currentVersion > 0 && currentVersion < 7) {
+    const cols = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'thread_id')) {
+      db.exec('ALTER TABLE memories ADD COLUMN thread_id TEXT');
+    }
+    // Backfill thread_id from content JSON session_id for existing memories
+    db.exec(`
+      UPDATE memories SET thread_id = json_extract(content, '$.session_id')
+      WHERE thread_id IS NULL AND json_valid(content) AND json_extract(content, '$.session_id') IS NOT NULL
+    `);
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {

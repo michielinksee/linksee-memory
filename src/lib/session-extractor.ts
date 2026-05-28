@@ -10,6 +10,7 @@ export interface ExtractedMemory {
   layer: 'goal' | 'context' | 'emotion' | 'implementation' | 'caveat' | 'learning';
   content: string;                    // will be stored as JSON or plain text
   importance: number;                 // 0-1
+  thread_id: string;                  // groups related memories (session_id for session-extracted)
   source: {
     session_id: string;
     turn_uuid?: string;
@@ -55,7 +56,7 @@ const ALTITUDE_PATTERNS: [RegExp, Altitude][] = [
   [/architect|設計|schema|database|DB設計|migration|API\s+design|system\s+design|layer\s+model|アーキテクチャ/i, 'architecture'],
 ];
 
-function inferAltitude(text: string): Altitude {
+export function inferAltitude(text: string): Altitude {
   for (const [pattern, altitude] of ALTITUDE_PATTERNS) {
     if (pattern.test(text)) return altitude;
   }
@@ -73,7 +74,7 @@ const TYPE_PATTERNS: [RegExp, MemType][] = [
   [/結果|完了|成功|失敗|outcome|result|shipped|deployed|launched|finished|accomplished/i, 'outcome'],
 ];
 
-function inferType(text: string, layer: string): MemType {
+export function inferType(text: string, layer: string): MemType {
   for (const [pattern, type] of TYPE_PATTERNS) {
     if (pattern.test(text)) return type;
   }
@@ -97,7 +98,7 @@ const STATE_PATTERNS: [RegExp, MemState][] = [
   [/取り替え|代わりに|置き換え|replaced|superseded|deprecated|obsolete|旧版|old\s+approach/i, 'superseded'],
 ];
 
-function inferState(text: string, layer: string): MemState {
+export function inferState(text: string, layer: string): MemState {
   for (const [pattern, state] of STATE_PATTERNS) {
     if (pattern.test(text)) return state;
   }
@@ -278,6 +279,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         git_branch: session.git_branch,
       }),
       importance: automated ? 0.3 : 0.8,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, turn_uuid: firstIntent.uuid, kind: 'first_intent' },
     });
   } else if (automated) {
@@ -296,6 +298,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         git_branch: session.git_branch,
       }),
       importance: 0.2,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, kind: 'automated_task' },
     });
   }
@@ -324,6 +327,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         session_id: session.session_id,
       }),
       importance: 0.5,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'clarification' },
     });
   }
@@ -363,6 +367,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       layer: 'implementation',
       content: memoryContent,
       importance: 0.6,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, turn_uuid: first.turn_uuid, kind: 'file_edit' },
     });
 
@@ -406,6 +411,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
           session_id: session.session_id,
         }),
         importance: 0.75,
+        thread_id: session.session_id,
         source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'caveat' },
       });
     }
@@ -437,6 +443,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
           session_id: session.session_id,
         }),
         importance: 0.7,
+        thread_id: session.session_id,
         source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'decision' },
       });
     }
@@ -460,6 +467,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         session_id: session.session_id,
       }),
       importance: 0.4,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, kind: 'error_recovery' },
     });
   }
@@ -492,6 +500,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         git_branch: session.git_branch,
       }),
       importance: 0.4,
+      thread_id: session.session_id,
       source: { session_id: session.session_id, kind: 'session_summary' },
     });
   }
