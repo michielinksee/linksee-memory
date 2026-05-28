@@ -57,6 +57,33 @@ export function runMigrations(db: Database.Database): void {
     }
   }
 
+  // v5 → v6: 3-axis generated columns (altitude, mem_type, mem_state).
+  // VIRTUAL generated columns auto-extract from content JSON via json_extract.
+  // json_valid() guard returns NULL for plain-text content instead of erroring.
+  // Must run BEFORE db.exec(sql) so CREATE INDEX IF NOT EXISTS succeeds.
+  //
+  // NOTE: VIRTUAL generated columns are hidden from PRAGMA table_info.
+  // Use PRAGMA table_xinfo (hidden=2 = VIRTUAL generated column) to detect them.
+  if (currentVersion > 0 && currentVersion < 6) {
+    const xcols = db.prepare("PRAGMA table_xinfo(memories)").all() as Array<{ name: string; hidden: number }>;
+    const hasAltitude = xcols.some(c => c.name === 'altitude' && c.hidden === 2);
+
+    if (hasAltitude) {
+      // Repair path: columns may exist from a partial v6 migration with the old
+      // json_extract-only definition (no json_valid guard). Drop and re-create.
+      db.exec('DROP INDEX IF EXISTS idx_memories_altitude');
+      db.exec('DROP INDEX IF EXISTS idx_memories_mem_type');
+      db.exec('DROP INDEX IF EXISTS idx_memories_mem_state');
+      db.exec('ALTER TABLE memories DROP COLUMN altitude');
+      db.exec('ALTER TABLE memories DROP COLUMN mem_type');
+      db.exec('ALTER TABLE memories DROP COLUMN mem_state');
+    }
+
+    db.exec(`ALTER TABLE memories ADD COLUMN altitude TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.altitude') ELSE NULL END) VIRTUAL`);
+    db.exec(`ALTER TABLE memories ADD COLUMN mem_type TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.type') ELSE NULL END) VIRTUAL`);
+    db.exec(`ALTER TABLE memories ADD COLUMN mem_state TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.state') ELSE NULL END) VIRTUAL`);
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {

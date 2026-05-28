@@ -28,7 +28,7 @@ import { fetchRoots, isInsideRoots } from './roots.js';
 import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.5.1';
 
 const db = openDb();
 runMigrations(db);
@@ -110,6 +110,21 @@ const TOOLS = [
         layer: {
           type: 'string',
           description: 'Optional layer filter. Accepts aliases (decisions/warnings/how/etc.) as well as canonical names.',
+        },
+        altitude: {
+          type: 'string',
+          enum: ['mission', 'strategy', 'architecture', 'implementation'],
+          description: 'Filter by cognitive altitude. mission=why we exist, strategy=positioning/GTM, architecture=system design, implementation=code/tasks.',
+        },
+        mem_type: {
+          type: 'string',
+          enum: ['question', 'comparison', 'decision', 'work', 'outcome', 'learning', 'note'],
+          description: 'Filter by memory type — what kind of thought this is.',
+        },
+        mem_state: {
+          type: 'string',
+          enum: ['open', 'decided', 'in_progress', 'done', 'stalled', 'parked', 'superseded'],
+          description: 'Filter by lifecycle state. Useful for finding open questions, stalled work, or parked decisions.',
         },
         band: { type: 'string', enum: ['hot', 'warm', 'cold', 'frozen'], description: 'Optional — only return memories whose heat_band matches.' },
         max_tokens: { type: 'number', description: 'Approx token budget. Default 2000. Either max_tokens or limit stops iteration (whichever fires first).', default: 2000 },
@@ -307,10 +322,24 @@ function toFtsQuery(raw: string): string {
   return tokens.map((t) => `"${t}"`).join(' OR ');
 }
 
-function runFtsQuery(query: string, layer: string | undefined, limit: number): any[] {
+interface AxisFilters {
+  altitude?: string;
+  mem_type?: string;
+  mem_state?: string;
+}
+
+function appendAxisFilters(sql: string, params: any[], filters: AxisFilters): string {
+  if (filters.altitude) { sql += ' AND m.altitude = ?'; params.push(filters.altitude); }
+  if (filters.mem_type) { sql += ' AND m.mem_type = ?'; params.push(filters.mem_type); }
+  if (filters.mem_state) { sql += ' AND m.mem_state = ?'; params.push(filters.mem_state); }
+  return sql;
+}
+
+function runFtsQuery(query: string, layer: string | undefined, limit: number, axis?: AxisFilters): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
+           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state,
            bm25(memories_fts) as bm25_score
     FROM memories_fts
     JOIN memories m ON m.id = memories_fts.rowid
@@ -319,15 +348,17 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number): a
   `;
   const params: any[] = [query];
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
+  if (axis) sql = appendAxisFilters(sql, params, axis);
   sql += ' ORDER BY bm25_score ASC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
 }
 
-function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number): any[] {
+function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
+           m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state,
            0 as bm25_score
     FROM memories m
     JOIN entities e ON e.id = m.entity_id
@@ -336,6 +367,7 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
   const params: any[] = [];
   if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
+  if (axis) sql = appendAxisFilters(sql, params, axis);
   if (query && !entityName) {
     sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
     params.push(`%${query}%`, `%${query}%`);
@@ -375,6 +407,11 @@ function handleRecall(args: any): string {
 
   const layer = resolveLayer(args.layer);
   const band = args.band as string | undefined;
+  const axis: AxisFilters = {
+    altitude: args.altitude,
+    mem_type: args.mem_type,
+    mem_state: args.mem_state,
+  };
 
   // Fetch extra rows for composite re-rank, pagination, and band filtering
   const fetchLimit = Math.max(returnLimit * 3, 30) + offset;
@@ -386,8 +423,8 @@ function handleRecall(args: any): string {
   const canUseFts = !!ftsQuery && !args.entity_name;
 
   if (canUseFts) {
-    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit);
+    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis);
+    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -402,7 +439,7 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
   }
 
@@ -511,6 +548,11 @@ function handleRecall(args: any): string {
     stopped_by: stoppedBy,
     search: searchMethod,
     resolved_layer: layer ?? null,
+    resolved_axis: {
+      altitude: axis.altitude ?? null,
+      type: axis.mem_type ?? null,
+      state: axis.mem_state ?? null,
+    },
     memories: windowed.map((r) => {
       let parsedContent: unknown = r.content;
       try { parsedContent = JSON.parse(r.content); } catch { /* leave as string */ }
@@ -523,6 +565,11 @@ function handleRecall(args: any): string {
           momentum: Number((r.momentum_score ?? 0).toFixed(2)),
         },
         layer: r.layer,
+        axis: {
+          altitude: r._altitude ?? null,
+          type: r._mem_type ?? null,
+          state: r._mem_state ?? null,
+        },
         content: parsedContent,
         content_raw: r.content,
         importance: r.importance,
@@ -561,7 +608,7 @@ function handleForget(args: any): string {
 
   // Auto-sweep — also respect pin (importance >= 0.9) as protection
   const rows = db
-    .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected
+    .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected, altitude
               FROM memories
               WHERE protected = 0 AND importance < 0.9`)
     .all() as any[];
@@ -584,6 +631,7 @@ function handleForget(args: any): string {
       heatScore: heat.score,
       protected: r.protected === 1,
       layer: r.layer,
+      altitude: r.altitude ?? undefined,
     });
     if (action !== 'keep') actions.push({ id: r.id, action });
   }

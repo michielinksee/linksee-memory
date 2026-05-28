@@ -1,7 +1,8 @@
--- linksee-memory schema v0.0.2
+-- linksee-memory schema v0.0.3
 -- Single-file SQLite store for cross-agent structured memory.
 -- Layers: 1=facts (entities), 2=associations (edges), 3=patterns (meanings), 4=events (time-series), 5=file-state (diff cache).
 -- v2 adds: FTS5 full-text search, consolidations audit, momentum cache on entities.
+-- v6 adds: 3-axis generated columns (altitude/mem_type/mem_state) for queryable classification.
 
 -- ============================================================
 -- Layer 1: Facts — entities (people / companies / projects / concepts)
@@ -38,13 +39,21 @@ CREATE TABLE IF NOT EXISTS memories (
   source          TEXT,
   created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
   last_accessed_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  access_count    INTEGER NOT NULL DEFAULT 0
+  access_count    INTEGER NOT NULL DEFAULT 0,
+  -- 3-axis classification (v0.5.0): auto-extracted from content JSON.
+  -- NULL when content is plain text (non-JSON). VIRTUAL = computed on read, indexed.
+  altitude        TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.altitude') ELSE NULL END) VIRTUAL,
+  mem_type        TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.type') ELSE NULL END) VIRTUAL,
+  mem_state       TEXT GENERATED ALWAYS AS (CASE WHEN json_valid(content) THEN json_extract(content, '$.state') ELSE NULL END) VIRTUAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_entity     ON memories(entity_id);
 CREATE INDEX IF NOT EXISTS idx_memories_layer      ON memories(layer);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_protected  ON memories(protected);
+CREATE INDEX IF NOT EXISTS idx_memories_altitude   ON memories(altitude);
+CREATE INDEX IF NOT EXISTS idx_memories_mem_type   ON memories(mem_type);
+CREATE INDEX IF NOT EXISTS idx_memories_mem_state  ON memories(mem_state);
 
 CREATE TRIGGER IF NOT EXISTS trg_protect_caveat
   AFTER INSERT ON memories
@@ -196,6 +205,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '5');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '6');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '5' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4');
+UPDATE meta SET value = '6' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5');

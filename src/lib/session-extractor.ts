@@ -62,6 +62,53 @@ function inferAltitude(text: string): Altitude {
   return 'implementation';
 }
 
+// ---- Type inference ----
+// Infers the cognitive TYPE of a memory from its content text.
+// Falls back to layer-based defaults when no pattern matches.
+const TYPE_PATTERNS: [RegExp, MemType][] = [
+  [/\?|質問|教えて|どう[すし]|how\s+(to|do|should)|what\s+(is|are|should)|why\s+(is|do|does)|can\s+(i|we|you)/i, 'question'],
+  [/比較|対|vs\.?|versus|compared?\s+to|より|方がいい|alternative|option[s]?\b|どっちが/i, 'comparison'],
+  [/決め[たる]|採用|確定|approve|これでい[いく]|進めて|go\s+with|decided|chosen|settled|commit\s+to/i, 'decision'],
+  [/学び|教訓|分かった|判明|発見|learn|realize|discover|find\s+out|turns?\s+out|takeaway|insight/i, 'learning'],
+  [/結果|完了|成功|失敗|outcome|result|shipped|deployed|launched|finished|accomplished/i, 'outcome'],
+];
+
+function inferType(text: string, layer: string): MemType {
+  for (const [pattern, type] of TYPE_PATTERNS) {
+    if (pattern.test(text)) return type;
+  }
+  // Layer-based defaults when no pattern matches
+  if (layer === 'learning') return 'decision';
+  if (layer === 'caveat') return 'learning';
+  if (layer === 'implementation') return 'work';
+  if (layer === 'context') return 'note';
+  if (layer === 'goal') return 'work';
+  return 'note';
+}
+
+// ---- State inference ----
+// Infers the lifecycle STATE of a memory from its content text.
+const STATE_PATTERNS: [RegExp, MemState][] = [
+  [/完了|done|finished|shipped|deployed|resolved|solved|merged|closed/i, 'done'],
+  [/決定|decided|settled|approved|confirmed|go\s+with/i, 'decided'],
+  [/進行中|working\s+on|implementing|in\s+progress|WIP|作業中|対応中/i, 'in_progress'],
+  [/保留|pending|on\s+hold|棚上げ|後で|later|一旦(?:置|おい)|いったん/i, 'parked'],
+  [/止まって|stuck|blocked|stalled|ハマ[っり]|行き詰/i, 'stalled'],
+  [/取り替え|代わりに|置き換え|replaced|superseded|deprecated|obsolete|旧版|old\s+approach/i, 'superseded'],
+];
+
+function inferState(text: string, layer: string): MemState {
+  for (const [pattern, state] of STATE_PATTERNS) {
+    if (pattern.test(text)) return state;
+  }
+  // Layer-based defaults
+  if (layer === 'goal') return 'in_progress';
+  if (layer === 'learning') return 'decided';
+  if (layer === 'caveat') return 'done';
+  if (layer === 'implementation') return 'done';
+  return 'open';
+}
+
 /** Extract a concise title from raw text (first sentence or up to maxLen chars) */
 function makeTitle(text: string, maxLen = 80): string {
   const cleaned = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
@@ -222,8 +269,8 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       content: buildStructuredContent({
         title: makeTitle(intentText),
         altitude: inferAltitude(intentText),
-        type: 'work',
-        state: 'in_progress',
+        type: inferType(intentText, 'goal'),
+        state: inferState(intentText, 'goal'),
         what: intentText,
         why: 'Session intent — first user message',
         evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
@@ -269,8 +316,8 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       content: buildStructuredContent({
         title: makeTitle(msgText, 60),
         altitude: inferAltitude(msgText),
-        type: 'note',
-        state: 'open',
+        type: inferType(msgText, 'context'),
+        state: inferState(msgText, 'context'),
         what: msgText,
         why: 'Clarification during session',
         evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
@@ -349,8 +396,8 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         content: buildStructuredContent({
           title: makeTitle(caveatText, 70),
           altitude: inferAltitude(caveatText),
-          type: 'learning',
-          state: 'done',
+          type: inferType(caveatText, 'caveat'),
+          state: inferState(caveatText, 'caveat'),
           what: caveatText,
           why: 'User-stated warning/prohibition — auto-extracted by caveat pattern match',
           affects: extractAffectedPaths(session.file_ops),
@@ -380,8 +427,8 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         content: buildStructuredContent({
           title: makeTitle(decisionText, 70),
           altitude: inferAltitude(decisionText),
-          type: 'decision',
-          state: 'decided',
+          type: inferType(decisionText, 'learning'),
+          state: inferState(decisionText, 'learning'),
           what: decisionText,
           why: 'Decision detected by pattern match — may need agent enrichment',
           affects: extractAffectedPaths(session.file_ops),

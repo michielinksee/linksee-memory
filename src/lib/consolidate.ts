@@ -33,6 +33,7 @@ interface Candidate {
   access_count: number;
   created_at: number;
   protected: number;
+  altitude: string | null;
 }
 
 const CLUSTER_LAYERS = ['context', 'emotion', 'implementation'] as const;
@@ -57,6 +58,7 @@ export function consolidate(
       `
       SELECT m.id, m.entity_id, m.layer, m.content, m.importance,
              m.last_accessed_at, m.access_count, m.created_at, m.protected,
+             m.altitude,
              e.name as entity_name
       FROM memories m
       JOIN entities e ON e.id = m.entity_id
@@ -133,8 +135,23 @@ export function consolidate(
 
       const avgImp = cluster.reduce((s, c) => s + c.importance, 0) / cluster.length;
 
+      // Determine dominant altitude from cluster members (most frequent non-null value).
+      // Consolidation summaries inherit the cluster's altitude so decay rates are preserved.
+      const altCounts = new Map<string, number>();
+      for (const c of cluster) {
+        if (c.altitude) altCounts.set(c.altitude, (altCounts.get(c.altitude) ?? 0) + 1);
+      }
+      let dominantAltitude = 'implementation';
+      let maxCount = 0;
+      for (const [alt, count] of altCounts) {
+        if (count > maxCount) { dominantAltitude = alt; maxCount = count; }
+      }
+
       const summary = {
         source: 'consolidate',
+        altitude: maxCount > 0 ? dominantAltitude : 'implementation',
+        type: 'learning' as const,
+        state: 'done' as const,
         original_layer: layer,
         count: cluster.length,
         period: { from: earliest, to: latest },
@@ -174,7 +191,7 @@ export function consolidate(
 
   // Post-consolidate: forget-sweep remaining non-clustered cold memories
   const remaining = db
-    .prepare('SELECT id, layer, importance, access_count, last_accessed_at, protected FROM memories WHERE protected = 0')
+    .prepare('SELECT id, layer, importance, access_count, last_accessed_at, protected, altitude FROM memories WHERE protected = 0')
     .all() as any[];
 
   const toDrop: number[] = [];
@@ -193,6 +210,7 @@ export function consolidate(
       heatScore: heat.score,
       protected: r.protected === 1,
       layer: r.layer,
+      altitude: r.altitude ?? undefined,
     });
     if (action === 'drop') toDrop.push(r.id);
   }
