@@ -363,12 +363,36 @@ function refreshStaleMomentum(entityIds: number[]): void {
   }
 }
 
+// --- recall helpers ---------------------------------------------------------
+
+// Rough token estimate for budgeting. ~3 chars/token is deliberately conservative
+// for mixed JP/EN (Japanese is token-dense), so we under-fill rather than blow
+// the caller's max_tokens budget.
+function estimateTokens(s: string): number {
+  return Math.ceil(s.length / 3);
+}
+
+// Signature for near-duplicate collapsing in recall results. Extracts the
+// meaningful core text (what/title/decision/intent/learned) from the memory's
+// content (JSON or plain), normalizes whitespace/case, and keys it by entity so
+// the same message stored under two layers collapses to a single result.
+function contentSignature(raw: string, entityId: number): string {
+  let text: unknown = raw;
+  try {
+    const o: any = JSON.parse(raw);
+    text = o?.what ?? o?.title ?? o?.decision ?? o?.intent ?? o?.learned ?? (typeof o === 'string' ? o : raw);
+  } catch { /* plain-text content */ }
+  const norm = String(text).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (norm.length < 16) return ''; // too short to dedup safely
+  return `${entityId}::${norm}`;
+}
+
 function handleRecall(args: any): string {
+  // max_tokens is enforced for real at assembly time (greedy fill by measured
+  // serialized size), not via a crude fixed per-memory estimate. hardLimit caps COUNT.
   const maxTokens = Math.max(100, Number(args.max_tokens ?? 2000));
-  const approxTokensPerMemory = 100;
-  const tokenBudgetLimit = Math.max(1, Math.floor(maxTokens / approxTokensPerMemory));
-  const hardLimit = Number.isFinite(args.limit) ? Math.max(1, Math.min(200, args.limit)) : tokenBudgetLimit;
-  const returnLimit = Math.min(tokenBudgetLimit, hardLimit);
+  const DEFAULT_COUNT_CAP = 50;
+  const hardLimit = Number.isFinite(args.limit) ? Math.max(1, Math.min(200, args.limit)) : DEFAULT_COUNT_CAP;
   const offset = Math.max(0, Number(args.offset ?? 0));
   const markAccessed = args.mark_accessed !== false;
 
@@ -381,8 +405,9 @@ function handleRecall(args: any): string {
     thread_id: args.thread_id,
   };
 
-  // Fetch extra rows for composite re-rank, pagination, and band filtering
-  const fetchLimit = Math.max(returnLimit * 3, 30) + offset;
+  // Fetch a generous candidate pool for composite re-rank, dedup, pagination, band filter.
+  // Token-budget trimming happens at assembly, so fetch enough that many small memories can fill it.
+  const fetchLimit = Math.max(hardLimit * 3, 90) + offset;
 
   let rows: any[] = [];
   let searchMethod: 'fts5' | 'like' | 'fts5+like' = 'like';
@@ -430,6 +455,17 @@ function handleRecall(args: any): string {
   const maxBm = Math.max(...bm25Values, 1);
   const bmSpan = Math.max(0.001, maxBm - minBm);
 
+  // Composite weights adapt to query specificity:
+  //  - broad / no query → importance & heat carry more (relevance is a flat 0.5 anyway)
+  //  - focused (1-2 terms) → relevance leads
+  //  - narrow (3+ terms) → relevance dominates, so off-topic-but-pinned memories don't crowd in
+  const queryTermCount = String(args.query ?? '').trim().split(/\s+/).filter(Boolean).length;
+  let w_rel = 0.45, w_heat = 0.25, w_mom = 0.15, w_imp = 0.15;
+  if (useFts) {
+    if (queryTermCount >= 3) { w_rel = 0.72; w_heat = 0.12; w_mom = 0.08; w_imp = 0.08; }
+    else { w_rel = 0.60; w_heat = 0.18; w_mom = 0.12; w_imp = 0.10; }
+  }
+
   const scored = rows.map((r) => {
     const daysSince = (now - r.last_accessed_at) / 86400;
     const heat = computeHeat({
@@ -446,8 +482,7 @@ function handleRecall(args: any): string {
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
     const importanceBoost = r.importance; // 0-1
 
-    // Composite: give a bit to importance so pinned (>=0.9) memories always rank high
-    const w_rel = 0.45, w_heat = 0.25, w_mom = 0.15, w_imp = 0.15;
+    // Composite (weights adapt to query specificity — computed above)
     const composite = w_rel * relevance + w_heat * heatNorm + w_mom * momNorm + w_imp * importanceBoost;
 
     // match_reasons: human-readable WHY this row is here
@@ -486,34 +521,84 @@ function handleRecall(args: any): string {
   // Apply band filter AFTER scoring (needs heat.band)
   const filtered = band ? scored.filter((s) => s.heat_band === band) : scored;
 
-  // Sort by composite
+  // Sort by composite (best first)
   filtered.sort((a, b) => b.composite_score - a.composite_score);
 
-  // Pagination: skip offset, take returnLimit
-  const total = filtered.length;
-  const windowed = filtered.slice(offset, offset + returnLimit);
-  const hasMore = total > offset + windowed.length;
+  // Dedup near-identical memories (same entity + near-identical core text).
+  // filtered is sorted desc, so the first occurrence kept is the highest-ranked.
+  // This collapses the common "same message saved under two layers" duplication.
+  const seenSig = new Set<string>();
+  const deduped = filtered.filter((r) => {
+    const sig = contentSignature(r.content, r.entity_id);
+    if (!sig) return true;              // too short / no usable text → never dedup
+    if (seenSig.has(sig)) return false; // duplicate → drop
+    seenSig.add(sig);
+    return true;
+  });
 
-  // Mark accessed (only for the returned window, and only if asked)
-  if (markAccessed && windowed.length > 0) {
-    const mark = db.prepare('UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?');
-    const tx = db.transaction((ids: number[]) => { for (const id of ids) mark.run(now, id); });
-    tx(windowed.map((r) => r.id));
+  const total = deduped.length;
+
+  // Greedy assembly under a REAL token budget: add memories (deduped + ranked) until
+  // including the next would blow max_tokens, capped at hardLimit by COUNT. Always
+  // returns at least one memory if anything matched.
+  const memoriesOut: any[] = [];
+  const returnedIds: number[] = [];
+  let accTokens = 0;
+  let stoppedBy: 'tokens' | 'limit' | 'end' = 'end';
+
+  for (let i = offset; i < total; i++) {
+    if (memoriesOut.length >= hardLimit) { stoppedBy = 'limit'; break; }
+    const r = deduped[i];
+    let parsedContent: unknown = r.content;
+    try { parsedContent = JSON.parse(r.content); } catch { /* leave as string */ }
+    const memObj = {
+      id: r.id,
+      entity: {
+        id: r.entity_id,
+        name: r.entity_name,
+        kind: r.entity_kind,
+        momentum: Number((r.momentum_score ?? 0).toFixed(2)),
+      },
+      layer: r.layer,
+      axis: {
+        altitude: r._altitude ?? null,
+        type: r._mem_type ?? null,
+        state: r._mem_state ?? null,
+        thread_id: r._thread_id ?? null,
+      },
+      content: parsedContent,
+      importance: r.importance,
+      pinned: r.importance >= 0.9,
+      heat: Number(r.heat_score.toFixed(1)),
+      band: r.heat_band,
+      composite: Number(r.composite_score.toFixed(3)),
+      match_reasons: r._reasons,
+      score_breakdown: r._breakdown,
+    };
+    const memTokens = estimateTokens(JSON.stringify(memObj));
+    if (memoriesOut.length > 0 && accTokens + memTokens > maxTokens) { stoppedBy = 'tokens'; break; }
+    accTokens += memTokens;
+    memoriesOut.push(memObj);
+    returnedIds.push(r.id);
   }
 
-  // Determine what stopped iteration — max_tokens vs limit vs offset+n=total
-  let stoppedBy: 'tokens' | 'limit' | 'end' = 'end';
-  if (windowed.length === returnLimit && total > offset + returnLimit) {
-    stoppedBy = hardLimit <= tokenBudgetLimit ? 'limit' : 'tokens';
+  const hasMore = offset + memoriesOut.length < total;
+
+  // Mark accessed (only the returned set, and only if asked)
+  if (markAccessed && returnedIds.length > 0) {
+    const mark = db.prepare('UPDATE memories SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?');
+    const tx = db.transaction((ids: number[]) => { for (const id of ids) mark.run(now, id); });
+    tx(returnedIds);
   }
 
   return JSON.stringify({
     ok: true,
-    count: windowed.length,
+    count: memoriesOut.length,
     total_candidates: total,
     offset,
     has_more: hasMore,
     stopped_by: stoppedBy,
+    approx_tokens: accTokens,
     search: searchMethod,
     resolved_layer: layer ?? null,
     resolved_axis: {
@@ -521,35 +606,7 @@ function handleRecall(args: any): string {
       type: axis.mem_type ?? null,
       state: axis.mem_state ?? null,
     },
-    memories: windowed.map((r) => {
-      let parsedContent: unknown = r.content;
-      try { parsedContent = JSON.parse(r.content); } catch { /* leave as string */ }
-      return {
-        id: r.id,
-        entity: {
-          id: r.entity_id,
-          name: r.entity_name,
-          kind: r.entity_kind,
-          momentum: Number((r.momentum_score ?? 0).toFixed(2)),
-        },
-        layer: r.layer,
-        axis: {
-          altitude: r._altitude ?? null,
-          type: r._mem_type ?? null,
-          state: r._mem_state ?? null,
-          thread_id: r._thread_id ?? null,
-        },
-        content: parsedContent,
-        content_raw: r.content,
-        importance: r.importance,
-        pinned: r.importance >= 0.9,
-        heat: Number(r.heat_score.toFixed(1)),
-        band: r.heat_band,
-        composite: Number(r.composite_score.toFixed(3)),
-        match_reasons: r._reasons,
-        score_breakdown: r._breakdown,
-      };
-    }),
+    memories: memoriesOut,
   });
 }
 
