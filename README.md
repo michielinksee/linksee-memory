@@ -79,7 +79,7 @@ That single `caveat` memory is what separates "flat fact storage" from "the agen
                   Returns match_reasons explaining each hit
 ```
 
-Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories get compressed into `learning` entries via `consolidate()`.
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories are auto-consolidated into `learning` entries on server startup.
 
 ---
 
@@ -87,7 +87,7 @@ Every memory is tagged with **exactly one layer**. `caveat`-layer entries are pr
 
 Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. **linksee-memory keeps the WHY.**
 
-It is a Model Context Protocol (MCP) server that gives any AI agent four superpowers:
+It is a Model Context Protocol (MCP) server with **3 tools** that gives any AI agent structured memory:
 
 | | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
 |---|---|---|---|
@@ -127,7 +127,7 @@ Restart Claude Code, then just chat normally. Add **"Use Linksee"** to any promp
 claude mcp add -s user linksee -- npx -y linksee-memory
 ```
 
-Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee__recall_file`, `mcp__linksee__read_smart`, `mcp__linksee__forget`, `mcp__linksee__consolidate`.
+Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee__read_smart`.
 
 **Install the skill (auto-invocation):**
 
@@ -248,28 +248,37 @@ All editors share the same `~/.linksee-memory/memory.db`. A decision made in Cla
 
 Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
-## What's new in v0.4
+## What's new in v0.7
+
+| Feature | Detail |
+|---|---|
+| **3-tool unified surface** | 8 tools → 3: `remember` (create + update + delete), `recall` (search + file history + overview), `read_smart` (token-saving reads). Fewer tools = better cross-LLM consistency. Follows Context7's proven pattern. |
+| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. |
+| **Deprecation guidance** | Old tool names (`forget`, `recall_file`, etc.) return specific migration examples instead of silent failures. |
+| **"Use Linksee Memory" trigger** | Add "Use Linksee Memory" to any prompt to force memory recall — same adoption pattern as Context7. |
+| **Claude Code Plugin** | `claude plugin add -- linksee-memory` — ships MCP server + auto-invocation skill in one install. |
+
+<details>
+<summary>What's new in v0.4</summary>
 
 | Feature | Detail |
 |---|---|
 | **One-command setup** | `npx linksee-memory-setup` — registers MCP server, installs skill, configures auto-capture hook. One command instead of three. |
 | **Structured memory v2** | 3-axis classification (altitude × type × state) for every memory. Auto-extraction from sessions produces machine-scannable JSON, not raw chat dumps. |
 | **Precision recall guide** | SKILL.md now teaches agents HOW to write effective queries, WHEN to recall vs skip, and WHEN to proactively surface caveats before risky actions. |
-| **"Use Linksee" trigger** | Add "Use Linksee" to any prompt to force memory recall — same adoption pattern as Context7. |
-| **Five MCP Blocks** | Tools + Resources + Prompts + Sampling + Roots + Elicitation. Most MCP servers expose only Tools; linksee-memory implements all six primitives. |
+| **Five MCP Blocks** | Tools + Resources + Prompts + Sampling + Roots + Elicitation. Most MCP servers expose only Tools; linksee-memory implements all five primitives. |
 
-## Tools
+</details>
 
-| Tool | Purpose |
+## 3 Tools (v0.7)
+
+| Tool | What it does |
 |---|---|
-| `remember` | Store memory in 1 of 6 layers for an entity. Rejects pasted assistant output / CI logs unless `force=true`. Set `importance=1.0` to pin (survives auto-forget). |
-| `recall` | FTS5 + heat × momentum × importance composite ranking with `match_reasons` explaining WHY each row matched. Supports pagination (`offset`/`has_more`), `band` filter, layer aliases (`decisions`/`warnings`/`how`/...), and `mark_accessed=false` for passive previews. |
-| `recall_file` | Complete edit history of a file across all sessions, with per-edit user-intent context. **v0.3.0** `scope_to_roots` flag filters by client roots. |
-| `update_memory` | **v0.1.0** Atomic edit of an existing memory. Preserves `memory_id` (session_file_edits links stay intact). Prefer over forget+remember. |
-| `list_entities` | **v0.1.0** List what the memory knows about — cheapest "what do I know?" primitive. Filter by `kind`/`min_memories`; returns layer breakdown per entity. |
-| `read_smart` | Diff-only file read. Returns full content on first read, ~50 tokens on unchanged re-reads, only changed chunks on real edits. |
-| `forget` | Explicit delete OR auto-sweep based on `forgettingRisk`. Pinned (`importance>=1.0`) and caveat-layer memories are always preserved. **v0.3.0** `interactive` flag asks the user via Elicitation before deleting a specific memory_id. |
-| `consolidate` | Sleep-mode compression: cluster cold low-importance memories → protected learning-layer summary. Supports `dry_run` preview. **v0.3.0** `use_llm` flag asks the client LLM (Sampling) to rewrite cluster summaries into prose. |
+| `remember` | **Save / update / delete** memories. Auto-classifies into 6 layers. Modes: create (default), update (`memory_id` + fields), delete (`forget: true` + `memory_id`). |
+| `recall` | **Search / file history / overview.** Modes: search (`query`), file history (`path`), entity overview (no params). FTS5 + heat × momentum ranking with `match_reasons`. |
+| `read_smart` | **Token-saving file reader** with AST diff caching. First read = full content. Re-read unchanged = ~50 tokens. Re-read modified = changed chunks only. |
+
+Previous versions exposed 8 tools — v0.7.0 unified them into 3 for cross-LLM consistency. The server handles routing internally. Old tool names return migration guidance.
 
 ### CLI utilities
 
@@ -313,7 +322,7 @@ A single SQLite file (`better-sqlite3` + FTS5 trigram tokenizer for JP/EN) conta
 - **Layer 4** — `events` (time-series log for heat / momentum computation)
 - **Layer 5** — `file_snapshots` + `session_file_edits` (diff cache + conversation↔file linkage)
 
-The conversation↔file linkage is the key. Every file edit captured by the Stop hook is stored alongside the **user message that drove the edit**. So `recall_file("server.ts")` returns "this file was edited 30 times across 3 days, and here are the actual user instructions that motivated each change".
+The conversation↔file linkage is the key. Every file edit captured by the Stop hook is stored alongside the **user message that drove the edit**. So `recall({ path: "server.ts" })` returns "this file was edited 30 times across 3 days, and here are the actual user instructions that motivated each change".
 
 ## Why the design choices
 
@@ -324,17 +333,18 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 
 ## Roadmap
 
-- ✅ Core 8 MCP tools + Five Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
+- ✅ 3-tool unified surface (remember / recall / read_smart) — v0.7.0
+- ✅ Auto-consolidate on server startup — v0.7.0
+- ✅ Claude Code Plugin (`claude plugin add -- linksee-memory`)
+- ✅ Five MCP Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
 - ✅ Stop-hook auto-capture for Claude Code
 - ✅ JP/EN trigram FTS5
 - ✅ One-command setup (`npx linksee-memory-setup`)
 - ✅ Structured memory v2 (3-axis classification: altitude × type × state)
-- ✅ Precision recall guide + proactive caveat surfacing
 - ✅ Cross-LLM: Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI
-- 🚧 Landing page + SEO
+- ✅ Landing page ([linksee-site.vercel.app](https://linksee-site.vercel.app))
 - 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
 - 🔮 Cross-device cloud sync (Pro tier)
-- 🔮 Optional anonymized telemetry → MCP-quality intelligence layer
 
 ## Comparison with Claude Code auto-memory
 
@@ -454,17 +464,15 @@ recall({ query: "...", entity_name: "my-project", layer: "caveat" })
 rm -rf ~/.linksee-memory   # nuke everything; next run creates a fresh DB
 ```
 
-Or delete individual memories via the `forget` tool with a specific `memory_id`.
+Or delete individual memories via `remember({ forget: true, memory_id: <id> })`.
 </details>
 
 <details>
 <summary><b>DB is getting large (>100 MB). How do I trim it?</b></summary>
 
-Run consolidate — it clusters old cold memories into compressed learning-layer summaries:
-```
-consolidate({ scope: "all", min_age_days: 7 })
-```
-Caveat and active-goal layers are always preserved. Consider scheduling a weekly run via cron / Task Scheduler.
+Consolidation runs automatically on server startup (7-day threshold). It clusters old cold memories into compressed learning-layer summaries. Caveat and active-goal layers are always preserved.
+
+If you want to force a manual consolidation, restart the MCP server — auto-consolidate triggers on every startup.
 </details>
 
 ## FAQ
@@ -484,7 +492,7 @@ Three axes:
 Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor, OpenAI Codex, or Gemini CLI) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
 - Works across Claude Code, Cursor, OpenAI Codex, Gemini CLI (shared SQLite)
 - Structured 6-layer format makes recall explainable
-- Provides explicit forget/consolidate primitives rather than the agent guessing
+- Auto-consolidation compresses cold memories on startup; caveats are permanently protected
 </details>
 
 <details>
@@ -509,7 +517,7 @@ The default is no sync — the SQLite file lives at `~/.linksee-memory/memory.db
 
 Two mechanisms:
 1. **Ebbinghaus forgetting**: cold low-importance memories decay naturally, eligible for auto-forget sweeps. `caveat` layer and memories with `importance ≥ 0.9` are always protected.
-2. **`consolidate()`**: compresses clusters of cold low-importance memories by entity into a single `learning`-layer summary, then deletes the originals. Run via `linksee-memory-consolidate` CLI (or schedule weekly).
+2. **Auto-consolidation**: runs on every server startup (7-day threshold). Compresses clusters of cold low-importance memories by entity into a single `learning`-layer summary, then deletes the originals. No manual scheduling needed.
 
 In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old DB I tested with 80K memories still recalls in <10ms.
 </details>
@@ -523,7 +531,7 @@ Yes — any MCP-compatible client works:
 - **Cursor**: add to MCP settings in Cursor → Settings → Features → Model Context Protocol
 - **OpenAI Codex**: `codex mcp add linksee -- npx -y linksee-memory` (or `~/.codex/config.toml` with `[mcp_servers.linksee]` block)
 - **Gemini CLI**: add to `~/.gemini/settings.json` mcpServers section
-- **ChatGPT (web/mobile app)**: stdio MCP not supported by the consumer app — requires Remote MCP server over HTTPS. `linksee-memory-remote` planned for v0.4.
+- **ChatGPT (web/mobile app)**: stdio MCP not supported by the consumer app — requires Remote MCP server over HTTPS (not yet available).
 - **Custom agent**: the MCP stdio protocol is documented at modelcontextprotocol.io
 </details>
 
@@ -536,7 +544,7 @@ Yes — any MCP-compatible client works:
 <details>
 <summary><strong>How do I verify it's actually working?</strong></summary>
 
-After install, in a new Claude session ask: *"Can you remember that I prefer TypeScript over JavaScript?"* Claude should confirm it called `mcp__linksee__remember` and stored this. Then in a **different session** ask: *"What languages do I prefer?"* It should recall via `mcp__linksee__recall` and return the preference with `match_reasons` showing why.
+After install, in a new Claude session ask: *"Can you remember that I prefer TypeScript over JavaScript? Use Linksee Memory."* Claude should confirm it called `mcp__linksee__remember` and stored this. Then in a **different session** ask: *"What languages do I prefer? Use Linksee Memory."* It should recall via `mcp__linksee__recall` and return the preference with `match_reasons` showing why.
 </details>
 
 ## Support
@@ -547,6 +555,41 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
 
 ## Changelog
+
+### v0.7.1 — Review fixes (2026-05-29)
+
+Based on Opus 4.7 design review of v0.7.0:
+
+- **P0 — Required params guidance**: `remember` tool description now includes "REQUIRED PARAMS BY MODE" section so LLMs know exactly which fields are needed for create vs update vs delete.
+- **P0 — Migration guidance**: Deprecated tool names (`forget`, `recall_file`, etc.) now return specific migration examples instead of generic errors.
+- **P1 — recall path+query merge**: When both `path` and `query` are provided to `recall`, results from file history and memory search are merged into a single response.
+- **P2 — Auto-consolidate safety**: Table existence check via `sqlite_master` before querying `consolidations` table, preventing errors on fresh databases.
+
+### v0.7.0 — 3-Tool Unified Surface (2026-05-29)
+
+**8 tools → 3 tools.** Following Context7's proven pattern of fewer tools = better cross-LLM consistency.
+
+**Breaking change**: The following tools are removed from the MCP surface. Calling them returns a migration guide:
+
+| Old tool | New equivalent |
+|---|---|
+| `forget` | `remember({ forget: true, memory_id: <id> })` |
+| `update_memory` | `remember({ memory_id: <id>, content: "..." })` |
+| `recall_file` | `recall({ path: "server.ts" })` |
+| `list_entities` | `recall({})` (no params = entity overview) |
+| `consolidate` | Auto-runs on server startup (7-day threshold) |
+
+**New unified tools:**
+- **`remember`** — create + update + delete in one tool. Mode is inferred from params.
+- **`recall`** — search + file history + overview in one tool. Mode is inferred from params.
+- **`read_smart`** — unchanged.
+
+**Other changes:**
+- Auto-consolidate on server startup (non-blocking `setTimeout`, 7-day threshold, `sqlite_master` safety check)
+- Claude Code Plugin bundle (`claude plugin add -- linksee-memory`)
+- Deprecation errors include specific migration examples
+
+All internal handler functions are preserved — this is a surface change, not a logic rewrite.
 
 ### v0.2.0 — English-first launch readiness (2026-04-20)
 
