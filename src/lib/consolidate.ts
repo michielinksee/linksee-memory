@@ -13,6 +13,7 @@
 import type Database from 'better-sqlite3';
 import { computeHeat } from './heat-index.js';
 import { decideForgetting } from './forgetting.js';
+import { detectMemoryEdges } from './edge-detection.js';
 
 export interface ConsolidateResult {
   scanned: number;
@@ -21,6 +22,8 @@ export interface ConsolidateResult {
   memoriesDropped: number;
   learningIdsCreated: number[];
   stalledTransitions: number;
+  memoryEdgesCreated: number;
+  decisionsSuperseded: number;
 }
 
 interface Candidate {
@@ -100,6 +103,8 @@ export function consolidate(
     memoriesDropped: 0,
     learningIdsCreated: [],
     stalledTransitions: 0,
+    memoryEdgesCreated: 0,
+    decisionsSuperseded: 0,
   };
 
   const insertLearning = db.prepare(
@@ -203,6 +208,12 @@ export function consolidate(
       AND protected = 0
   `).run(stalledCutoff);
   result.stalledTransitions = stalledResult.changes;
+
+  // Memory→memory edge detection: link superseding/contradicting decisions so the
+  // dashboard can render Pivot Chains and recall can surface superseded decisions.
+  const edgeRes = detectMemoryEdges(db);
+  result.memoryEdgesCreated = edgeRes.edgesCreated;
+  result.decisionsSuperseded = edgeRes.supersededMarked;
 
   // Post-consolidate: forget-sweep remaining non-clustered cold memories
   const remaining = db
