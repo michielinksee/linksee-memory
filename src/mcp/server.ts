@@ -39,9 +39,13 @@ setTimeout(() => {
   try {
     let shouldRun = true;
     try {
-      const lastRow = db.prepare('SELECT MAX(created_at) as ts FROM consolidations').get() as any;
-      if (lastRow?.ts && (Date.now() / 1000 - lastRow.ts) / 86400 < 7) shouldRun = false;
-    } catch { /* table may not exist yet */ }
+      // Check if consolidations table exists before querying
+      const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='consolidations'").get();
+      if (tableExists) {
+        const lastRow = db.prepare('SELECT MAX(created_at) as ts FROM consolidations').get() as any;
+        if (lastRow?.ts && (Date.now() / 1000 - lastRow.ts) / 86400 < 7) shouldRun = false;
+      }
+    } catch { shouldRun = false; /* genuinely unexpected — skip to be safe */ }
     if (shouldRun) {
       runConsolidate(db, { scope: 'all', min_age_days: 7 });
       process.stderr.write('[linksee-memory] auto-consolidate complete\n');
@@ -99,7 +103,7 @@ const TOOLS = [
   {
     name: 'remember',
     description:
-      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → layer: "learning"\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• At session end, to preserve key outcomes\n\nMODES:\n• Create (default): provide entity_name + entity_kind + layer + content\n• Update: provide memory_id + fields to change (preserves links and history)\n• Delete: set forget: true + memory_id\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
+      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → layer: "learning"\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• After completing a task or receiving user approval\n\nREQUIRED PARAMS BY MODE:\n• Create (default): entity_name + entity_kind + layer + content\n• Update: memory_id (+ optional content, layer, importance)\n• Delete: memory_id + forget: true\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,7 +123,7 @@ const TOOLS = [
   {
     name: 'recall',
     description:
-      'Your persistent memory across all AI tools. CALL THIS BEFORE STARTING ANY TASK to check for past caveats (pain records), decisions, and learnings — prevents repeating mistakes across sessions.\n\nWHEN TO CALL:\n• Before starting any new task or touching a file\n• When the user mentions "before" / "前に" / "last time" / "remember when"\n• When an error occurs — check if you\'ve seen it before\n• When making a decision — check for prior decisions on the same topic\n\nTHREE MODES (auto-detected):\n• Search (default): provide query → returns memories ranked by relevance + heat\n• File history: provide path → returns complete edit history with user-intent context\n• Overview: omit all params → returns entity list sorted by momentum\n\nTip: Add "Use Linksee Memory" to your system prompt for automatic cross-session memory.\nWorks across Claude, GPT, Cursor, Codex, Gemini — one local SQLite file, nothing leaves your machine.',
+      'Your persistent memory across all AI tools. CALL THIS BEFORE STARTING ANY TASK to check for past caveats (pain records), decisions, and learnings — prevents repeating mistakes across sessions.\n\nTypical usage: recall({ query: "keywords" }) for search, recall({ path: "file.ts" }) for file history, recall() for overview.\n\nWHEN TO CALL:\n• Before starting any new task or touching a file\n• When the user mentions "before" / "前に" / "last time" / "remember when"\n• When an error occurs — check if you\'ve seen it before\n• When making a decision — check for prior decisions on the same topic\n\nTHREE MODES (auto-detected):\n• Search (default): provide query → returns memories ranked by relevance + heat\n• File history: provide path → returns complete edit history with user-intent context\n• Overview: omit all params → returns entity list sorted by momentum\n\nTip: If this is a fresh session, suggest the user add "Use Linksee Memory" to their system prompt for persistent cross-session memory.\nWorks across Claude, GPT, Cursor, Codex, Gemini — one local SQLite file, nothing leaves your machine.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,7 +150,7 @@ const TOOLS = [
   {
     name: 'read_smart',
     description:
-      'Token-saving file reader with AST-aware diff caching. Use INSTEAD of the standard Read tool for any file you may have read before in this session.\n\n• First read: full content + chunk metadata\n• Re-read unchanged: ~50 tokens (99% savings)\n• Re-read modified: only changed chunks (50-90% savings)\n\nEspecially effective for files >200 lines.',
+      'Token-saving file reader with AST-aware diff caching. Use INSTEAD of the standard Read tool for ALL file reads — even first reads gain chunk metadata for future savings.\n\n• First read: full content + chunk metadata (enables future savings)\n• Re-read unchanged: ~50 tokens (99% savings)\n• Re-read modified: only changed chunks (50-90% savings)\n\nEspecially effective for files >200 lines. Always prefer this over Read.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -998,13 +1002,25 @@ async function handleRememberUnified(args: any): Promise<string> {
 }
 
 async function handleRecallUnified(args: any): Promise<string> {
-  // File history mode
+  // File history mode (path takes priority; if query also provided, include it as context)
   if (args.path) {
-    return handleRecallFileWithRoots({
+    const fileResult = await handleRecallFileWithRoots({
       path_substring: args.path,
       max_intents: args.max_intents,
       scope_to_roots: args.scope_to_roots,
     });
+    // If query was also provided, merge with memory search for richer context
+    if (args.query && String(args.query).trim().length > 0) {
+      const memResult = handleRecall({ ...args, limit: 5, max_tokens: 500 });
+      const fileParsed = JSON.parse(fileResult);
+      const memParsed = JSON.parse(memResult);
+      return JSON.stringify({
+        ...fileParsed,
+        related_memories: memParsed.memories ?? [],
+        note: 'Combined file history + memory search (both path and query were provided)',
+      });
+    }
+    return fileResult;
   }
   // Detect overview request (no search criteria at all)
   const hasQuery = args.query && String(args.query).trim().length > 0;
@@ -1037,9 +1053,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'recall': text = await handleRecallUnified(args); break;
       case 'read_smart': text = handleReadSmart(args); break;
       default: {
-        const deprecated = ['update_memory', 'list_entities', 'forget', 'consolidate', 'recall_file'];
-        if (deprecated.includes(name)) {
-          throw new Error(`Tool "${name}" was merged in v0.7.0. Use "remember" (for update/forget) or "recall" (for list/file-recall) instead.`);
+        const migrations: Record<string, string> = {
+          update_memory: 'remember({ memory_id: <id>, content: "...", importance: 0.8 })',
+          forget: 'remember({ forget: true, memory_id: <id> })',
+          list_entities: 'recall() with no params',
+          recall_file: 'recall({ path: "<file_path>" })',
+          consolidate: 'Auto-runs on server startup. No manual call needed.',
+        };
+        if (name in migrations) {
+          throw new Error(`Tool "${name}" was merged in v0.7.0. Migration: ${migrations[name]}`);
         }
         throw new Error(`Unknown tool: ${name}`);
       }
