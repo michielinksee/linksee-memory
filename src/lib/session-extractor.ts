@@ -74,7 +74,32 @@ const TYPE_PATTERNS: [RegExp, MemType][] = [
   [/結果|完了|成功|失敗|outcome|result|shipped|deployed|launched|finished|accomplished/i, 'outcome'],
 ];
 
+// Pasted terminal/git/npm output and forwarded emails get mis-typed as decisions.
+// isPastedExternalContent misses these shapes, so guard them explicitly.
+const LOOKS_LIKE_PASTE = /PS [A-Za-z]:\\|[A-Za-z]:\\Users\\|create mode \d{6}|\bgit (?:commit|push|add|status|log|diff|branch|checkout|merge)\b|commit -m|\bnpm (?:run|install|ci)\b|Upon further review|resubmission|Thank you for your/i;
+
+// A turn that is ENTIRELY an acknowledgement carries no cognitive content. This only
+// fires on short, wholly-filler messages — anything with substance after the opener
+// (e.g. "そうだね、Reactを採用しよう") still flows to the patterns below.
+const PURE_ACK = /^(?:そう(?:だ?ね|だよね)?|うん+|ありがと[うー]?|なるほど|了解(?:です)?|わかった|おはよう|おつかれ(?:さま)?|はい+|おお+|へえ+|いいね|まあ|ええ|あー|ok|okay|thanks?|got it|sounds good)[。、,.!！?？\s~〜ねよ]*$/i;
+
+// Whether a memory's text carries enough signal to assign a meaningful cognitive type.
+// Junk (pasted logs/emails, meta-noise, pure acknowledgements) must NOT become a
+// 'decision'/'comparison' — that pollution caps memory_edges + dashboard quality.
+function isClassifiableContent(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0) return false;
+  if (PURE_ACK.test(t)) return false;
+  if (LOOKS_LIKE_PASTE.test(text)) return false;
+  if (isPastedExternalContent(text)) return false;
+  if (isMetaOrNoise(text)) return false;
+  return true;
+}
+
 export function inferType(text: string, layer: string): MemType {
+  // Precision guard: junk content has no meaningful type — fall back to 'note'
+  // BEFORE pattern matching / layer defaults so it can never become a 'decision'.
+  if (!isClassifiableContent(text)) return 'note';
   for (const [pattern, type] of TYPE_PATTERNS) {
     if (pattern.test(text)) return type;
   }
@@ -99,6 +124,8 @@ const STATE_PATTERNS: [RegExp, MemState][] = [
 ];
 
 export function inferState(text: string, layer: string): MemState {
+  // Junk content gets a neutral 'open' state rather than a confident 'decided'/'done'.
+  if (!isClassifiableContent(text)) return 'open';
   for (const [pattern, state] of STATE_PATTERNS) {
     if (pattern.test(text)) return state;
   }
