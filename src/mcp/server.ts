@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // linksee-memory MCP server (stdio transport).
-// Tools: remember / recall / recall_file / update_memory / list_entities /
-//        forget / consolidate / read_smart
+// Tools: remember / recall / read_smart
+// v0.7.0 — unified 3-tool surface (Context7-style simplification)
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -29,10 +29,25 @@ import { fetchRoots, isInsideRoots } from './roots.js';
 import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 
-const SERVER_VERSION = '0.6.0';
+const SERVER_VERSION = '0.7.0';
 
 const db = openDb();
 runMigrations(db);
+
+// Auto-maintenance: consolidate stale memories on startup (non-blocking)
+setTimeout(() => {
+  try {
+    let shouldRun = true;
+    try {
+      const lastRow = db.prepare('SELECT MAX(created_at) as ts FROM consolidations').get() as any;
+      if (lastRow?.ts && (Date.now() / 1000 - lastRow.ts) / 86400 < 7) shouldRun = false;
+    } catch { /* table may not exist yet */ }
+    if (shouldRun) {
+      runConsolidate(db, { scope: 'all', min_age_days: 7 });
+      process.stderr.write('[linksee-memory] auto-consolidate complete\n');
+    }
+  } catch { /* non-fatal */ }
+}, 3000);
 
 const server = new Server(
   { name: 'linksee-memory', version: SERVER_VERSION },
@@ -84,136 +99,59 @@ const TOOLS = [
   {
     name: 'remember',
     description:
-      'Save important context that should persist across sessions and across AI tools. When the user says "use linksee", "remember this", "don\'t forget", or you discover a decision, preference, or lesson worth preserving — store it here. The server automatically organizes into layers (goal/context/emotion/implementation/caveat/learning) and manages memory lifecycle. Just save what matters. Supports Japanese (日本語) and English. Memories saved here are accessible from any AI agent the user connects to — Claude, GPT, Cursor, Codex, Gemini. This is the only memory that works cross-agent.',
+      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → layer: "learning"\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• At session end, to preserve key outcomes\n\nMODES:\n• Create (default): provide entity_name + entity_kind + layer + content\n• Update: provide memory_id + fields to change (preserves links and history)\n• Delete: set forget: true + memory_id\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
     inputSchema: {
       type: 'object',
       properties: {
-        entity_name: { type: 'string', description: 'Name of the entity this memory is about' },
-        entity_kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'] },
+        entity_name: { type: 'string', description: 'Name of the entity this memory is about (required for create)' },
+        entity_kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'Required for create' },
         entity_key: { type: 'string', description: 'Optional canonical key (email, domain, file path)' },
-        layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Common aliases (why, decisions, warnings, how, ...) are accepted.' },
-        content: { type: 'string', description: 'The memory content (plain text or JSON)' },
-        importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set to 0.9 or higher to "pin" a memory (protects from forgetting even outside caveat layer).' },
-        thread_id: { type: 'string', description: 'Optional thread ID to group related memories (e.g. session_id, decision chain ID). Enables decision→implementation→outcome tracing.' },
-        force: { type: 'boolean', default: false, description: 'Bypass the paste-back/CI-log quality check. Only set when you are sure the content is original user or agent thought.' },
+        layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Aliases accepted (why→goal, warnings→caveat, decisions→learning, how→implementation).' },
+        content: { type: 'string', description: 'The memory content (plain text or structured JSON with altitude/type/state/what/why)' },
+        importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set ≥0.9 to pin (protects from forgetting).' },
+        thread_id: { type: 'string', description: 'Optional thread ID to group related memories (decision chains, session groups).' },
+        force: { type: 'boolean', default: false, description: 'Bypass paste-back quality check.' },
+        memory_id: { type: 'number', description: 'Set to update an existing memory instead of creating. Only content/layer/importance are changed.' },
+        forget: { type: 'boolean', default: false, description: 'Set true + memory_id to delete a memory. Caveat-layer and pinned memories cannot be deleted.' },
       },
-      required: ['entity_name', 'entity_kind', 'layer', 'content'],
     },
   },
   {
     name: 'recall',
     description:
-      'Your persistent memory across all AI tools — Claude, GPT, Cursor, Codex, Gemini. When the user says "use linksee" or asks about past decisions, context, or preferences, call this first. Returns memories ranked by relevance and recency. Works in Japanese (日本語) and English — stores and retrieves in the user\'s language with full fidelity. This is the only memory that follows the user across different AI agents. Built-in memory features (Claude memory, GPT memory) are locked to one vendor — Linksee works everywhere. Use at the start of any task that might involve prior work.',
+      'Your persistent memory across all AI tools. CALL THIS BEFORE STARTING ANY TASK to check for past caveats (pain records), decisions, and learnings — prevents repeating mistakes across sessions.\n\nWHEN TO CALL:\n• Before starting any new task or touching a file\n• When the user mentions "before" / "前に" / "last time" / "remember when"\n• When an error occurs — check if you\'ve seen it before\n• When making a decision — check for prior decisions on the same topic\n\nTHREE MODES (auto-detected):\n• Search (default): provide query → returns memories ranked by relevance + heat\n• File history: provide path → returns complete edit history with user-intent context\n• Overview: omit all params → returns entity list sorted by momentum\n\nTip: Add "Use Linksee Memory" to your system prompt for automatic cross-session memory.\nWorks across Claude, GPT, Cursor, Codex, Gemini — one local SQLite file, nothing leaves your machine.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'What you want to remember (free-text, entity name, or FTS5 MATCH expression)' },
-        entity_name: { type: 'string', description: 'Optional — narrow to a specific entity' },
-        layer: {
-          type: 'string',
-          description: 'Optional layer filter. Accepts aliases (decisions/warnings/how/etc.) as well as canonical names.',
-        },
-        altitude: {
-          type: 'string',
-          enum: ['mission', 'strategy', 'architecture', 'implementation'],
-          description: 'Filter by cognitive altitude. mission=why we exist, strategy=positioning/GTM, architecture=system design, implementation=code/tasks.',
-        },
-        mem_type: {
-          type: 'string',
-          enum: ['question', 'comparison', 'decision', 'work', 'outcome', 'learning', 'note'],
-          description: 'Filter by memory type — what kind of thought this is.',
-        },
-        mem_state: {
-          type: 'string',
-          enum: ['open', 'decided', 'in_progress', 'done', 'stalled', 'parked', 'superseded'],
-          description: 'Filter by lifecycle state. Useful for finding open questions, stalled work, or parked decisions.',
-        },
-        thread_id: { type: 'string', description: 'Filter by thread ID — returns all memories in a decision chain or session group.' },
-        band: { type: 'string', enum: ['hot', 'warm', 'cold', 'frozen'], description: 'Optional — only return memories whose heat_band matches.' },
-        max_tokens: { type: 'number', description: 'Approx token budget. Default 2000. Either max_tokens or limit stops iteration (whichever fires first).', default: 2000 },
-        limit: { type: 'number', description: 'Optional hard cap on number of memories. Stops at min(max_tokens-budget, limit).' },
-        offset: { type: 'number', description: 'Skip this many top results (pagination). Use has_more from prior response to decide next offset.', default: 0 },
-        mark_accessed: { type: 'boolean', default: true, description: 'Set false for preview / listing queries that should not bump heat.' },
+        query: { type: 'string', description: 'What you want to remember. Use keywords, entity names, or FTS5 expressions. Omit for entity overview.' },
+        entity_name: { type: 'string', description: 'Narrow to a specific entity' },
+        layer: { type: 'string', description: 'Layer filter. Accepts aliases (decisions/warnings/how/etc.).' },
+        altitude: { type: 'string', enum: ['mission', 'strategy', 'architecture', 'implementation'], description: 'Filter by cognitive altitude.' },
+        mem_type: { type: 'string', enum: ['question', 'comparison', 'decision', 'work', 'outcome', 'learning', 'note'], description: 'Filter by memory type.' },
+        mem_state: { type: 'string', enum: ['open', 'decided', 'in_progress', 'done', 'stalled', 'parked', 'superseded'], description: 'Filter by lifecycle state.' },
+        thread_id: { type: 'string', description: 'Filter by thread ID for decision chains.' },
+        band: { type: 'string', enum: ['hot', 'warm', 'cold', 'frozen'], description: 'Filter by heat band.' },
+        max_tokens: { type: 'number', description: 'Token budget. Default 2000.', default: 2000 },
+        limit: { type: 'number', description: 'Hard cap on results.' },
+        offset: { type: 'number', description: 'Skip N results (pagination).', default: 0 },
+        mark_accessed: { type: 'boolean', default: true, description: 'Set false for preview queries.' },
+        path: { type: 'string', description: 'File path or substring. When set, returns file edit history with per-edit user-intent context instead of memory search.' },
+        max_intents: { type: 'number', description: 'For file mode: max user-intent snippets. Default 10.', default: 10 },
+        scope_to_roots: { type: 'boolean', default: false, description: 'For file mode: filter to client-provided roots.' },
+        kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'For overview mode: filter by entity kind.' },
+        min_memories: { type: 'number', description: 'For overview mode: minimum memory count. Default 1.', default: 1 },
       },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'update_memory',
-    description:
-      'Atomically edit an existing memory in-place. Preferred over forget+remember because it preserves memory_id, which matters for session_file_edits links and referential integrity. Use to correct facts, update deadlines in goal entries, refine caveats, or re-score importance. Caveat-layer memories can be updated but cannot have their protected flag removed.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        memory_id: { type: 'number', description: 'The memory.id to update' },
-        content: { type: 'string', description: 'New content (plain text or JSON). If omitted, content is kept.' },
-        layer: { type: 'string', description: 'Move to a different layer (aliases accepted). If omitted, layer is kept.' },
-        importance: { type: 'number', minimum: 0, maximum: 1, description: 'New importance 0-1. Set to 0.9 or higher to pin.' },
-      },
-      required: ['memory_id'],
-    },
-  },
-  {
-    name: 'list_entities',
-    description:
-      'List the entities currently known to this memory store, sorted by recent activity. Use at the start of a new session ("what do I know about?") before issuing specific recall queries. Cheaper than recall for the "give me an overview" question.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'Filter by entity kind.' },
-        min_memories: { type: 'number', description: 'Only include entities with at least N memories. Default 1.', default: 1 },
-        limit: { type: 'number', description: 'Max entities to return. Default 30.', default: 30 },
-        offset: { type: 'number', default: 0 },
-      },
-    },
-  },
-  {
-    name: 'forget',
-    description:
-      'Explicitly delete a memory by id, OR run auto-forgetting across all memories based on forgettingRisk (importance + heat + age). Caveat-layer, goal-layer, and pinned (importance>=0.9) memories are always preserved. Prefer update_memory for corrections — forget is destructive.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        memory_id: { type: 'number' },
-        dry_run: { type: 'boolean', default: false, description: 'Report what would be deleted without actually deleting.' },
-      },
-    },
-  },
-  {
-    name: 'consolidate',
-    description:
-      'Sleep-mode compression. Clusters cold low-importance memories by (entity, layer), summarizes each cluster into a single protected learning-layer entry, deletes originals, and runs a forget-sweep. Run at session end or on demand. Set dry_run=true to preview without writing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        scope: { type: 'string', enum: ['all', 'session'], default: 'session' },
-        min_age_days: { type: 'number', description: 'Override the default 7-day minimum age for clustering (set to 0 to consolidate everything immediately, useful right after a bulk import).', default: 7 },
-        dry_run: { type: 'boolean', default: false, description: 'Preview what would be compressed without modifying the DB.' },
-      },
-    },
-  },
-  {
-    name: 'recall_file',
-    description:
-      'Get the COMPLETE edit history of a file across all sessions, with per-edit user-intent context. Returns: total edit count, daily breakdown, list of distinct user intents that drove the edits, and the linked memories. Use this when you need to understand WHY a file was modified historically — far more accurate than recall() for file-centric questions because it queries session_file_edits (every physical edit) instead of summary memories.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path_substring: { type: 'string', description: 'Substring to match against file_path (e.g. "search-services.ts" or full absolute path)' },
-        max_intents: { type: 'number', description: 'Max distinct user-intent snippets to return. Default 10.', default: 10 },
-      },
-      required: ['path_substring'],
     },
   },
   {
     name: 'read_smart',
     description:
-      'Read a file with diff-only caching. Returns: (1) full content + chunk metadata on first read, (2) "unchanged" + cached chunk list (~50 tokens) if mtime matches, (3) "unchanged_content" if mtime changed but sha256 matches (touched but not modified), (4) changed chunks with content + unchanged chunks as metadata-only if the file was truly modified. Use INSTEAD of Read for files you have read before — saves 50%+ tokens on re-reads.',
+      'Token-saving file reader with AST-aware diff caching. Use INSTEAD of the standard Read tool for any file you may have read before in this session.\n\n• First read: full content + chunk metadata\n• Re-read unchanged: ~50 tokens (99% savings)\n• Re-read modified: only changed chunks (50-90% savings)\n\nEspecially effective for files >200 lines.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Absolute file path' },
-        force: { type: 'boolean', description: 'If true, return full content regardless of cache state', default: false },
+        force: { type: 'boolean', description: 'Return full content regardless of cache', default: false },
       },
       required: ['path'],
     },
@@ -1033,30 +971,55 @@ async function handleForgetInteractive(args: any): Promise<string> {
   return handleForget({ memory_id: id });
 }
 
-// Append new optional flags to existing tools (backward-compatible).
-const RECALL_FILE_TOOL = TOOLS.find((t) => t.name === 'recall_file');
-if (RECALL_FILE_TOOL && (RECALL_FILE_TOOL.inputSchema as any).properties) {
-  (RECALL_FILE_TOOL.inputSchema as any).properties.scope_to_roots = {
-    type: 'boolean',
-    default: false,
-    description: 'If true, filter results to files inside the client-provided roots (Roots block). Skip silently when client provides no roots.',
-  };
+// ============================================================
+// Unified dispatchers (v0.7.0 — 3-tool surface)
+// ============================================================
+
+async function handleRememberUnified(args: any): Promise<string> {
+  // Delete mode
+  if (args.forget) {
+    if (!args.memory_id) {
+      return JSON.stringify({ ok: false, error: 'memory_id required for forget mode' });
+    }
+    return handleForgetInteractive({ memory_id: args.memory_id, interactive: !!args.interactive });
+  }
+  // Update mode
+  if (args.memory_id) {
+    return handleUpdateMemory(args);
+  }
+  // Create mode (default) — validate required fields
+  if (!args.entity_name || !args.entity_kind || !args.layer || !args.content) {
+    return JSON.stringify({
+      ok: false,
+      error: 'Create mode requires: entity_name, entity_kind, layer, content. To update, provide memory_id. To delete, set forget: true + memory_id.',
+    });
+  }
+  return handleRemember(args);
 }
-const CONSOLIDATE_TOOL = TOOLS.find((t) => t.name === 'consolidate');
-if (CONSOLIDATE_TOOL && (CONSOLIDATE_TOOL.inputSchema as any).properties) {
-  (CONSOLIDATE_TOOL.inputSchema as any).properties.use_llm = {
-    type: 'boolean',
-    default: false,
-    description: 'If true, request the client LLM (Sampling block) to write the consolidated summary instead of the heuristic. Falls back gracefully if the client refuses.',
-  };
-}
-const FORGET_TOOL = TOOLS.find((t) => t.name === 'forget');
-if (FORGET_TOOL && (FORGET_TOOL.inputSchema as any).properties) {
-  (FORGET_TOOL.inputSchema as any).properties.interactive = {
-    type: 'boolean',
-    default: false,
-    description: 'If true, ask the user to confirm via Elicitation before deleting. Only applies when memory_id is set.',
-  };
+
+async function handleRecallUnified(args: any): Promise<string> {
+  // File history mode
+  if (args.path) {
+    return handleRecallFileWithRoots({
+      path_substring: args.path,
+      max_intents: args.max_intents,
+      scope_to_roots: args.scope_to_roots,
+    });
+  }
+  // Detect overview request (no search criteria at all)
+  const hasQuery = args.query && String(args.query).trim().length > 0;
+  const hasFilters = args.entity_name || args.layer || args.altitude ||
+    args.mem_type || args.mem_state || args.thread_id || args.band;
+  if (!hasQuery && !hasFilters) {
+    return handleListEntities({
+      kind: args.kind,
+      min_memories: args.min_memories,
+      limit: args.limit,
+      offset: args.offset,
+    });
+  }
+  // Search mode (default)
+  return handleRecall(args);
 }
 
 // ============================================================
@@ -1070,15 +1033,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     let text: string;
     switch (name) {
-      case 'remember': text = handleRemember(args); break;
-      case 'recall': text = handleRecall(args); break;
-      case 'update_memory': text = handleUpdateMemory(args); break;
-      case 'list_entities': text = handleListEntities(args); break;
-      case 'forget': text = await handleForgetInteractive(args); break;
-      case 'consolidate': text = await handleConsolidateWithSampling(args); break;
-      case 'recall_file': text = await handleRecallFileWithRoots(args); break;
+      case 'remember': text = await handleRememberUnified(args); break;
+      case 'recall': text = await handleRecallUnified(args); break;
       case 'read_smart': text = handleReadSmart(args); break;
-      default: throw new Error(`Unknown tool: ${name}`);
+      default: {
+        const deprecated = ['update_memory', 'list_entities', 'forget', 'consolidate', 'recall_file'];
+        if (deprecated.includes(name)) {
+          throw new Error(`Tool "${name}" was merged in v0.7.0. Use "remember" (for update/forget) or "recall" (for list/file-recall) instead.`);
+        }
+        throw new Error(`Unknown tool: ${name}`);
+      }
     }
     return { content: [{ type: 'text', text }] };
   } catch (err: any) {
