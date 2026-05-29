@@ -256,6 +256,10 @@ function dedupeEdits(edits: ParsedSession['file_ops']): ParsedSession['file_ops'
 export function extractSession(session: ParsedSession, projectName: string): ExtractionResult {
   const memories: ExtractedMemory[] = [];
   const file_edits: ExtractedFileEdit[] = [];
+  // Turn-level dedup: a single user turn should yield at most ONE memory.
+  // Priority: goal(first_intent) > caveat > decision > context. capturedTurns
+  // tracks caveat-claimed turns so the decision pass skips them.
+  const capturedTurns = new Set<string>();
 
   // Detect fully-automated sessions (e.g. scheduled cron tasks) — no user intent to extract
   const firstRawUserText = session.turns.find((t) => t.role === 'user' && !t.tool_results)?.text ?? '';
@@ -312,6 +316,11 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isMetaOrNoise(t.text)) continue;
     if (t.text.trim().length < 40) continue;
+    // Defer to the caveat/decision passes when they WOULD capture this turn,
+    // so a clarification that is really a warning/decision isn't double-saved as context.
+    const wouldBeCaveat = matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20 && !isChitchatWithBuriedDecision(t.text, CAVEAT_PATTERNS);
+    const wouldBeDecision = matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS);
+    if (wouldBeCaveat || wouldBeDecision) continue;
     clarifyCount++;
     const msgText = t.text.slice(0, 600);
     memories.push({
@@ -392,6 +401,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   //    Stricter filter: must NOT be pasted external content.
   for (const t of session.turns) {
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
+    if (t === firstIntent) continue; // already captured as the goal/first-intent memory
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
     if (matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20 && !isChitchatWithBuriedDecision(t.text, CAVEAT_PATTERNS)) {
@@ -414,6 +424,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
         thread_id: session.session_id,
         source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'caveat' },
       });
+      if (t.uuid) capturedTurns.add(t.uuid); // claim this turn so the decision pass skips it
     }
   }
 
@@ -424,6 +435,8 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   //    the full structured format with agent_proposal + user_approval_scope.
   for (const t of session.turns) {
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
+    if (t === firstIntent) continue; // already captured as the goal/first-intent memory
+    if (t.uuid && capturedTurns.has(t.uuid)) continue; // already captured as a caveat
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
     if (matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS)) {
