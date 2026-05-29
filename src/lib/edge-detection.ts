@@ -28,12 +28,17 @@ export interface EdgeDetectionResult {
   edgesCreated: number;
   supersedes: number;
   contradicts: number;
+  extends: number;
   supersededMarked: number;
   samples: EdgeSample[];
 }
 
-const REVERSAL_MARKERS =
-  /やめ|撤回|取り消|廃止|ではなく|じゃなく|の代わり|に変更|に切り替|乗り換|見直|revert|rollback|instead of|no longer|switch(?:ing|ed)?\s+(?:to|from|away)|deprecat|abandon|replace[sd]?\b/i;
+// A later decision either REVERSES an earlier one (→ contradicts) or REPLACES it
+// (→ supersedes). A same-topic decision with NEITHER marker only EXTENDS the earlier
+// one and must NOT deactivate it — marking a still-valid decision 'superseded' is
+// silent data loss (e.g. "v2 format" extends, it does not kill, the "2-layer arch" decision).
+const CONTRADICT_MARKERS = /やめ|撤回|取り消|ではなく|じゃなく|見直|revert|rollback|instead of|no longer|abandon|\bdon'?t\b/i;
+const SUPERSEDE_MARKERS = /の代わり|に変更|に切り替|乗り換|を置き換|に置換|廃止|replaces?\b|supersed|deprecat|switch(?:ing|ed)?\s+(?:to|from|away)/i;
 
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'your', 'our', 'their',
@@ -95,7 +100,7 @@ export function detectMemoryEdges(
 ): EdgeDetectionResult {
   const lookback = opts.lookback ?? 25;
   const res: EdgeDetectionResult = {
-    decisionsScanned: 0, edgesCreated: 0, supersedes: 0, contradicts: 0, supersededMarked: 0, samples: [],
+    decisionsScanned: 0, edgesCreated: 0, supersedes: 0, contradicts: 0, extends: 0, supersededMarked: 0, samples: [],
   };
 
   const rows = db.prepare(`
@@ -152,19 +157,24 @@ export function detectMemoryEdges(
           if (overlap >= 0.25) { linked = j; linkedShared = shared; break; } // most-recent same-topic → chain
         }
         if (linked < 0) continue;
-        const relation = REVERSAL_MARKERS.test(meta[i].text) ? 'contradicts' : 'supersedes';
+        const reversing = CONTRADICT_MARKERS.test(meta[i].text);
+        const replacing = SUPERSEDE_MARKERS.test(meta[i].text);
+        const relation = reversing ? 'contradicts' : replacing ? 'supersedes' : 'extends';
+        const deactivatesOlder = reversing || replacing; // 'extends' leaves the older decision valid
         let counted = true;
         if (!opts.dryRun) {
           const r = insEdge!.run(meta[i].id, meta[linked].id, relation);
           if (r.changes > 0) {
-            if (markSuperseded!.run(meta[linked].id).changes > 0) res.supersededMarked++;
+            if (deactivatesOlder && markSuperseded!.run(meta[linked].id).changes > 0) res.supersededMarked++;
           } else {
             counted = false; // edge already existed
           }
         }
         if (counted) {
           res.edgesCreated++;
-          if (relation === 'contradicts') res.contradicts++; else res.supersedes++;
+          if (relation === 'contradicts') res.contradicts++;
+          else if (relation === 'supersedes') res.supersedes++;
+          else res.extends++;
           if (res.samples.length < 25) {
             res.samples.push({
               from_id: meta[i].id, to_id: meta[linked].id, relation,
