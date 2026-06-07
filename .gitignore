@@ -43,3 +43,14 @@ credentials*
 
 # MCP registry publisher CLI (downloaded on demand)
 .mcp-publisher/
+
+# Local-only ops/security artifacts — NEVER publish.
+# Even without secret literals, runbooks/endpoints/env-var-names are an attack-surface map.
+# Keep the operational record local; commit only sanitized, abstracted subject material.
+local/
+security/
+ops/
+runbooks/
+
+# Generated Drift OS artifacts (rendered from scripts/, like dist/)
+drift-map.html

@@ -10,7 +10,9 @@
     "linksee-memory-sync": "dist/bin/sync-session.js",
     "linksee-memory-install-skill": "dist/bin/install-skill.js",
     "linksee-memory-stats": "dist/bin/stats.js",
-    "linksee-memory-setup": "dist/bin/setup.js"
+    "linksee-memory-setup": "dist/bin/setup.js",
+    "linksee-memory-declare": "dist/bin/declare-anchor.js",
+    "linksee-memory-detect": "dist/bin/detect-drift.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [

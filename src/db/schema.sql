@@ -4,6 +4,8 @@
 -- v2 adds: FTS5 full-text search, consolidations audit, momentum cache on entities.
 -- v6 adds: 3-axis generated columns (altitude/mem_type/mem_state) for queryable classification.
 -- v7 adds: thread_id for decision chains, memory_edges for memory→memory relationships.
+-- v8 adds: drift observability — drift_anchors (declared intent) + drift_edges (intent×reality verdicts).
+--          Purely ADDITIVE: new tables only, no ALTER. Revert = DROP the two tables (no migrate.ts hook).
 
 -- ============================================================
 -- Layer 1: Facts — entities (people / companies / projects / concepts)
@@ -220,6 +222,120 @@ CREATE TABLE IF NOT EXISTS consolidations (
 CREATE INDEX IF NOT EXISTS idx_consolidations_entity ON consolidations(entity_id);
 
 -- ============================================================
+-- v8: Drift observability — declared intent vs. actual reality.
+-- Positioned ABOVE the memory engine (Sentry/Datadog-style): surface where a
+-- DECLARED constraint/decision (intent) diverges from what the code actually did
+-- (reality = session_file_edits). Deductive 照合, NOT 推測.
+--
+-- declare-don't-mine: anchors come ONLY from explicit declaration
+-- (CLI declare / curation / CLAUDE.md), NEVER from the session pattern-extractor.
+-- The tier CHECK ('human','explicit') enforces this at the schema level — an
+-- agent/inferred memory physically cannot become an anchor.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS drift_anchors (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind             TEXT NOT NULL CHECK (kind IN ('prohibition', 'decision', 'constraint')),
+  statement        TEXT NOT NULL,                       -- the normative claim, verbatim
+  rationale        TEXT,                                -- WHY (entrenchment context)
+  affects          TEXT NOT NULL DEFAULT '[]',          -- JSON array of path globs that scope reality
+  detect_terms     TEXT NOT NULL DEFAULT '[]',          -- JSON array of topical terms (FTS/overlap scoping)
+  violation_signal TEXT NOT NULL DEFAULT '[]',          -- JSON array: terms whose PRESENCE in scope = violation
+  tier             TEXT NOT NULL DEFAULT 'human' CHECK (tier IN ('human', 'explicit')),
+  source           TEXT NOT NULL DEFAULT 'declare' CHECK (source IN ('declare', 'curate', 'claude_md')),
+  source_memory_id INTEGER REFERENCES memories(id) ON DELETE SET NULL,  -- provenance if curated; anchor outlives it
+  status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired')),
+  created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  -- v9: ProjectCoreNode extension (Current Truth Map). ADDITIVE columns only — NO CHECK rebuild.
+  -- The existing status(active/retired) STAYS the coarse scan-gate (existing detector unaffected);
+  -- `lifecycle` carries the rich state. Values validated in the lib (no CHECK on new cols).
+  node_type              TEXT,                       -- north_star|active_strategy|business_model|product_architecture|operational_commitment|source_of_truth|experiment|metric|asset|risk|retired_decision
+  domain                 TEXT,                       -- strategy|monetization|product|engineering|growth|operations|security|roadmap|memory
+  decision_mode          TEXT,                       -- constraint|commitment|hypothesis|preference|source_of_truth|metric  (the ROUTER → which detector + card behavior)
+  confidence             REAL NOT NULL DEFAULT 0.8,
+  lifecycle              TEXT NOT NULL DEFAULT 'active',  -- active|experiment|paused|superseded|deprecated|unknown
+  validity_scope         TEXT NOT NULL DEFAULT '{}',  -- JSON {applies_to[], does_not_apply_to[]}
+  card_policy            TEXT NOT NULL DEFAULT '{}',  -- JSON {enabled, severity_if_broken, require_review_before_alert, cooldown_days}
+  reality_manifestations TEXT NOT NULL DEFAULT '[]',  -- JSON RealityManifestation[]
+  evidence_refs          TEXT NOT NULL DEFAULT '[]',  -- JSON EvidenceRef[]
+  review_after           INTEGER,
+  last_confirmed_at      INTEGER,
+  owner                  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_drift_anchors_status ON drift_anchors(status);
+CREATE INDEX IF NOT EXISTS idx_drift_anchors_kind   ON drift_anchors(kind);
+
+-- Drift edges connect an ANCHOR (drift_anchors) to a REALITY unit (session_file_edits).
+-- NOT reusable as memory_edges: that table FKs both ends to memories(id); these ends don't.
+-- edit_id is NULL for a pure 'absent' verdict (decided-but-no-reality).
+CREATE TABLE IF NOT EXISTS drift_edges (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  anchor_id   INTEGER NOT NULL REFERENCES drift_anchors(id) ON DELETE CASCADE,
+  edit_id     INTEGER REFERENCES session_file_edits(id) ON DELETE CASCADE,
+  verdict     TEXT NOT NULL CHECK (verdict IN ('contradicts', 'implements', 'absent')),
+  confidence  REAL NOT NULL DEFAULT 0.0,                -- min(tier_anchor, tier_reality) × match_strength
+  evidence    TEXT NOT NULL DEFAULT '{}',               -- JSON: file_path, context_snippet, shared_terms, hit_term, occurred_at
+  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'ack', 'dismissed', 'resolved')),
+  detected_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(anchor_id, edit_id, verdict)
+);
+
+CREATE INDEX IF NOT EXISTS idx_drift_edges_anchor  ON drift_edges(anchor_id);
+CREATE INDEX IF NOT EXISTS idx_drift_edges_verdict ON drift_edges(verdict, status);
+-- 'absent' has edit_id NULL, which UNIQUE treats as distinct — enforce one open absence per anchor.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_drift_absent ON drift_edges(anchor_id) WHERE verdict = 'absent';
+
+-- ============================================================
+-- v9: Reality events — agent-AGNOSTIC reality signals (the uniform "floor").
+-- Generalizes session_file_edits beyond Claude-Code transcripts: git commits, npm
+-- publishes, deploys, etc. captured uniformly across ALL agents (git/files = WHAT).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS reality_events (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope         TEXT,                                -- project / path token
+  source_type   TEXT NOT NULL CHECK (source_type IN (
+                  'git_commit','git_diff','file_change','npm','github','vercel','railway','article','strategy_doc','agent_summary','other'
+                )),
+  summary       TEXT NOT NULL,
+  file_path     TEXT,
+  raw_ref       TEXT,
+  hash          TEXT,
+  evidence_refs TEXT NOT NULL DEFAULT '[]',          -- JSON EvidenceRef[]
+  occurred_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+  captured_at   INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_reality_events_scope ON reality_events(scope);
+CREATE INDEX IF NOT EXISTS idx_reality_events_src   ON reality_events(source_type);
+CREATE INDEX IF NOT EXISTS idx_reality_events_when  ON reality_events(occurred_at DESC);
+
+-- ============================================================
+-- v9: Memory write candidates — the candidate→review→node staging.
+-- Distillation/agents NEVER write the truth-map directly: they propose candidates.
+-- Hard facts auto_accept; Soft interpretations stay pending_review (anti-AI-runaway).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS memory_write_candidates (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope          TEXT,
+  candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+                   'create_node','update_node','pause_node','supersede_node','deprecate_node','create_card','no_write'
+                 )),
+  target_node_id INTEGER REFERENCES drift_anchors(id) ON DELETE SET NULL,
+  proposed_node  TEXT,                               -- JSON Partial<ProjectCoreNode>
+  rationale      TEXT NOT NULL,
+  confidence     REAL NOT NULL DEFAULT 0.0,
+  evidence_refs  TEXT NOT NULL DEFAULT '[]',
+  status         TEXT NOT NULL DEFAULT 'pending_review' CHECK (status IN (
+                   'pending_review','auto_accepted','accepted','rejected'
+                 )),
+  created_at     INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_mwc_status ON memory_write_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_mwc_scope  ON memory_write_candidates(scope);
+
+-- ============================================================
 -- Meta — schema version tracking
 -- ============================================================
 CREATE TABLE IF NOT EXISTS meta (
@@ -227,6 +343,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '7');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '9');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '7' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6');
+UPDATE meta SET value = '9' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8');
