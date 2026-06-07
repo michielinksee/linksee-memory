@@ -7,10 +7,9 @@
 
 ## 1. Strategy
 - Position = "Ahrefs of the AEO era" — *Agent* Engine Optimization, a distinct market from Answer-EO.
-- Monetization model = Google-style: free for agents/users; **SaaS vendors pay for AEO analytics**.
-  (Pricing specifics are internal.)
-- **AEO rating-agency** model (MSCI/ESG analogy): publish scores → vendors care about
-  discoverability → consulting demand.
+- Monetization model = Google-style: free for agents/users; a **paid B2B intelligence layer** for
+  vendors. (Model & pricing specifics are internal.)
+- Free public signal → deeper paid intelligence (a flywheel: public visibility drives vendor demand).
 - Two-layer posture (evolved — see A4改 / `decision-log.md` D1): public thesis & education vs.
   private proprietary core.
 - Prohibitions: competitor-avoidance (no focus-scatter), self-neutrality (no preferential ranking
@@ -29,10 +28,9 @@
 - Backend: embedded SQL store + full-text search; stdio + remote HTTP. Read-centric, stateless-friendly.
 - Search: intent→category mapping via a **voting model** (weights internal) — beats naive FTS on
   intent queries.
-- Japanese search: **multi-strategy** (trigram FTS + bigram-LIKE + CJK intent scan) — a differentiator.
+- Japanese search: a **Japanese-aware multi-layer search architecture** — a differentiator (internals private).
 - Trust scoring: **dynamic, category-specific, evidence-based** (not static; mechanics internal).
-- Collective-intelligence safeguards: **multi-layer** (evaporation / contradiction-detection /
-  verification-threshold) + anomaly detection + inspection queue (the "scout-ant" model; thresholds internal).
+- Collective-intelligence: a **distributed discovery model with layered quality controls** (internals private).
 - Canonical service IDs; **PII not stored / auto-masked**.
 - Public MCP tool surface (search / lookup / report / inspect / analyze, plus others).
 - Article generation: a **multi-stage fact-check pipeline** (prep → write → fact-check), grounded
@@ -51,8 +49,7 @@
 ## 5. Growth
 - GTM channels (by efficiency): technical articles, official Registry, GitHub Topics,
   community/Discord, **direct outreach to Japanese SaaS vendors** (strongest persona contact).
-- **AEO Analytics / Agent Visibility Report** = the SaaS-paid product (the monetization body —
-  still nascent).
+- The **paid B2B intelligence layer** (vendor-facing) = the monetization body — still nascent.
 - Public articles disclose tech only, not the strategy framework (strategy shown via results).
 
 ## 6. Timeline / Priority

@@ -29,12 +29,11 @@
 - **Resolution:** acknowledged + **time-boxed** (reopens ~2026-07-04). Held, not closed.
 - **Lesson:** ⚪保留 — acknowledged ≠ resolved; the clock prevents silent abandonment.
 
-## Case 4 — seed idempotency: a confirmed mechanical drift 🔴 (illustrative)
-- **Intent:** seed/ingest must be idempotent so re-ingest refreshes category / tag / trust (UPSERT).
-- **Reality:** a seed path used a non-idempotent insert-or-ignore, so re-ingest did **not** refresh
-  existing rows.
+## Case 4 — data-refresh idempotency: a mechanical drift 🔴 (illustrative)
+- **Intent:** a data-refresh path should be idempotent, so re-running it updates existing records.
+- **Reality:** the path was non-idempotent, so re-runs did **not** refresh existing records.
 - **Verdict:** confirmed drift — un-owned (no recorded decision), mechanically detectable.
-- **Resolution:** fix the seed path to UPSERT. *(Implementation location abstracted.)*
+- **Resolution:** make the refresh path idempotent. *(Specifics abstracted.)*
 - **Lesson:** a mechanical **"Hard heartbeat"** drift — code/timestamp-checkable, high-confidence,
   low-noise.
 

@@ -9,10 +9,10 @@
 | ID | mode | conf | Direction |
 |----|------|:----:|-----------|
 | **A1** | hypothesis | 0.92 | Core value = agent context/token saving → user API-cost reduction (negawatt / ESCO model). |
-| **A3** | hypothesis | 0.90 | Monetization = 3-phase funnel: P1 MCP translation + registration → P2 token-save visualization + AEO analytics → P3 client embedding + referral. |
+| **A3** | hypothesis | 0.90 | Monetization = 3-phase funnel: P1 MCP translation + registration → P2 usage-savings visualization + a paid B2B intelligence layer → P3 client embedding + referral. |
 | **A5** | hypothesis | 0.92 | Four focus areas = Recipe layer / agent-native API design / Japan-market focus / Agent Insights (experience sharing). *(lifecycle: **at_risk** — see decision-log D2)* |
 | **A9** | hypothesis | 0.95 | Evolution path = phonebook (search) → Tabelog + transit info (tips/insights) → Uber (intelligent routing). |
-| **A10** | hypothesis | 0.92 | Business model = KanseiLINK as an **AEO rating agency** (publish free AEO scores → demand for AEO-optimization consulting). |
+| **A10** | hypothesis | 0.92 | Business model = publish a free public score signal → monetize a deeper **B2B intelligence layer** (public visibility drives vendor demand). |
 | **A21** | hypothesis → resolved | 0.95 | Three layers = MCP (free acquisition) / App (exit) / KanseiLINK (discovery + quality); embed an app/deep-link in every applicable MCP response. *(see decision-log D3)* |
 
 ## Governing constraints
