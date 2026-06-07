@@ -99,6 +99,32 @@ export function runMigrations(db: Database.Database): void {
     `);
   }
 
+  // v8 → v9: ProjectCoreNode — extend drift_anchors into the Current Truth Map node.
+  // ADDITIVE columns only (ADD COLUMN with safe defaults) — NO CHECK rebuild, so the existing
+  // detector/dashboard (which read the original columns + status active/retired) are unaffected.
+  // `lifecycle` carries the rich state; `status` stays the coarse scan-gate. New tables
+  // (reality_events, memory_write_candidates) are created by db.exec(sql) below (CREATE IF NOT EXISTS).
+  if (currentVersion > 0 && currentVersion < 9) {
+    const have = new Set(
+      (db.prepare('PRAGMA table_info(drift_anchors)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    const addCol = (name: string, ddl: string) => {
+      if (!have.has(name)) db.exec(`ALTER TABLE drift_anchors ADD COLUMN ${ddl}`);
+    };
+    addCol('node_type', 'node_type TEXT');
+    addCol('domain', 'domain TEXT');
+    addCol('decision_mode', 'decision_mode TEXT');
+    addCol('confidence', 'confidence REAL NOT NULL DEFAULT 0.8');
+    addCol('lifecycle', "lifecycle TEXT NOT NULL DEFAULT 'active'");
+    addCol('validity_scope', "validity_scope TEXT NOT NULL DEFAULT '{}'");
+    addCol('card_policy', "card_policy TEXT NOT NULL DEFAULT '{}'");
+    addCol('reality_manifestations', "reality_manifestations TEXT NOT NULL DEFAULT '[]'");
+    addCol('evidence_refs', "evidence_refs TEXT NOT NULL DEFAULT '[]'");
+    addCol('review_after', 'review_after INTEGER');
+    addCol('last_confirmed_at', 'last_confirmed_at INTEGER');
+    addCol('owner', 'owner TEXT');
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {
