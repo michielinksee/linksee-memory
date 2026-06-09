@@ -1,8 +1,10 @@
 # linksee-memory
 
-> **Your agent forgets everything when a session ends. Linksee Memory is the fix.**
+> **Your agent forgets everything when a session ends. Worse — it silently drifts from what you decided last week.**
 >
-> Local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY** it happened: 6-layer structured memory with precision recall that surfaces the right context at the right moment.
+> Local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY** it happened: 6-layer structured memory with precision recall, **plus drift detection that catches when reality diverges from your decisions**.
+>
+> Memory is the entry point. Drift detection is the real value.
 >
 > `npx linksee-memory-setup` — one command, done.
 
@@ -87,21 +89,69 @@ Every memory is tagged with **exactly one layer**. `caveat`-layer entries are pr
 
 Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. **linksee-memory keeps the WHY.**
 
-It is a Model Context Protocol (MCP) server with **3 tools** that gives any AI agent structured memory:
+It is a Model Context Protocol (MCP) server with **7 tools** that gives any AI agent structured memory + drift detection:
 
 | | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
 |---|---|---|---|
 | Cross-agent | △ (cloud) | ❌ Claude only | ✅ single SQLite file |
 | 6-layer WHY structure | ❌ flat | ❌ flat markdown | ✅ goal / context / emotion / impl / caveat / learning |
+| **Drift detection** | ❌ | ❌ | ✅ intent ↔ reality divergence tracking |
 | File diff cache | ❌ | ❌ | ✅ AST-aware, 50-99% token savings on re-reads |
 | Active forgetting | △ | ❌ | ✅ Ebbinghaus curve, caveat layer protected |
 | Local-first / private | ❌ | ✅ | ✅ |
 
-## Three pillars
+## Four pillars
 
 1. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
 2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI.
 3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
+4. **Drift detection** — declare decisions as anchors, then the engine automatically detects when committed reality diverges from stated intent. Think "Datadog for product decisions" — unaccounted divergences surface as drift, intentional evolution (recorded as supersede/fix) stays quiet.
+
+## 🔍 Drift Detection — "Intent Datadog"
+
+Most teams make decisions, then forget them. The agent from last week decided "we'll use FTS5 instead of vector search" — but this week a new session installs `pgvector` without knowing why that was rejected. **That's drift.** Not a bug. Not malice. Just forgotten context.
+
+Linksee Memory's drift detection catches this:
+
+```
+You:    What's drifting right now?
+Agent:  [calls drift_status]
+
+        28 anchors: ⚪ 1 held · 🔵 27 aligned
+
+        Needs attention:
+        ⚪ HELD — "Focus on 4 areas: Recipe layer, agent-native API,
+           Japanese market, Agent Insights"
+           ↻ Reopens 2026-07-04
+
+        Everything else is aligned — no unaccounted divergence.
+```
+
+### How it works
+
+1. **Declare** decisions as anchors: `declare_anchor({ kind: "decision", statement: "We use FTS5, not vector search", violation_signal: ["pgvector", "embedding"] })`
+2. **The engine detects** when committed code reality diverges from these anchors
+3. **State derivation** classifies each anchor:
+   - 🔴 **Drift** — reality diverges with no recorded resolution
+   - 🟡 **Review** — a soft signal awaits your decision
+   - ⚪ **Held** — you acknowledged the gap, parked it with a review date
+   - 🔵 **Aligned** — reality matches intent, or a recorded resolution explains the change
+4. **Resolve** with `fix`, `supersede`, `acknowledge`, or `dismiss`
+
+The **make-or-break rule**: a divergence accounted for by a recorded resolution (supersede/fix/acknowledge) is NOT drift. Only unaccounted gaps are flagged. This means intentional evolution stays quiet while silent abandonment gets caught.
+
+### 4-species taxonomy
+
+Anchors are classified into four species with different display formats:
+
+| Species | Icon | Display Format | Example |
+|---|---|---|---|
+| Hypothesis | 🧪 | Decision Card (journal format) | "We'll launch English-first on HN" |
+| Constraint | 🔒 | Rule (pass/fail checklist) | "All writes go through remember()" |
+| Commitment | 🔁 | Heartbeat (alive/dead) | "Ship a new version every week" |
+| Source of Truth | 📍 | Reference (stable anchor) | "MCP server runs on stdio, single SQLite" |
+
+---
 
 ## Quick Start — One Command
 
@@ -248,7 +298,17 @@ All editors share the same `~/.linksee-memory/memory.db`. A decision made in Cla
 
 Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
-## What's new in v0.7
+## What's new in v0.8
+
+| Feature | Detail |
+|---|---|
+| **4 drift detection tools** | `drift_status`, `check_decision`, `declare_anchor`, `resolve_drift` — agents can now query and act on intent ↔ reality divergence. The biggest gap in agent memory (decisions are forgotten across sessions) is now closed. |
+| **Truth engine** | State derivation logic (drift/review/held/aligned) now lives in the MCP engine, not just the dashboard. Any MCP client can query drift status. |
+| **4-species taxonomy** | Anchors classified as hypothesis/constraint/commitment/source_of_truth with species-appropriate display formats. |
+| **Resolution priority** | When multiple resolutions exist for an anchor, the most recent one wins (prevents stale acknowledge from shadowing a newer fix). |
+
+<details>
+<summary>What's new in v0.7</summary>
 
 | Feature | Detail |
 |---|---|
@@ -257,6 +317,8 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 | **Deprecation guidance** | Old tool names (`forget`, `recall_file`, etc.) return specific migration examples instead of silent failures. |
 | **"Use Linksee Memory" trigger** | Add "Use Linksee Memory" to any prompt to force memory recall — same adoption pattern as Context7. |
 | **Claude Code Plugin** | `claude plugin add -- linksee-memory` — ships MCP server + auto-invocation skill in one install. |
+
+</details>
 
 <details>
 <summary>What's new in v0.4</summary>
@@ -270,7 +332,9 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 
 </details>
 
-## 3 Tools (v0.7)
+## 7 Tools (v0.8)
+
+### Memory tools
 
 | Tool | What it does |
 |---|---|
@@ -278,7 +342,16 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 | `recall` | **Search / file history / overview.** Modes: search (`query`), file history (`path`), entity overview (no params). FTS5 + heat × momentum ranking with `match_reasons`. |
 | `read_smart` | **Token-saving file reader** with AST diff caching. First read = full content. Re-read unchanged = ~50 tokens. Re-read modified = changed chunks only. |
 
-Previous versions exposed 8 tools — v0.7.0 unified them into 3 for cross-LLM consistency. The server handles routing internally. Old tool names return migration guidance.
+### Drift tools (v0.8.0)
+
+| Tool | What it does |
+|---|---|
+| `drift_status` | **"What's drifting right now?"** Returns the truth map with 4-species classification (hypothesis/constraint/commitment/source_of_truth) and per-node state (🔴 drift / 🟡 review / ⚪ held / 🔵 aligned). |
+| `check_decision` | **Deep-dive into a specific decision.** Returns the full context: what was decided, why, what reality says, pending candidates, and drift edges. |
+| `declare_anchor` | **Record a decision as a truth-map anchor.** The drift detector checks these against committed reality. Supports v9 fields (domain, confidence, lifecycle, review_after). |
+| `resolve_drift` | **Close the loop.** Record a resolution: `fix` (reality now matches), `supersede` (intent evolved), `acknowledge` (parking with review date), or `dismiss` (false positive). |
+
+Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence. The memory tools are unchanged.
 
 ### CLI utilities
 
@@ -343,6 +416,10 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ Structured memory v2 (3-axis classification: altitude × type × state)
 - ✅ Cross-LLM: Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI
 - ✅ Landing page ([linksee-site.vercel.app](https://linksee-site.vercel.app))
+- ✅ Drift detection engine + 4 MCP drift tools — v0.8.0
+- ✅ 4-species truth map (hypothesis/constraint/commitment/source_of_truth) — v0.8.0
+- ✅ Dashboard with Decision Register visualization
+- 🔮 Obsidian plugin (read truth map in your vault)
 - 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
 - 🔮 Cross-device cloud sync (Pro tier)
 
@@ -478,6 +555,16 @@ If you want to force a manual consolidation, restart the MCP server — auto-con
 ## FAQ
 
 <details>
+<summary><strong>What is drift detection and why do I need it?</strong></summary>
+
+Drift = when your code reality silently diverges from what you decided. Example: Last week you decided "FTS5, not vector search" but this week a new agent session installs pgvector without knowing the history.
+
+Linksee Memory tracks this by letting you declare decisions as "anchors" and then automatically checking committed code against them. The make-or-break rule: **intentional evolution (recorded as fix/supersede) stays quiet, while unaccounted gaps get flagged.** It's like Datadog but for product decisions instead of server metrics.
+
+You don't need to use drift detection to benefit from linksee-memory — the 3 memory tools (remember/recall/read_smart) work independently. Drift tools are an additional layer for teams and solo devs managing multiple projects.
+</details>
+
+<details>
 <summary><strong>How is this different from Mem0 / Letta / Zep?</strong></summary>
 
 Three axes:
@@ -555,6 +642,23 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
 
 ## Changelog
+
+### v0.8.0 — Drift Detection MCP Tools (2026-06-08)
+
+**3 tools → 7 tools.** The biggest update since launch — agents can now detect, query, and resolve intent ↔ reality drift.
+
+**New tools:**
+- **`drift_status`** — returns the truth map with 4-species classification and per-node drift state
+- **`check_decision`** — deep-dive into a single anchor: state, edges, pending candidates
+- **`declare_anchor`** — record a decision/constraint/prohibition as a truth-map node (with v9 ProjectCoreNode fields)
+- **`resolve_drift`** — close the feedback loop: fix / supersede / acknowledge / dismiss
+
+**New engine module:**
+- **`truth-engine.ts`** — state derivation logic migrated from the dashboard into the MCP engine. Any MCP client can now query drift status without a dashboard.
+- **Resolution priority fix**: when multiple resolutions reference the same anchor, the most recent one wins (by `resolved_at` timestamp). Prevents a stale acknowledge from shadowing a newer fix.
+- **4-species classification**: nodes classified by `decision_mode` into hypothesis / constraint / commitment / source_of_truth with display format guidance.
+
+No breaking changes to existing memory tools. All 3 memory tools (remember, recall, read_smart) are unchanged.
 
 ### v0.7.2 — Recall ergonomics + auto-edge detection + classifier precision (2026-05-30)
 

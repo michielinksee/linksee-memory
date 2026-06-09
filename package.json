@@ -1,8 +1,8 @@
 {
   "name": "linksee-memory",
-  "version": "0.7.2",
+  "version": "0.9.0",
   "mcpName": "io.github.michielinksee/linksee-memory",
-  "description": "Local-first agent memory MCP — cross-agent brain with 6-layer structured memory + token-saving file diff cache",
+  "description": "Local-first agent memory MCP — cross-agent brain with drift detection, 6-layer structured memory + token-saving file diff cache",
   "type": "module",
   "bin": {
     "linksee-memory": "dist/mcp/server.js",

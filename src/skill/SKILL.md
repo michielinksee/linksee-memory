@@ -523,6 +523,79 @@ User: "That's it for today"
 4. Optionally suggest: consolidate({scope:"session", min_age_days: 14})
 ```
 
+### Case F2 — Flag orphaned proposals at session end
+
+**Conversations are tree-shaped but experienced linearly.** When you present multiple options and the user engages with only some, the rest become "orphaned proposals" — unresolved decision branches that both you and the user lose track of.
+
+**WHEN TO FLAG:**
+- At session end, review what you proposed vs what was addressed
+- When the conversation shifted topic and earlier proposals were never resolved
+- When the user engaged with only 1 out of N options you presented
+
+```
+1. Review the session: which proposals did you make that the user never addressed?
+2. flag_proposals({
+     session_context: "GTM channel strategy discussion",
+     proposals: [
+       {
+         statement: "[未解決] LinkedIn B2B: SaaS企業のCTO/VPE向けDMアウトリーチ",
+         rationale: "3つのGTMチャネルを提示したがX/Twitterのみ採用。LinkedIn経由の検討が未着手",
+         domain: "growth",
+         confidence: 0.5,
+         decided: "X/Twitter data-driven growth",
+         siblings: ["X/Twitter", "LinkedIn B2B", "Dev Community"]
+       },
+       ...
+     ]
+   })
+3. Report: "Flagged N unresolved proposals for dashboard review."
+```
+
+Each proposal becomes a review-state anchor on the Linksee Dashboard — visible until the user decides. This is **declaration, not mining**: you are the curator recognizing what went unaddressed.
+
+### Case F3 — Dream: triage orphaned proposals against the North Star
+
+**Not all orphaned proposals are worth surfacing.** Many are outdated, already implicitly resolved, or irrelevant to the current direction. The `dream` tool returns the project's **North Star** (direction/goals/ICP/phase) alongside accumulated proposals so you can evaluate each one.
+
+Think like a General Doctor doing triage: the North Star is the patient's chart, each proposal is a symptom. Not every symptom needs treatment.
+
+**When to dream:**
+- At session start, if there are accumulated proposals
+- When the user asks "何か見落としてない？" or "what should we revisit?"
+- Periodically (weekly) to prevent proposal backlog from growing stale
+
+```
+1. dream()
+   → Returns: north_star + candidates[]
+
+2. For each candidate, evaluate against North Star:
+   - Does this affect the current phase/goals? → surface
+   - Is this for a different ICP or future phase? → dismiss
+   - Already implicitly resolved by later decisions? → dismiss
+
+3. resolve_proposal({
+     candidate_id: <id>,
+     verdict: "surface" | "dismiss",
+     rationale: "North Star says ICP = solo devs; this is enterprise-only → dismiss"
+   })
+```
+
+**Example evaluation against North Star:**
+```
+North Star: "local-first agent memory for solo devs, HN Launch phase"
+
+Candidate A: "CLI-first onboarding wizard"
+  → SURFACE: directly improves DX for ICP, relevant to HN launch
+
+Candidate B: "AR glasses integration (2027-28)"
+  → DISMISS: outside current phase, future vision only
+
+Candidate C: "kintone enterprise integration"
+  → DISMISS: ICP mismatch (enterprise B2B vs solo devs)
+```
+
+The North Star is declared via `declare_anchor(node_type: "north_star")` and should be updated when the project enters a new phase (e.g., post-HN → growth phase). This keeps the Doctor's judgment frame current.
+
 ### Case G — User explicitly says "remember this"
 
 User: "Remember this: DocuSign is more stable than CloudSign"
