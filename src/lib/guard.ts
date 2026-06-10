@@ -260,7 +260,7 @@ export function formatReinject(matches: GateMatch[], gate: GateLevel): string {
 export function buildBootDigest(
   db: Database.Database,
   opts: { maxAnchors?: number; maxForks?: number } = {}
-): { text: string; anchors: number; forks: number } {
+): { text: string; anchors: number; forks: number; distill: number } {
   const maxAnchors = opts.maxAnchors ?? 8;
   const maxForks = opts.maxForks ?? 5;
 
@@ -282,16 +282,45 @@ export function buildBootDigest(
     )
     .all(maxForks) as Array<{ id: number; rationale: string; statement: string | null }>;
 
-  if (anchors.length === 0 && forks.length === 0) return { text: '', anchors: 0, forks: 0 };
+  // Distillation pressure — the routine's structural trigger. The drain must not depend on
+  // the agent remembering to dream (#15443 lesson): while raw auto-captured memories exist,
+  // EVERY session boot says so. Inflow (new sessions) vs drain (8/dream) stays visible.
+  let distill = 0;
+  try {
+    distill = (
+      db.prepare(
+        `SELECT COUNT(*) AS n FROM memories
+          WHERE layer IN ('learning', 'caveat') AND json_valid(content)
+            AND (json_extract(content, '$.needs_distill') = 1
+                 OR json_extract(content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
+                 OR json_extract(content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')`
+      ).get() as { n: number }
+    ).n;
+  } catch {
+    /* digest must never fail on the nudge */
+  }
 
-  const parts: string[] = ['📌 Linksee — decisions you locked (still in force):'];
-  for (const a of anchors) parts.push(`• [#${a.id}] "${a.statement}"${a.rationale ? ` — ${a.rationale}` : ''}`);
+  if (anchors.length === 0 && forks.length === 0 && distill === 0)
+    return { text: '', anchors: 0, forks: 0, distill: 0 };
+
+  const parts: string[] = [];
+  if (anchors.length > 0) {
+    parts.push('📌 Linksee — decisions you locked (still in force):');
+    for (const a of anchors) parts.push(`• [#${a.id}] "${a.statement}"${a.rationale ? ` — ${a.rationale}` : ''}`);
+  }
   if (forks.length > 0) {
     parts.push('', '🔀 Open forks still awaiting your call:');
     for (const f of forks) parts.push(`• ${f.statement ?? f.rationale}`);
   }
-  parts.push('', 'Honor these unless you explicitly supersede them (resolve_drift action=supersede).');
-  return { text: parts.join('\n'), anchors: anchors.length, forks: forks.length };
+  if (distill > 0) {
+    parts.push(
+      '',
+      `🧪 ${distill} auto-captured memories are still raw utterances — call dream() and rewrite the distill_queue via remember(memory_id, content) with "distilled": true.`
+    );
+  }
+  if (anchors.length > 0)
+    parts.push('', 'Honor these unless you explicitly supersede them (resolve_drift action=supersede).');
+  return { text: parts.join('\n'), anchors: anchors.length, forks: forks.length, distill };
 }
 
 // ── Loop closure: re-injection friction → reflection (dream) ───────────────────

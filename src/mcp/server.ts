@@ -283,7 +283,11 @@ const TOOLS = [
       '• At session start to triage accumulated proposals\n' +
       '• When the user asks "何か見落としてない？" or "what should we revisit?"\n' +
       '• Periodically to prevent proposal backlog from growing stale\n\n' +
-      'After evaluation, call resolve_proposal for each candidate with your verdict.',
+      'After evaluation, call resolve_proposal for each candidate with your verdict.\n\n' +
+      'ALSO RETURNS: `distill_queue` — auto-captured memories whose content is still a RAW user utterance. ' +
+      'Rewrite each via remember(memory_id, content) per the guide in the response (one-line what, true why, ' +
+      '"distilled": true). Drain up to 8 per call — the SessionStart digest reminds you while the queue is non-empty. ' +
+      'And `friction` — anchors re-surfaced at the gate yet still contradicted (resolve_drift action:"harden" to enforce).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1592,7 +1596,9 @@ function handleDream(args: any): string {
       `🧪 DISTILL: ${distillQueue.length} auto-extracted memories hold RAW user utterances (see "distill_queue"). ` +
         'For each: rewrite into ONE clean decision/warning using raw_what + context_hint (resolve references like ' +
         '"option a"), then save via remember(memory_id, content) with the full structured JSON — a one-line `what` ' +
-        '(the actual decision, not the chat), a true `why`, the original affects, and NO needs_distill field. ' +
+        '(the actual decision, not the chat), a true `why`, the original affects, `"distilled": true` (REQUIRED — ' +
+        'this marker is what protects your rewrite from the next session re-import; omit it and the raw utterance ' +
+        'resurrects), and NO needs_distill field. ' +
         'If raw_what carries no real decision/warning, set its type to "note" and state to "superseded" instead.'
     );
   }

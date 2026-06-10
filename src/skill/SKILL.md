@@ -596,6 +596,36 @@ Candidate C: "kintone enterprise integration"
 
 The North Star is declared via `declare_anchor(node_type: "north_star")` and should be updated when the project enters a new phase (e.g., post-HN → growth phase). This keeps the Doctor's judgment frame current.
 
+### Case F4 — Distill: rewrite raw auto-captured memories (every dream call)
+
+The session hook captures decisions/caveats as **RAW user utterances** (no LLM runs in the hook path — heuristic extraction is the best it can do). `dream` returns them as `distill_queue`. **You are the distiller.**
+
+**When:** every `dream()` call — drain up to 8 items while triaging proposals. The SessionStart boot digest reminds you while the queue is non-empty.
+
+```
+1. dream() → distill_queue: [{memory_id, layer, raw_what, context_hint, affects, created}]
+
+2. For each item, rewrite into ONE clean record:
+   - what = the actual decision/warning in one line — RESOLVE references
+            ("a)やろう" → what option a actually was, using context_hint)
+   - why  = the real reason, never "detected by pattern match"
+   - keep the original affects; keep layer as-is (protected caveats cannot move —
+     put the true type in the content `type` field instead)
+   - "distilled": true   ← REQUIRED. This marker protects your rewrite from the
+            next session re-import (wipe+reinsert). Omit it and the raw
+            utterance silently resurrects.
+   - drop needs_distill / context_hint from the rewritten JSON
+
+3. remember({ memory_id: <id>, content: <full structured JSON> })
+
+4. No real decision in raw_what?  → type: "note", state: "superseded"
+   (false positives get retired in place, never deleted).
+   Referent unresolvable (another session's numbered list)? → distill honestly:
+   state what IS known, point evidence_refs at the source session.
+```
+
+**Quality bar (measured 2026-06-10, n=32): 81% fully resolvable.** What resolves references is YOUR cross-session memory — if `raw_what` mentions unfamiliar codenames, `recall` the project first, then distill.
+
 ### Case G — User explicitly says "remember this"
 
 User: "Remember this: DocuSign is more stable than CloudSign"
