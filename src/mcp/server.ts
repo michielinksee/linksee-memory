@@ -1468,6 +1468,39 @@ function handleDream(args: any): string {
     /* additive — never break dream on a friction-query error */
   }
 
+  // Distillation queue — the quality gate's LLM half. The hook-path extractor stores RAW
+  // utterances (no LLM there); the agent rewrites them here into clean what/why via
+  // remember(memory_id, content). Matches needs_distill (new) AND the legacy hardcoded
+  // why-strings so the existing backlog is drainable without a backfill write.
+  let distillQueue: any[] = [];
+  try {
+    const rows = db.prepare(`
+      SELECT m.id, m.layer, m.content, datetime(m.created_at, 'unixepoch') AS created, e.name AS entity
+        FROM memories m JOIN entities e ON e.id = m.entity_id
+       WHERE m.layer IN ('learning', 'caveat')
+         AND json_valid(m.content)
+         AND (json_extract(m.content, '$.needs_distill') = 1
+              OR json_extract(m.content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
+              OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')
+       ORDER BY m.created_at DESC LIMIT 8
+    `).all() as any[];
+    distillQueue = rows.map((r) => {
+      let c: any = {};
+      try { c = JSON.parse(r.content); } catch { /* keep empty */ }
+      return {
+        memory_id: r.id,
+        layer: r.layer,
+        entity: r.entity,
+        raw_what: String(c.what ?? '').slice(0, 220),
+        context_hint: c.context_hint ? String(c.context_hint).slice(0, 220) : undefined,
+        affects: c.affects,
+        created: r.created,
+      };
+    });
+  } catch {
+    /* additive — never break dream on a distill-query error */
+  }
+
   if (northStars.length === 0) {
     return JSON.stringify({
       ok: true,
@@ -1475,6 +1508,8 @@ function handleDream(args: any): string {
       candidates: [],
       friction,
       friction_total: friction.length,
+      distill_queue: distillQueue,
+      distill_total: distillQueue.length,
       message:
         friction.length > 0
           ? 'No North Star declared yet — but the re-injection layer surfaced friction below: anchors being violated despite being re-surfaced. Declare a North Star (declare_anchor node_type:"north_star"), and act on the friction items.'
@@ -1552,7 +1587,16 @@ function handleDream(args: any): string {
         'has outrun reality.'
     );
   }
-  if (guideParts.length === 0) guideParts.push('No pending proposals and no gate friction. The dream is clear.');
+  if (distillQueue.length > 0) {
+    guideParts.push(
+      `🧪 DISTILL: ${distillQueue.length} auto-extracted memories hold RAW user utterances (see "distill_queue"). ` +
+        'For each: rewrite into ONE clean decision/warning using raw_what + context_hint (resolve references like ' +
+        '"option a"), then save via remember(memory_id, content) with the full structured JSON — a one-line `what` ' +
+        '(the actual decision, not the chat), a true `why`, the original affects, and NO needs_distill field. ' +
+        'If raw_what carries no real decision/warning, set its type to "note" and state to "superseded" instead.'
+    );
+  }
+  if (guideParts.length === 0) guideParts.push('No pending proposals, no gate friction, nothing to distill. The dream is clear.');
 
   return JSON.stringify({
     ok: true,
@@ -1562,6 +1606,8 @@ function handleDream(args: any): string {
     total: enrichedCandidates.length,
     friction,
     friction_total: friction.length,
+    distill_queue: distillQueue,
+    distill_total: distillQueue.length,
     guide: guideParts.join(' '),
   });
 }

@@ -101,7 +101,10 @@ async function main() {
       projectEntityId = Number(ins.lastInsertRowid);
     }
 
-    const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id) VALUES (?, ?, ?, ?, ?, ?)');
+    // created_at = the source turn's true timestamp. The Stop hook re-imports the growing
+    // transcript every turn (wipe+reinsert), and DEFAULT unixepoch() restamped days-old
+    // content as "now" — inflating every time-windowed view ("today" showed last week).
+    const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
     const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
 
@@ -109,7 +112,7 @@ async function main() {
     db.transaction(() => {
       const memContentToId = new Map<string, number>();
       for (const m of result.memories) {
-        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, JSON.stringify(m.source), m.thread_id ?? null);
+        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, JSON.stringify(m.source), m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
         memContentToId.set(m.content, Number(res.lastInsertRowid));
         inserted.memories++;
       }
@@ -219,8 +222,9 @@ async function main() {
       // Idempotent: wipe any prior data for THIS session before re-inserting (Phase B)
       wipeSession(db, result.session_id);
 
-      // Insert memories + file_edits in a single transaction per session
-      const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id) VALUES (?, ?, ?, ?, ?, ?)');
+      // Insert memories + file_edits in a single transaction per session.
+      // created_at = source-turn timestamp (see single-file mode above for why).
+      const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
       const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
       const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
 
@@ -229,7 +233,7 @@ async function main() {
 
         for (const m of result.memories) {
           const srcJson = JSON.stringify(m.source);
-          const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson, m.thread_id ?? null);
+          const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson, m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
           memContentToId.set(m.content, Number(res.lastInsertRowid));
           agg.memories_inserted++;
         }
