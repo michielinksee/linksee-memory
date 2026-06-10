@@ -293,3 +293,129 @@ export function buildBootDigest(
   parts.push('', 'Honor these unless you explicitly supersede them (resolve_drift action=supersede).');
   return { text: parts.join('\n'), anchors: anchors.length, forks: forks.length };
 }
+
+// ── Loop closure: re-injection friction → reflection (dream) ───────────────────
+// The active-observability stream (injection_log, PRE-action intent) rejoins the post-action reality
+// (drift_edges) HERE — so `dream` can see "re-surfaced N×, yet STILL contradicted in the code". That
+// co-occurrence is the machine evidence behind #15443: a rule read, re-injected, still ignored.
+
+export interface FrictionItem {
+  anchor_id: number;
+  statement: string;
+  gate_mode: GateMode;
+  lifecycle: string;
+  gate_contradicts: number; // times re-injected as a contradiction (pre-action intent)
+  gate_blocks: number; // times hard-blocked
+  ignored: number; // coarse: soft re-injections reality later confirmed as violated (see backfillHeeded)
+  reality_contradicts: number; // open drift_edges contradicts for this anchor (post-action reality)
+  last_at: string | null;
+  signal: 'violated_for_real' | 'gate_holding';
+  suggested_action: 'escalate_to_hard' | 'review_or_supersede' | 'none';
+  recommendation: string;
+}
+
+// Coarse, best-effort heeded backfill (idempotent — only touches heeded IS NULL). heeded=0 when a soft
+// re-injection failed to prevent the violation (the anchor still has an OPEN reality contradiction);
+// heeded=1 for blocks (the tool was denied) and for soft injections whose anchor's reality is clean.
+// Intentionally NOT timestamp-correlated — it powers the "ignored" tally only, never a gating decision.
+export function backfillHeeded(db: Database.Database): void {
+  bestEffort(() => {
+    const live = `SELECT anchor_id FROM drift_edges WHERE verdict = 'contradicts' AND status = 'open'`;
+    db.prepare(
+      `UPDATE injection_log SET heeded = 0
+         WHERE heeded IS NULL AND surface IN ('warn', 'inform') AND verdict = 'contradicts'
+           AND anchor_id IN (${live})`
+    ).run();
+    db.prepare(
+      `UPDATE injection_log SET heeded = 1
+         WHERE heeded IS NULL AND surface IN ('warn', 'inform')
+           AND anchor_id NOT IN (${live})`
+    ).run();
+    db.prepare(`UPDATE injection_log SET heeded = 1 WHERE heeded IS NULL AND surface = 'block'`).run();
+  });
+}
+
+// Surface anchors the gate keeps re-injecting. PRIMARY signal = two directly-queryable counts (no fragile
+// inference): gate_contradicts (pre-action) × reality_contradicts (post-action). Both > 0 ⇒ re-injection
+// isn't holding ⇒ escalate (soft→hard) or review/supersede (if reality has outrun the rule).
+export function getReinjectionFriction(
+  db: Database.Database,
+  opts: { minContradicts?: number } = {}
+): FrictionItem[] {
+  const minC = opts.minContradicts ?? 3;
+  backfillHeeded(db);
+
+  const rows = db
+    .prepare(
+      `SELECT i.anchor_id,
+              SUM(CASE WHEN i.verdict = 'contradicts' THEN 1 ELSE 0 END) AS gate_contradicts,
+              SUM(CASE WHEN i.surface = 'block' THEN 1 ELSE 0 END)       AS gate_blocks,
+              SUM(CASE WHEN i.heeded = 0 THEN 1 ELSE 0 END)              AS ignored,
+              datetime(MAX(i.occurred_at), 'unixepoch')                 AS last_at,
+              a.statement, a.lifecycle, a.card_policy
+         FROM injection_log i
+         JOIN drift_anchors a ON a.id = i.anchor_id
+        WHERE a.status = 'active'
+        GROUP BY i.anchor_id
+       HAVING gate_contradicts >= ?`
+    )
+    .all(minC) as Array<{
+    anchor_id: number;
+    gate_contradicts: number;
+    gate_blocks: number;
+    ignored: number;
+    last_at: string | null;
+    statement: string;
+    lifecycle: string;
+    card_policy: string;
+  }>;
+
+  const realityStmt = db.prepare(
+    `SELECT COUNT(*) AS n FROM drift_edges WHERE anchor_id = ? AND verdict = 'contradicts' AND status = 'open'`
+  );
+
+  const out: FrictionItem[] = [];
+  for (const r of rows) {
+    const gate_mode = jsonGet<GateMode>(r.card_policy, 'gate_mode', 'soft');
+    const reality_contradicts = (realityStmt.get(r.anchor_id) as { n: number }).n;
+
+    let signal: FrictionItem['signal'];
+    let suggested_action: FrictionItem['suggested_action'];
+    let recommendation: string;
+
+    if (reality_contradicts > 0) {
+      signal = 'violated_for_real';
+      if (gate_mode !== 'hard') {
+        suggested_action = 'escalate_to_hard';
+        recommendation = `Re-surfaced ${r.gate_contradicts}× yet ${reality_contradicts} contradiction(s) are still live in the code — soft warnings aren't holding. Escalate to gate_mode:'hard', or supersede the anchor if reality has outrun the rule.`;
+      } else {
+        suggested_action = 'review_or_supersede';
+        recommendation = `Hard-gated yet ${reality_contradicts} contradiction(s) persist (pre-existing or overridden) — the rule is fighting reality. Review whether it is still correct; supersede if not.`;
+      }
+    } else {
+      signal = 'gate_holding';
+      const heavy = gate_mode !== 'hard' && r.gate_contradicts >= minC * 2;
+      suggested_action = heavy ? 'escalate_to_hard' : 'none';
+      recommendation = `The gate caught ${r.gate_contradicts} attempt(s) and reality stayed clean — working as intended.${heavy ? " It keeps firing — consider gate_mode:'hard' to stop the attempts at the source." : ''}`;
+    }
+
+    out.push({
+      anchor_id: r.anchor_id,
+      statement: r.statement,
+      gate_mode,
+      lifecycle: r.lifecycle,
+      gate_contradicts: r.gate_contradicts,
+      gate_blocks: r.gate_blocks,
+      ignored: r.ignored,
+      reality_contradicts,
+      last_at: r.last_at,
+      signal,
+      suggested_action,
+      recommendation,
+    });
+  }
+
+  return out.sort(
+    (x, y) => y.reality_contradicts - x.reality_contradicts || y.gate_contradicts - x.gate_contradicts
+  );
+}

@@ -30,6 +30,7 @@ import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engine.js';
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
+import { getReinjectionFriction, type FrictionItem } from '../lib/guard.js';
 
 const SERVER_VERSION = '0.9.0';
 
@@ -1446,12 +1447,26 @@ function handleDream(args: any): string {
     ORDER BY created_at DESC
   `).all() as any[];
 
+  // Re-injection friction — the active-observability loop closing back into reflection.
+  // "Re-surfaced N×, yet still contradicted in reality" is the machine evidence behind #15443.
+  let friction: FrictionItem[] = [];
+  try {
+    friction = getReinjectionFriction(db, { minContradicts: 3 });
+  } catch {
+    /* additive — never break dream on a friction-query error */
+  }
+
   if (northStars.length === 0) {
     return JSON.stringify({
       ok: true,
       north_star: null,
       candidates: [],
-      message: 'No North Star declared yet. Declare one with declare_anchor(node_type: "north_star") before dreaming.',
+      friction,
+      friction_total: friction.length,
+      message:
+        friction.length > 0
+          ? 'No North Star declared yet — but the re-injection layer surfaced friction below: anchors being violated despite being re-surfaced. Declare a North Star (declare_anchor node_type:"north_star"), and act on the friction items.'
+          : 'No North Star declared yet. Declare one with declare_anchor(node_type: "north_star") before dreaming.',
     });
   }
 
@@ -1510,17 +1525,32 @@ function handleDream(args: any): string {
     };
   });
 
+  const guideParts: string[] = [];
+  if (enrichedCandidates.length > 0) {
+    guideParts.push(
+      'Evaluate each candidate against the North Star: "Given our current direction/ICP/phase, is this ' +
+        'unresolved branch still important?" Then call resolve_proposal(candidate_id, verdict, rationale) for each.'
+    );
+  }
+  if (friction.length > 0) {
+    guideParts.push(
+      `⚠ FRICTION: ${friction.length} accepted anchor(s) keep being re-surfaced at the gate (see "friction"). ` +
+        'For each suggested_action="escalate_to_hard", harden it — declare_anchor on the same anchor with ' +
+        'card_policy.gate_mode:"hard"; for "review_or_supersede", call resolve_drift(anchor_id, action:"supersede", …) ' +
+        'if the rule has outrun reality.'
+    );
+  }
+  if (guideParts.length === 0) guideParts.push('No pending proposals and no gate friction. The dream is clear.');
+
   return JSON.stringify({
     ok: true,
     north_star: northStars[0],
     all_north_stars: northStars.length > 1 ? northStars : undefined,
     candidates: enrichedCandidates,
     total: enrichedCandidates.length,
-    guide: enrichedCandidates.length > 0
-      ? 'Evaluate each candidate against the North Star. For each, ask: ' +
-        '"Given our current direction/ICP/phase, is this unresolved branch still important?" ' +
-        'Then call resolve_proposal(candidate_id, verdict, rationale) for each.'
-      : 'No pending proposals to evaluate. The dream is clear.',
+    friction,
+    friction_total: friction.length,
+    guide: guideParts.join(' '),
   });
 }
 
