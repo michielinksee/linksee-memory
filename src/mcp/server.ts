@@ -30,7 +30,7 @@ import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engine.js';
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
-import { getReinjectionFriction, type FrictionItem } from '../lib/guard.js';
+import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
 
 const SERVER_VERSION = '0.9.0';
 
@@ -217,12 +217,12 @@ const TOOLS = [
   {
     name: 'resolve_drift',
     description:
-      'Record a resolution for a drifting anchor — the human feedback loop.\n\n4 resolution actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
+      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
     inputSchema: {
       type: 'object',
       properties: {
         anchor_id: { type: 'number', description: 'The drift_anchor ID to resolve' },
-        action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss'], description: 'Resolution action' },
+        action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss', 'harden', 'soften'], description: 'Resolution action' },
         rationale: { type: 'string', description: 'Why this resolution (recorded for audit trail)' },
         review_after: { type: 'string', description: 'For acknowledge: ISO date to re-check (e.g. "2026-07-04")' },
         superseded_by: { type: 'number', description: 'For supersede: the new anchor ID that replaces this one' },
@@ -1327,6 +1327,18 @@ function handleResolveDrift(args: any): string {
   if (!args?.anchor_id || !args?.action) {
     throw new Error('anchor_id and action are required');
   }
+  // Enforcement-policy actions — apply the dream "escalate_to_hard" recommendation in ONE call.
+  // Folded into resolve_drift (not a new tool) to honor anchor #1. Intercepted here so the WIP
+  // truth-engine.ts resolveDrift() stays untouched.
+  if (args.action === 'harden' || args.action === 'soften') {
+    const mode = args.action === 'harden' ? 'hard' : 'soft';
+    const res = setGateMode(db, args.anchor_id, mode);
+    return JSON.stringify({
+      ...res,
+      action: args.action,
+      message: `anchor #${args.anchor_id} gate_mode → '${mode}'${args.rationale ? ` (${args.rationale})` : ''}. Future PreToolUse on this anchor will ${mode === 'hard' ? 'BLOCK' : 'soft-warn'}.`,
+    });
+  }
   const result = resolveDrift(db, {
     anchor_id: args.anchor_id,
     action: args.action,
@@ -1535,9 +1547,9 @@ function handleDream(args: any): string {
   if (friction.length > 0) {
     guideParts.push(
       `⚠ FRICTION: ${friction.length} accepted anchor(s) keep being re-surfaced at the gate (see "friction"). ` +
-        'For each suggested_action="escalate_to_hard", harden it — declare_anchor on the same anchor with ' +
-        'card_policy.gate_mode:"hard"; for "review_or_supersede", call resolve_drift(anchor_id, action:"supersede", …) ' +
-        'if the rule has outrun reality.'
+        'For each suggested_action="escalate_to_hard", call resolve_drift(anchor_id, action:"harden") to make the ' +
+        'gate BLOCK it; for "review_or_supersede", call resolve_drift(anchor_id, action:"supersede", …) if the rule ' +
+        'has outrun reality.'
     );
   }
   if (guideParts.length === 0) guideParts.push('No pending proposals and no gate friction. The dream is clear.');

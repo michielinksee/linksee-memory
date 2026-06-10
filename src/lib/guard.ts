@@ -419,3 +419,30 @@ export function getReinjectionFriction(
     (x, y) => y.reality_contradicts - x.reality_contradicts || y.gate_contradicts - x.gate_contradicts
   );
 }
+
+// One-call enforcement change — applies the friction "escalate_to_hard" recommendation. Merges gate_mode
+// into the anchor's card_policy (preserving other keys). Exposed via resolve_drift(action:'harden'|'soften'),
+// NOT a new tool — honoring anchor #1 ("public tools = 3, don't add a 4th"; the surface already drifted to 10).
+export function setGateMode(
+  db: Database.Database,
+  anchorId: number,
+  mode: GateMode
+): { ok: boolean; anchor_id: number; gate_mode: GateMode; card_policy: Record<string, unknown> } {
+  const row = db.prepare(`SELECT card_policy FROM drift_anchors WHERE id = ?`).get(anchorId) as
+    | { card_policy?: string }
+    | undefined;
+  if (!row) throw new Error(`anchor #${anchorId} not found`);
+  let policy: Record<string, unknown> = {};
+  try {
+    policy = JSON.parse(row.card_policy || '{}') || {};
+  } catch {
+    policy = {};
+  }
+  policy.gate_mode = mode;
+  if (policy.enabled === undefined) policy.enabled = true;
+  db.prepare(`UPDATE drift_anchors SET card_policy = ?, updated_at = unixepoch() WHERE id = ?`).run(
+    JSON.stringify(policy),
+    anchorId
+  );
+  return { ok: true, anchor_id: anchorId, gate_mode: mode, card_policy: policy };
+}
