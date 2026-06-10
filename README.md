@@ -153,6 +153,54 @@ Anchors are classified into four species with different display formats:
 
 ---
 
+<a id="reinjection-guard"></a>
+
+## 🛡 Re-injection Guard — enforce decisions *before* the action
+
+Drift detection (above) is **post-hoc** — it tells you reality diverged *after* the change lands. The re-injection guard is the **pre-action** half: it re-surfaces the decision you locked **before** the agent runs the tool that would break it.
+
+It exists for one specific, infuriating failure mode ([anthropics/claude-code#15443](https://github.com/anthropics/claude-code/issues/15443)): *"Claude read the rule, understood it, and still used `cp`."* Having the rule in context isn't enough — so the guard runs **outside the agent's volition**, as a Claude Code hook:
+
+| Hook event | Fires on | What it does |
+|---|---|---|
+| **`PreToolUse`** | `Edit` / `Write` / `Bash` | Checks the pending action against your accepted anchors. A `gate_mode:'hard'` contradiction is **denied**; a softer match re-injects the decision as a reminder; no match → nothing happens. |
+| **`SessionStart`** | `startup` / `resume` / `compact` | Replays your locked decisions + open forks into the fresh session — killing the "groundhog day" amnesia where a new agent repeats last week's call. |
+
+It is **fail-open by construction**: any parse / DB / logic error surfaces nothing and lets the action through. The *only* thing that ever blocks is an explicit `hard` contradiction on a decision **you** declared.
+
+### Enable it
+
+`npx linksee-memory-setup` offers to wire this into your **project's** `.claude/settings.json` (Step 4). To do it by hand, drop this block into `.claude/settings.json` at your project root — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          { "type": "command", "command": "npx -y linksee-memory-guard", "timeout": 15 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          { "type": "command", "command": "npx -y linksee-memory-guard", "timeout": 8 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+It's **project-scoped on purpose** — the guard enforces *this* repo's decisions, and you opt in per project rather than letting it deny tool calls everywhere (the Stop hook from setup, by contrast, is user-global). Declare what it should watch with `declare_anchor(...)`; set `card_policy.gate_mode:'hard'` on an anchor to make a contradiction **block** instead of just warn (the soft default only re-injects). Anchors that are stale (`at_risk`), superseded, or card-disabled never gate.
+
+> Developing linksee-memory itself? The repo dogfoods the guard via a (gitignored) `.claude/settings.json` that points at the local build (`node ${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js`) so it runs against your uncommitted changes. End-user projects should use the published `npx -y linksee-memory-guard` form above.
+
+---
+
 ## Quick Start — One Command
 
 ```bash
@@ -163,6 +211,7 @@ This does everything:
 1. Registers the MCP server with Claude Code
 2. Installs the agent skill (teaches the agent when to recall/remember)
 3. Configures auto-capture (every session saved to your local brain)
+4. Offers to wire the [re-injection guard](#reinjection-guard) into this project (pre-action decision enforcement)
 
 Restart Claude Code, then just chat normally. Add **"Use Linksee"** to any prompt to trigger memory recall.
 
@@ -298,6 +347,13 @@ All editors share the same `~/.linksee-memory/memory.db`. A decision made in Cla
 
 Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
+## What's new in v0.9
+
+| Feature | Detail |
+|---|---|
+| **Re-injection guard** | The pre-action half of drift detection. A Claude Code `PreToolUse` hook re-surfaces (or, on a `hard` contradiction, blocks) an accepted decision *before* the agent runs `Edit`/`Write`/`Bash`; a `SessionStart` boot digest replays your locked decisions into each fresh session. Fail-open by design. See [Re-injection Guard](#reinjection-guard). |
+| **Shippable hook wiring** | `linksee-memory-setup` now offers to merge the guard hooks into your project's `.claude/settings.json` (pointing at the published `linksee-memory-guard` bin), and the block is documented for copy-paste. Previously the wiring lived only in a gitignored dogfood config. |
+
 ## What's new in v0.8
 
 | Feature | Detail |
@@ -357,9 +413,10 @@ Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents
 
 | Command | Purpose |
 |---|---|
-| `npx linksee-memory-setup` | **v0.4.1** One-command setup: MCP server + skill + Stop hook. Idempotent — skips what's already done. |
+| `npx linksee-memory-setup` | One-command setup: MCP server + skill + Stop hook, then offers to wire the re-injection guard into this project. Idempotent — skips what's already done. |
 | `npx linksee-memory` | MCP server (stdio) |
 | `npx linksee-memory-sync` | Claude Code Stop-hook entry point |
+| `npx linksee-memory-guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired per-project (see [Re-injection Guard](#reinjection-guard)); fail-open. |
 | `npx linksee-memory-import` | Batch-import Claude Code session JSONL history |
 | `npx linksee-memory-install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
 | `npx linksee-memory-stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
