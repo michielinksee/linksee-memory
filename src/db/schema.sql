@@ -336,6 +336,29 @@ CREATE INDEX IF NOT EXISTS idx_mwc_status ON memory_write_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_mwc_scope  ON memory_write_candidates(scope);
 
 -- ============================================================
+-- v10: Re-injection log — the ACTIVE-observability stream (pre-action gate hits).
+-- Separate from drift_edges (POST-action reality): the gate (guard.ts, fired by a Claude Code
+-- PreToolUse hook) writes here when an accepted anchor is re-surfaced into context BEFORE an action.
+-- Feeds `dream` — "re-injected N times, still contradicted (heeded=0)" is the machine evidence behind
+-- #15443. trigger: boot=SessionStart · cue=prompt · gate=PreToolUse.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS injection_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  anchor_id   INTEGER REFERENCES drift_anchors(id) ON DELETE CASCADE,
+  session_id  TEXT,
+  trigger     TEXT NOT NULL CHECK (trigger IN ('boot', 'cue', 'gate')),
+  surface     TEXT NOT NULL CHECK (surface IN ('inform', 'warn', 'block', 'allow')),
+  tool_name   TEXT,
+  action_snip TEXT,                                   -- first ~120 chars of the attempted action
+  verdict     TEXT,                                   -- contradicts | in_scope | none
+  heeded      INTEGER,                                -- NULL=unknown / 1=followed / 0=ignored (dream backfills)
+  occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_injlog_anchor  ON injection_log(anchor_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_injlog_session ON injection_log(session_id, occurred_at);
+
+-- ============================================================
 -- Meta — schema version tracking
 -- ============================================================
 CREATE TABLE IF NOT EXISTS meta (
@@ -343,6 +366,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '9');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '10');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '9' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8');
+UPDATE meta SET value = '10' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9');

@@ -12,7 +12,8 @@
     "linksee-memory-stats": "dist/bin/stats.js",
     "linksee-memory-setup": "dist/bin/setup.js",
     "linksee-memory-declare": "dist/bin/declare-anchor.js",
-    "linksee-memory-detect": "dist/bin/detect-drift.js"
+    "linksee-memory-detect": "dist/bin/detect-drift.js",
+    "linksee-memory-guard": "dist/bin/guard-hook.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
