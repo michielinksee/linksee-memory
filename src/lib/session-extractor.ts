@@ -11,6 +11,9 @@ export interface ExtractedMemory {
   content: string;                    // will be stored as JSON or plain text
   importance: number;                 // 0-1
   thread_id: string;                  // groups related memories (session_id for session-extracted)
+  occurred_at?: number;               // unix sec of the source turn/op — preserved as memories.created_at
+                                      // so a re-import of a days-old session doesn't restamp old
+                                      // content as "today" (wipe+reinsert used to reset created_at)
   source: {
     session_id: string;
     turn_uuid?: string;
@@ -201,7 +204,9 @@ function findFirstIntent(session: ParsedSession): SessionTurn | null {
 // Decisions & learnings — user messages containing explicit commitment words.
 // ============================================================
 const DECISION_PATTERNS = [
-  /決めた|採用|確定|これで(いい|進め)|OK進めて|やろう|行こう/,
+  // ひらがな「いこう」「すすめよう」 variants were missed (real loss observed: "OK. CからAいこう").
+  // Widening is safe now that content-dedup + chitchat guard + needs_distill triage exist downstream.
+  /決めた|採用|確定|これで(いい|進め)|OK進めて|やろう|行こう|いこう|進めよう|すすめよう/,
   /learn(ed)?|decid(?:e|ed|ing)|chose|picked|going with|let'?s\s+go|pivot(?:ing|ed)?|switch(?:ing)?\s+to|settled\s+on|approved|we'?ll\s+use|commit(?:ting)?\s+to/i,
 ];
 const FAILURE_PATTERNS = [
@@ -287,6 +292,11 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   // Priority: goal(first_intent) > caveat > decision > context. capturedTurns
   // tracks caveat-claimed turns so the decision pass skips them.
   const capturedTurns = new Set<string>();
+  // Content-level dedup: the SAME utterance sent twice (interrupt + resend is common)
+  // arrives as two distinct turns and used to become two identical memories.
+  const seenWhats = new Set<string>();
+  const whatKey = (layer: string, text: string): string =>
+    `${layer}::${text.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 200)}`;
 
   // Detect fully-automated sessions (e.g. scheduled cron tasks) — no user intent to extract
   const firstRawUserText = session.turns.find((t) => t.role === 'user' && !t.tool_results)?.text ?? '';
@@ -311,6 +321,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       }),
       importance: automated ? 0.3 : 0.8,
       thread_id: session.session_id,
+      occurred_at: firstIntent.timestamp,
       source: { session_id: session.session_id, turn_uuid: firstIntent.uuid, kind: 'first_intent' },
     });
   } else if (automated) {
@@ -330,6 +341,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       }),
       importance: 0.2,
       thread_id: session.session_id,
+      occurred_at: session.started_at,
       source: { session_id: session.session_id, kind: 'automated_task' },
     });
   }
@@ -348,8 +360,11 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
     const wouldBeCaveat = matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20 && !isChitchatWithBuriedDecision(t.text, CAVEAT_PATTERNS);
     const wouldBeDecision = matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS);
     if (wouldBeCaveat || wouldBeDecision) continue;
-    clarifyCount++;
     const msgText = t.text.slice(0, 600);
+    const ctxKey = whatKey('context', msgText);
+    if (seenWhats.has(ctxKey)) continue;
+    seenWhats.add(ctxKey);
+    clarifyCount++;
     memories.push({
       layer: 'context',
       content: buildStructuredContent({
@@ -364,6 +379,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       }),
       importance: 0.5,
       thread_id: session.session_id,
+      occurred_at: t.timestamp,
       source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'clarification' },
     });
   }
@@ -384,13 +400,16 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
     const contentSnippet = ops.map((o) => o.tool_input_preview).slice(0, 2).join(' | ').slice(0, 500);
     const fileName = path.replace(/\\/g, '/').split('/').pop() || path;
 
+    // `what` must be op-specific, NOT the shared user utterance: one turn editing 5 files
+    // produces 5 of these memories, and a shared raw-utterance `what` rendered as 5 visual
+    // duplicates in every digest/recall view. The intent lives ONCE, titled, in `why`.
     const memoryContent = buildStructuredContent({
       title: `${opsKinds} ${fileName} (${ops.length} ops)`,
       altitude: 'implementation',
       type: 'work',
       state: 'done',
-      what: userIntent || `File operation: ${opsKinds} on ${path}`,
-      why: userIntent ? `User intent: ${makeTitle(userIntent, 120)}` : '(no explicit preceding intent)',
+      what: `${opsKinds} ${path} (${ops.length} ops)`,
+      why: userIntent ? makeTitle(userIntent, 160) : '(no explicit preceding intent)',
       affects: [path],
       next_action: null,
       evidence_refs: [{ type: 'session', id: session.session_id, label: 'source session' }],
@@ -404,6 +423,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       content: memoryContent,
       importance: 0.6,
       thread_id: session.session_id,
+      occurred_at: first.timestamp,
       source: { session_id: session.session_id, turn_uuid: first.turn_uuid, kind: 'file_edit' },
     });
 
@@ -426,13 +446,22 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
 
   // 4) Caveat layer — user messages matching caveat/failure patterns
   //    Stricter filter: must NOT be pasted external content.
+  //    needs_distill: the stored `what` is a RAW utterance (best heuristic extraction can do
+  //    without an LLM in the hook path) — `dream` queues these for agent rewriting.
+  //    context_hint: tail of the assistant message the user was replying to, so the distiller
+  //    can resolve references like「a)やろう」without re-reading the transcript.
+  let prevAssistantForCaveat = '';
   for (const t of session.turns) {
+    if (t.role === 'assistant') { prevAssistantForCaveat = t.text; continue; }
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
     if (t === firstIntent) continue; // already captured as the goal/first-intent memory
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
     if (matchesAny(t.text, CAVEAT_PATTERNS) && t.text.length > 20 && !isChitchatWithBuriedDecision(t.text, CAVEAT_PATTERNS)) {
       const caveatText = t.text.slice(0, 500);
+      const key = whatKey('caveat', caveatText);
+      if (seenWhats.has(key)) { if (t.uuid) capturedTurns.add(t.uuid); continue; }
+      seenWhats.add(key);
       memories.push({
         layer: 'caveat',
         content: buildStructuredContent({
@@ -441,14 +470,17 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
           type: inferType(caveatText, 'caveat'),
           state: inferState(caveatText, 'caveat'),
           what: caveatText,
-          why: 'User-stated warning/prohibition — auto-extracted by caveat pattern match',
+          why: 'user-stated warning (auto-extracted) — pending distillation',
           affects: extractAffectedPaths(session.file_ops),
           next_action: null,
           evidence_refs: [{ type: 'session', id: session.session_id, label: 'caveat source' }],
           session_id: session.session_id,
+          needs_distill: true,
+          context_hint: prevAssistantForCaveat.slice(-280),
         }),
         importance: 0.75,
         thread_id: session.session_id,
+        occurred_at: t.timestamp,
         source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'caveat' },
       });
       if (t.uuid) capturedTurns.add(t.uuid); // claim this turn so the decision pass skips it
@@ -456,18 +488,24 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
   }
 
   // 5) Learning layer — messages matching decision patterns
-  //    Same strict filter applies.
-  //    NOTE: Without LLM, we store the raw user text as `what` — this is the best
-  //    heuristic extraction can do. Agent-initiated `remember()` calls should use
-  //    the full structured format with agent_proposal + user_approval_scope.
+  //    Same strict filter applies. Raw `what` + needs_distill + context_hint, same contract
+  //    as the caveat pass above — `dream` surfaces these for agent distillation.
+  let prevAssistantForDecision = '';
   for (const t of session.turns) {
+    if (t.role === 'assistant') { prevAssistantForDecision = t.text; continue; }
     if (t.role !== 'user' || isMetaOrNoise(t.text)) continue;
     if (t === firstIntent) continue; // already captured as the goal/first-intent memory
     if (t.uuid && capturedTurns.has(t.uuid)) continue; // already captured as a caveat
     if (t.tool_results && t.tool_results.length > 0) continue;
     if (isPastedExternalContent(t.text)) continue;
-    if (matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 15 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS)) {
+    // Length floor 8 (was 15): short JP approvals ARE the decision record ("OK. CからAいこう",
+    // "Bだね。以下OK." — both real, both were lost at 15). They only carry meaning WITH the
+    // context_hint captured below, which is exactly what the distill pass resolves.
+    if (matchesAny(t.text, DECISION_PATTERNS) && t.text.length > 8 && !isChitchatWithBuriedDecision(t.text, DECISION_PATTERNS)) {
       const decisionText = t.text.slice(0, 500);
+      const key = whatKey('learning', decisionText);
+      if (seenWhats.has(key)) continue;
+      seenWhats.add(key);
       memories.push({
         layer: 'learning',
         content: buildStructuredContent({
@@ -476,14 +514,17 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
           type: inferType(decisionText, 'learning'),
           state: inferState(decisionText, 'learning'),
           what: decisionText,
-          why: 'Decision detected by pattern match — may need agent enrichment',
+          why: 'decision keyword matched (auto-extracted) — pending distillation',
           affects: extractAffectedPaths(session.file_ops),
           next_action: null,
           evidence_refs: [{ type: 'session', id: session.session_id, label: 'decision source' }],
           session_id: session.session_id,
+          needs_distill: true,
+          context_hint: prevAssistantForDecision.slice(-280),
         }),
         importance: 0.7,
         thread_id: session.session_id,
+        occurred_at: t.timestamp,
         source: { session_id: session.session_id, turn_uuid: t.uuid, kind: 'decision' },
       });
     }
@@ -508,6 +549,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       }),
       importance: 0.4,
       thread_id: session.session_id,
+      occurred_at: session.ended_at,
       source: { session_id: session.session_id, kind: 'error_recovery' },
     });
   }
@@ -541,6 +583,7 @@ export function extractSession(session: ParsedSession, projectName: string): Ext
       }),
       importance: 0.4,
       thread_id: session.session_id,
+      occurred_at: session.ended_at,
       source: { session_id: session.session_id, kind: 'session_summary' },
     });
   }

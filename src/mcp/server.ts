@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // linksee-memory MCP server (stdio transport).
-// Tools: remember / recall / read_smart
-// v0.7.0 — unified 3-tool surface (Context7-style simplification)
+// Tools: remember / recall / read_smart / drift_status / check_decision / declare_anchor / resolve_drift / flag_proposals / dream / resolve_proposal
+// v0.10.0 — Re-injection layer: pre-action guard (PreToolUse/SessionStart hooks) + extraction
+//           quality gate + distillation routine (dream distill_queue) + harden/soften escalation
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -28,8 +29,11 @@ import { PROMPTS, getPrompt } from './prompts.js';
 import { fetchRoots, isInsideRoots } from './roots.js';
 import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
+import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engine.js';
+import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
+import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
 
-const SERVER_VERSION = '0.7.0';
+const SERVER_VERSION = '0.10.0';
 
 const db = openDb();
 runMigrations(db);
@@ -158,6 +162,156 @@ const TOOLS = [
         force: { type: 'boolean', description: 'Return full content regardless of cache', default: false },
       },
       required: ['path'],
+    },
+  },
+
+  // ── Drift tools (v0.8.0) ─────────────────────────────────────────────────
+  {
+    name: 'drift_status',
+    description:
+      'Check what\'s drifting right now — the "Intent Datadog" for your product decisions.\n\nReturns a structured truth map showing which decisions/constraints/hypotheses are:\n🔴 drift (unaccounted divergence from intent)\n🟡 review (soft signal, awaiting human decision)\n⚪ held (acknowledged, time-boxed, not forgotten)\n🔵 aligned (reality matches intent)\n\nNodes are classified into 4 species:\n• hypothesis → Decision Cards (decision journal format)\n• constraint → Rules (pass/fail checklist)\n• commitment → Heartbeats (cadence monitoring)\n• source_of_truth → Reference (stable anchors)\n\nWHEN TO CALL:\n• At session start — "what needs my attention?"\n• Before making a decision — check for existing anchors on the topic\n• After completing work — verify drift state changed\n• When the user asks about product health / what\'s broken / what\'s stale',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Filter by domain (strategy, product, engineering, growth, etc.)' },
+        decision_mode: { type: 'string', description: 'Filter by decision_mode (hypothesis, constraint, commitment, source_of_truth)' },
+      },
+    },
+  },
+  {
+    name: 'check_decision',
+    description:
+      'Deep-dive into a specific decision/anchor — its state, premises, drift edges, and pending candidates.\n\nReturns the full context for one truth-map node: what was decided, why, what reality says, whether it\'s drifting, and what actions are pending.\n\nWHEN TO CALL:\n• When the user asks about a specific decision ("what happened with X?")\n• Before resolving a drift signal — understand the full picture first\n• When reviewing premises of a decision ("is this still true?")',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        anchor_id: { type: 'number', description: 'The drift_anchor ID to inspect' },
+      },
+      required: ['anchor_id'],
+    },
+  },
+  {
+    name: 'declare_anchor',
+    description:
+      'Declare a new decision, constraint, or prohibition as a truth-map anchor.\n\nAnchors are NORMATIVE claims: "we decided X", "Y is forbidden", "Z must always hold."\nThe drift detector later checks these against committed reality.\n\ndeclare-don\'t-mine: anchors come ONLY from explicit human declaration, never from pattern extraction.\n\nWHEN TO CALL:\n• When the user makes a product decision ("let\'s go with approach A")\n• When a constraint is established ("never do X")\n• When a commitment is made ("we ship weekly")\n• When the user says "anchor this" / "record this decision"',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['prohibition', 'decision', 'constraint'], description: 'Anchor type' },
+        statement: { type: 'string', description: 'The normative claim (>= 8 chars)' },
+        rationale: { type: 'string', description: 'Why this was decided' },
+        affects: { type: 'array', items: { type: 'string' }, description: 'Path globs that scope this anchor' },
+        detect_terms: { type: 'array', items: { type: 'string' }, description: 'Keywords for scoping' },
+        violation_signal: { type: 'array', items: { type: 'string' }, description: 'Terms whose presence = violation (required for prohibition/decision)' },
+        tier: { type: 'string', enum: ['human', 'explicit'], description: 'Declaration tier (default: human)' },
+        // v9 ProjectCoreNode fields
+        node_type: { type: 'string', description: 'Node type label' },
+        domain: { type: 'string', description: 'Domain (strategy, product, engineering, etc.)' },
+        decision_mode: { type: 'string', enum: ['hypothesis', 'constraint', 'commitment', 'source_of_truth'], description: 'Classification for 4-species display' },
+        confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Confidence level (0.0-1.0)' },
+        lifecycle: { type: 'string', description: 'Lifecycle state (active, at_risk, retired)' },
+        review_after: { type: 'string', description: 'ISO date for next review (e.g. "2026-07-04")' },
+      },
+      required: ['kind', 'statement'],
+    },
+  },
+  {
+    name: 'resolve_drift',
+    description:
+      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        anchor_id: { type: 'number', description: 'The drift_anchor ID to resolve' },
+        action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss', 'harden', 'soften'], description: 'Resolution action' },
+        rationale: { type: 'string', description: 'Why this resolution (recorded for audit trail)' },
+        review_after: { type: 'string', description: 'For acknowledge: ISO date to re-check (e.g. "2026-07-04")' },
+        superseded_by: { type: 'number', description: 'For supersede: the new anchor ID that replaces this one' },
+      },
+      required: ['anchor_id', 'action'],
+    },
+  },
+  {
+    name: 'flag_proposals',
+    description:
+      'Record orphaned proposals — options you presented that the user never addressed.\n\n' +
+      'Conversations are tree-shaped but experienced linearly. When you present 3 options and the user ' +
+      'engages with only 1, the other 2 become "orphaned proposals" — unresolved decision branches that ' +
+      'both you and the user lose track of.\n\n' +
+      'WHEN TO CALL:\n' +
+      '• When you notice the user engaged with only some of the options you presented\n' +
+      '• When the conversation shifted topic and earlier proposals were never resolved\n' +
+      '• At session end, review what you proposed vs what was addressed\n' +
+      '• When the user says "what else did we discuss?" or "何か忘れてない？"\n\n' +
+      'Each proposal becomes a review-state anchor on the dashboard — visible until the user decides.\n' +
+      'This is declaration, not mining: YOU are the curator recognizing what went unaddressed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        proposals: {
+          type: 'array',
+          description: 'Array of unresolved proposals (1-10 items)',
+          items: {
+            type: 'object',
+            properties: {
+              statement: { type: 'string', description: 'The proposal itself — what was suggested but not addressed (prefix with [未解決] for dashboard clarity)' },
+              rationale: { type: 'string', description: 'Context: what discussion it came from, what the user chose instead, why this matters' },
+              domain: { type: 'string', description: 'Topic domain (e.g. monetization, product, engineering, strategy, growth, roadmap)' },
+              confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How confident you are this is worth revisiting (0.3-0.7 typical)' },
+              siblings: { type: 'array', items: { type: 'string' }, description: 'Other options from the same proposal set (for context)' },
+              decided: { type: 'string', description: 'What the user chose or engaged with instead' },
+            },
+            required: ['statement', 'rationale', 'domain'],
+          },
+        },
+        session_context: { type: 'string', description: 'Brief description of the conversation/session where these proposals arose' },
+      },
+      required: ['proposals'],
+    },
+  },
+  // ── Dreaming Memory (v0.9.0) ──────────────────────────────
+  {
+    name: 'dream',
+    description:
+      'Dreaming Memory — consolidate orphaned proposals against the North Star.\n\n' +
+      'Returns the project\'s North Star (direction/goals/ICP/phase) alongside unresolved proposals ' +
+      'that agents flagged during conversations. YOUR job as the evaluating agent is to decide:\n\n' +
+      '• surface — genuinely important unresolved fork point given the current direction\n' +
+      '• dismiss — outdated, already implicitly resolved, or irrelevant to current goals\n\n' +
+      'Think like a General Doctor doing triage: the North Star is the patient\'s chart, ' +
+      'each proposal is a symptom. Not every symptom needs treatment.\n\n' +
+      'WHEN TO CALL:\n' +
+      '• At session start to triage accumulated proposals\n' +
+      '• When the user asks "何か見落としてない？" or "what should we revisit?"\n' +
+      '• Periodically to prevent proposal backlog from growing stale\n\n' +
+      'After evaluation, call resolve_proposal for each candidate with your verdict.\n\n' +
+      'ALSO RETURNS: `distill_queue` — auto-captured memories whose content is still a RAW user utterance. ' +
+      'Rewrite each via remember(memory_id, content) per the guide in the response (one-line what, true why, ' +
+      '"distilled": true). Drain up to 8 per call — the SessionStart digest reminds you while the queue is non-empty. ' +
+      'And `friction` — anchors re-surfaced at the gate yet still contradicted (resolve_drift action:"harden" to enforce).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Filter proposals by domain (e.g. strategy, product, engineering)' },
+      },
+    },
+  },
+  {
+    name: 'resolve_proposal',
+    description:
+      'Record your evaluation verdict for an orphaned proposal after dreaming.\n\n' +
+      'Call this after `dream` for each candidate you evaluated against the North Star.\n' +
+      '• surface — Keep visible on dashboard for human decision\n' +
+      '• dismiss — Remove from dashboard (outdated/irrelevant/implicitly resolved)\n\n' +
+      'Always reference the North Star criteria in your rationale.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidate_id: { type: 'number', description: 'The candidate ID from dream results' },
+        verdict: { type: 'string', enum: ['surface', 'dismiss'], description: 'Your evaluation verdict' },
+        rationale: { type: 'string', description: 'Why — must reference North Star criteria' },
+      },
+      required: ['candidate_id', 'verdict', 'rationale'],
     },
   },
 ];
@@ -1096,6 +1250,457 @@ async function handleRecallUnified(args: any): Promise<string> {
 }
 
 // ============================================================
+// Drift tool handlers (v0.8.0)
+// ============================================================
+
+function handleDriftStatus(args: any): string {
+  const view = getTruthView(db, {
+    domain: args?.domain,
+    decision_mode: args?.decision_mode,
+  });
+
+  // Build a concise triage line
+  const { by_state, nodes } = view.counts;
+  const triage = [
+    by_state.drift > 0 ? `🔴 ${by_state.drift} drifting` : null,
+    by_state.review > 0 ? `🟡 ${by_state.review} needs review` : null,
+    by_state.held > 0 ? `⚪ ${by_state.held} held` : null,
+    `🔵 ${by_state.aligned} aligned`,
+  ].filter(Boolean).join(' · ');
+
+  return JSON.stringify({
+    ok: true,
+    triage: `${nodes} anchors: ${triage}`,
+    nextReopen: view.nextReopen,
+    attention: view.attention,
+    alignedByDomain: view.alignedByDomain,
+    candidates: view.candidates,
+    counts: view.counts,
+  });
+}
+
+function handleCheckDecision(args: any): string {
+  if (!args?.anchor_id) throw new Error('anchor_id is required');
+  const detail = getDecisionDetail(db, args.anchor_id);
+  if (!detail) {
+    return JSON.stringify({ ok: false, error: `Anchor ${args.anchor_id} not found or not active` });
+  }
+  return JSON.stringify({ ok: true, decision: detail });
+}
+
+function handleDeclareAnchor(args: any): string {
+  if (!args?.kind || !args?.statement) {
+    throw new Error('kind and statement are required');
+  }
+
+  // Create the base anchor
+  const anchor = declareAnchor(db, {
+    kind: args.kind,
+    statement: args.statement,
+    rationale: args.rationale,
+    affects: args.affects,
+    detect_terms: args.detect_terms,
+    violation_signal: args.violation_signal,
+    tier: args.tier ?? 'human',
+  });
+
+  // Apply v9 ProjectCoreNode fields if provided
+  const nodeFields: Record<string, unknown> = {};
+  if (args.node_type !== undefined) nodeFields.node_type = args.node_type;
+  if (args.domain !== undefined) nodeFields.domain = args.domain;
+  if (args.decision_mode !== undefined) nodeFields.decision_mode = args.decision_mode;
+  if (args.confidence !== undefined) nodeFields.confidence = args.confidence;
+  if (args.lifecycle !== undefined) nodeFields.lifecycle = args.lifecycle;
+  if (args.review_after !== undefined) {
+    nodeFields.review_after = Math.floor(new Date(args.review_after).getTime() / 1000);
+  }
+
+  if (Object.keys(nodeFields).length > 0) {
+    setNodeFields(db, anchor.id, nodeFields);
+  }
+
+  return JSON.stringify({
+    ok: true,
+    anchor_id: anchor.id,
+    statement: anchor.statement,
+    kind: anchor.kind,
+    message: `Anchor #${anchor.id} declared: "${anchor.statement.substring(0, 80)}"`,
+  });
+}
+
+function handleResolveDrift(args: any): string {
+  if (!args?.anchor_id || !args?.action) {
+    throw new Error('anchor_id and action are required');
+  }
+  // Enforcement-policy actions — apply the dream "escalate_to_hard" recommendation in ONE call.
+  // Folded into resolve_drift (not a new tool) to honor anchor #1. Intercepted here so the WIP
+  // truth-engine.ts resolveDrift() stays untouched.
+  if (args.action === 'harden' || args.action === 'soften') {
+    const mode = args.action === 'harden' ? 'hard' : 'soft';
+    const res = setGateMode(db, args.anchor_id, mode);
+    return JSON.stringify({
+      ...res,
+      action: args.action,
+      message: `anchor #${args.anchor_id} gate_mode → '${mode}'${args.rationale ? ` (${args.rationale})` : ''}. Future PreToolUse on this anchor will ${mode === 'hard' ? 'BLOCK' : 'soft-warn'}.`,
+    });
+  }
+  const result = resolveDrift(db, {
+    anchor_id: args.anchor_id,
+    action: args.action,
+    rationale: args.rationale,
+    review_after: args.review_after,
+    superseded_by: args.superseded_by,
+  });
+  return JSON.stringify(result);
+}
+
+// ============================================================
+// flag_proposals — orphaned proposal detection (v0.9.0 prototype)
+// Agent explicitly declares unresolved proposals from the conversation.
+// Each proposal → anchor(hypothesis) + pending_review candidate → "review" state on dashboard.
+// ============================================================
+
+function handleFlagProposals(args: any): string {
+  const proposals = args?.proposals;
+  if (!Array.isArray(proposals) || proposals.length === 0) {
+    return JSON.stringify({ ok: false, error: 'proposals array is required (1-10 items)' });
+  }
+  if (proposals.length > 10) {
+    return JSON.stringify({ ok: false, error: 'Max 10 proposals per call (batch in multiple calls if needed)' });
+  }
+
+  const sessionContext = args.session_context ?? 'conversation session';
+  const PROPOSAL_TAG = 'orphaned_proposal';
+  const now = Math.floor(Date.now() / 1000);
+
+  const insertAnchor = db.prepare(`
+    INSERT INTO drift_anchors (
+      kind, statement, rationale, domain, decision_mode,
+      confidence, lifecycle, status, owner,
+      evidence_refs, created_at, updated_at
+    ) VALUES (
+      'decision', ?, ?, ?, 'hypothesis',
+      ?, 'active', 'active', 'agent',
+      ?, ?, ?
+    )
+  `);
+
+  const insertCandidate = db.prepare(`
+    INSERT INTO memory_write_candidates (
+      scope, candidate_type, target_node_id, rationale,
+      confidence, evidence_refs, status, created_at
+    ) VALUES (
+      'orphaned_proposal', 'update_node', ?, ?,
+      ?, ?, 'pending_review', ?
+    )
+  `);
+
+  const results: Array<{ anchor_id: number; statement: string; domain: string }> = [];
+
+  const txn = db.transaction(() => {
+    for (const p of proposals) {
+      const statement = String(p.statement ?? '').trim();
+      if (statement.length < 10) continue;  // skip junk
+
+      const rationale = String(p.rationale ?? '').trim();
+      const domain = String(p.domain ?? 'general').trim();
+      const confidence = Math.max(0, Math.min(1, Number(p.confidence) || 0.5));
+
+      const evidenceRefs = JSON.stringify([{
+        type: 'proposal_set',
+        tag: PROPOSAL_TAG,
+        session_context: sessionContext,
+        decided: p.decided ?? null,
+        siblings: p.siblings ?? [],
+        flagged_at: new Date().toISOString(),
+      }]);
+
+      // 1. Create anchor
+      const anchorResult = insertAnchor.run(
+        statement, rationale, domain,
+        confidence, evidenceRefs, now, now,
+      );
+      const anchorId = Number(anchorResult.lastInsertRowid);
+
+      // 2. Create pending_review candidate → triggers "review" state
+      insertCandidate.run(
+        anchorId,
+        `Orphaned proposal: ${sessionContext}`,
+        confidence,
+        evidenceRefs,
+        now,
+      );
+
+      results.push({ anchor_id: anchorId, statement, domain });
+    }
+  });
+  txn();
+
+  return JSON.stringify({
+    ok: true,
+    flagged: results.length,
+    proposals: results,
+    message: `Flagged ${results.length} orphaned proposal(s) for review. They will appear as "review" items on the dashboard.`,
+    tag: PROPOSAL_TAG,
+    hint: 'User can resolve each via resolve_drift(anchor_id, action) or on the dashboard.',
+  });
+}
+
+// ============================================================
+// dream — Dreaming Memory: North Star + orphaned proposals for agent evaluation
+// The agent IS the Doctor. MCP just provides data + update path.
+// ============================================================
+
+function handleDream(args: any): string {
+  const domainFilter = args?.domain;
+
+  // 1. Fetch active North Star anchor(s)
+  const northStars = db.prepare(`
+    SELECT id, statement, rationale, domain, confidence, lifecycle,
+           datetime(review_after, 'unixepoch') as review_date,
+           datetime(created_at, 'unixepoch') as declared_at
+    FROM drift_anchors
+    WHERE node_type = 'north_star' AND status = 'active'
+    ORDER BY created_at DESC
+  `).all() as any[];
+
+  // Re-injection friction — the active-observability loop closing back into reflection.
+  // "Re-surfaced N×, yet still contradicted in reality" is the machine evidence behind #15443.
+  let friction: FrictionItem[] = [];
+  try {
+    friction = getReinjectionFriction(db, { minContradicts: 3 });
+  } catch {
+    /* additive — never break dream on a friction-query error */
+  }
+
+  // Distillation queue — the quality gate's LLM half. The hook-path extractor stores RAW
+  // utterances (no LLM there); the agent rewrites them here into clean what/why via
+  // remember(memory_id, content). Matches needs_distill (new) AND the legacy hardcoded
+  // why-strings so the existing backlog is drainable without a backfill write.
+  let distillQueue: any[] = [];
+  try {
+    const rows = db.prepare(`
+      SELECT m.id, m.layer, m.content, datetime(m.created_at, 'unixepoch') AS created, e.name AS entity
+        FROM memories m JOIN entities e ON e.id = m.entity_id
+       WHERE m.layer IN ('learning', 'caveat')
+         AND json_valid(m.content)
+         AND (json_extract(m.content, '$.needs_distill') = 1
+              OR json_extract(m.content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
+              OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')
+       ORDER BY m.created_at DESC LIMIT 8
+    `).all() as any[];
+    distillQueue = rows.map((r) => {
+      let c: any = {};
+      try { c = JSON.parse(r.content); } catch { /* keep empty */ }
+      return {
+        memory_id: r.id,
+        layer: r.layer,
+        entity: r.entity,
+        raw_what: String(c.what ?? '').slice(0, 220),
+        context_hint: c.context_hint ? String(c.context_hint).slice(0, 220) : undefined,
+        affects: c.affects,
+        created: r.created,
+      };
+    });
+  } catch {
+    /* additive — never break dream on a distill-query error */
+  }
+
+  if (northStars.length === 0) {
+    return JSON.stringify({
+      ok: true,
+      north_star: null,
+      candidates: [],
+      friction,
+      friction_total: friction.length,
+      distill_queue: distillQueue,
+      distill_total: distillQueue.length,
+      message:
+        friction.length > 0
+          ? 'No North Star declared yet — but the re-injection layer surfaced friction below: anchors being violated despite being re-surfaced. Declare a North Star (declare_anchor node_type:"north_star"), and act on the friction items.'
+          : 'No North Star declared yet. Declare one with declare_anchor(node_type: "north_star") before dreaming.',
+    });
+  }
+
+  // 2. Fetch pending orphaned proposals
+  const candidateQuery = domainFilter
+    ? `SELECT mc.id as candidate_id, mc.target_node_id as anchor_id,
+              mc.rationale as candidate_rationale, mc.confidence,
+              mc.evidence_refs, mc.status,
+              datetime(mc.created_at, 'unixepoch') as flagged_at,
+              da.statement, da.rationale as anchor_rationale, da.domain,
+              da.evidence_refs as anchor_evidence
+       FROM memory_write_candidates mc
+       JOIN drift_anchors da ON mc.target_node_id = da.id
+       WHERE mc.scope = 'orphaned_proposal' AND mc.status = 'pending_review'
+         AND da.domain = ?
+       ORDER BY mc.created_at DESC`
+    : `SELECT mc.id as candidate_id, mc.target_node_id as anchor_id,
+              mc.rationale as candidate_rationale, mc.confidence,
+              mc.evidence_refs, mc.status,
+              datetime(mc.created_at, 'unixepoch') as flagged_at,
+              da.statement, da.rationale as anchor_rationale, da.domain,
+              da.evidence_refs as anchor_evidence
+       FROM memory_write_candidates mc
+       JOIN drift_anchors da ON mc.target_node_id = da.id
+       WHERE mc.scope = 'orphaned_proposal' AND mc.status = 'pending_review'
+       ORDER BY mc.created_at DESC`;
+
+  const candidates = domainFilter
+    ? db.prepare(candidateQuery).all(domainFilter) as any[]
+    : db.prepare(candidateQuery).all() as any[];
+
+  // 3. Enrich with proposal context from evidence_refs
+  const enrichedCandidates = candidates.map(c => {
+    let context: Record<string, unknown> = {};
+    try {
+      const refs = JSON.parse(c.anchor_evidence || '[]');
+      const proposalRef = refs.find((r: any) => r.tag === 'orphaned_proposal');
+      if (proposalRef) {
+        context = {
+          decided: proposalRef.decided,
+          siblings: proposalRef.siblings,
+          session_context: proposalRef.session_context,
+        };
+      }
+    } catch { /* malformed JSON — skip enrichment */ }
+
+    return {
+      candidate_id: c.candidate_id,
+      anchor_id: c.anchor_id,
+      statement: c.statement,
+      rationale: c.anchor_rationale,
+      domain: c.domain,
+      confidence: c.confidence,
+      flagged_at: c.flagged_at,
+      ...context,
+    };
+  });
+
+  const guideParts: string[] = [];
+  if (enrichedCandidates.length > 0) {
+    guideParts.push(
+      'Evaluate each candidate against the North Star: "Given our current direction/ICP/phase, is this ' +
+        'unresolved branch still important?" Then call resolve_proposal(candidate_id, verdict, rationale) for each.'
+    );
+  }
+  if (friction.length > 0) {
+    guideParts.push(
+      `⚠ FRICTION: ${friction.length} accepted anchor(s) keep being re-surfaced at the gate (see "friction"). ` +
+        'For each suggested_action="escalate_to_hard", call resolve_drift(anchor_id, action:"harden") to make the ' +
+        'gate BLOCK it; for "review_or_supersede", call resolve_drift(anchor_id, action:"supersede", …) if the rule ' +
+        'has outrun reality.'
+    );
+  }
+  if (distillQueue.length > 0) {
+    guideParts.push(
+      `🧪 DISTILL: ${distillQueue.length} auto-extracted memories hold RAW user utterances (see "distill_queue"). ` +
+        'For each: rewrite into ONE clean decision/warning using raw_what + context_hint (resolve references like ' +
+        '"option a"), then save via remember(memory_id, content) with the full structured JSON — a one-line `what` ' +
+        '(the actual decision, not the chat), a true `why`, the original affects, `"distilled": true` (REQUIRED — ' +
+        'this marker is what protects your rewrite from the next session re-import; omit it and the raw utterance ' +
+        'resurrects), and NO needs_distill field. ' +
+        'If raw_what carries no real decision/warning, set its type to "note" and state to "superseded" instead.'
+    );
+  }
+  if (guideParts.length === 0) guideParts.push('No pending proposals, no gate friction, nothing to distill. The dream is clear.');
+
+  return JSON.stringify({
+    ok: true,
+    north_star: northStars[0],
+    all_north_stars: northStars.length > 1 ? northStars : undefined,
+    candidates: enrichedCandidates,
+    total: enrichedCandidates.length,
+    friction,
+    friction_total: friction.length,
+    distill_queue: distillQueue,
+    distill_total: distillQueue.length,
+    guide: guideParts.join(' '),
+  });
+}
+
+// ============================================================
+// resolve_proposal — Agent writes back surface/dismiss verdict
+// ============================================================
+
+function handleResolveProposal(args: any): string {
+  const candidateId = args?.candidate_id;
+  const verdict = args?.verdict;
+  const rationale = args?.rationale;
+
+  if (!candidateId || !verdict || !rationale) {
+    throw new Error('candidate_id, verdict, and rationale are required');
+  }
+  if (!['surface', 'dismiss'].includes(verdict)) {
+    throw new Error('verdict must be "surface" or "dismiss"');
+  }
+
+  // Verify candidate exists and is pending
+  const candidate = db.prepare(`
+    SELECT mc.id, mc.target_node_id, mc.status, mc.evidence_refs,
+           da.statement
+    FROM memory_write_candidates mc
+    JOIN drift_anchors da ON mc.target_node_id = da.id
+    WHERE mc.id = ? AND mc.scope = 'orphaned_proposal'
+  `).get(candidateId) as { id: number; target_node_id: number; status: string; evidence_refs: string; statement: string } | undefined;
+
+  if (!candidate) {
+    throw new Error(`Candidate #${candidateId} not found or not an orphaned proposal`);
+  }
+  if (candidate.status !== 'pending_review') {
+    return JSON.stringify({
+      ok: false,
+      error: `Candidate #${candidateId} is already "${candidate.status}" — cannot re-evaluate`,
+    });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const doctorNote = {
+    type: 'doctor_evaluation',
+    verdict,
+    rationale,
+    evaluated_at: new Date().toISOString(),
+  };
+
+  // Append doctor evaluation to evidence trail
+  let refs: any[] = [];
+  try { refs = JSON.parse(candidate.evidence_refs || '[]'); } catch { /* keep empty */ }
+  refs.push(doctorNote);
+  const updatedRefs = JSON.stringify(refs);
+
+  const txn = db.transaction(() => {
+    if (verdict === 'dismiss') {
+      // Reject candidate + retire anchor (removes from dashboard)
+      db.prepare(
+        'UPDATE memory_write_candidates SET status = ?, evidence_refs = ? WHERE id = ?',
+      ).run('rejected', updatedRefs, candidateId);
+
+      db.prepare(
+        'UPDATE drift_anchors SET status = ?, lifecycle = ?, updated_at = ? WHERE id = ?',
+      ).run('retired', 'deprecated', now, candidate.target_node_id);
+    } else {
+      // Surface: keep pending_review, record doctor's endorsement
+      db.prepare(
+        'UPDATE memory_write_candidates SET evidence_refs = ? WHERE id = ?',
+      ).run(updatedRefs, candidateId);
+    }
+  });
+  txn();
+
+  const shortStmt = candidate.statement.substring(0, 60);
+  return JSON.stringify({
+    ok: true,
+    candidate_id: candidateId,
+    anchor_id: candidate.target_node_id,
+    verdict,
+    statement: candidate.statement,
+    message: verdict === 'dismiss'
+      ? `Dismissed: "${shortStmt}…" — removed from dashboard`
+      : `Surfaced: "${shortStmt}…" — kept for human review on dashboard`,
+  });
+}
+
+// ============================================================
 // MCP wiring
 // ============================================================
 
@@ -1109,6 +1714,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'remember': text = await handleRememberUnified(args); break;
       case 'recall': text = await handleRecallUnified(args); break;
       case 'read_smart': text = handleReadSmart(args); break;
+      // Drift tools (v0.8.0)
+      case 'drift_status': text = handleDriftStatus(args); break;
+      case 'check_decision': text = handleCheckDecision(args); break;
+      case 'declare_anchor': text = handleDeclareAnchor(args); break;
+      case 'resolve_drift': text = handleResolveDrift(args); break;
+      case 'flag_proposals': text = handleFlagProposals(args); break;
+      // Dreaming Memory (v0.9.0)
+      case 'dream': text = handleDream(args); break;
+      case 'resolve_proposal': text = handleResolveProposal(args); break;
       default: {
         const migrations: Record<string, string> = {
           update_memory: 'remember({ memory_id: <id>, content: "...", importance: 0.8 })',

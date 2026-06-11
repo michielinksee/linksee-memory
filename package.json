@@ -1,8 +1,8 @@
 {
   "name": "linksee-memory",
-  "version": "0.7.2",
+  "version": "0.10.0",
   "mcpName": "io.github.michielinksee/linksee-memory",
-  "description": "Local-first agent memory MCP — cross-agent brain with 6-layer structured memory + token-saving file diff cache",
+  "description": "Local-first agent memory MCP — cross-agent brain with drift detection, 6-layer structured memory + token-saving file diff cache",
   "type": "module",
   "bin": {
     "linksee-memory": "dist/mcp/server.js",
@@ -12,7 +12,8 @@
     "linksee-memory-stats": "dist/bin/stats.js",
     "linksee-memory-setup": "dist/bin/setup.js",
     "linksee-memory-declare": "dist/bin/declare-anchor.js",
-    "linksee-memory-detect": "dist/bin/detect-drift.js"
+    "linksee-memory-detect": "dist/bin/detect-drift.js",
+    "linksee-memory-guard": "dist/bin/guard-hook.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
@@ -73,7 +74,8 @@
   },
   "overrides": {
     "ip-address": "^10.2.0",
-    "hono": "^4.12.18"
+    "hono": "^4.12.21",
+    "qs": "^6.15.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -81,7 +83,8 @@
     ],
     "overrides": {
       "ip-address": "^10.2.0",
-      "hono": "^4.12.18"
+      "hono": "^4.12.21",
+      "qs": "^6.15.2"
     }
   }
 }
