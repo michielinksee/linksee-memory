@@ -54,3 +54,9 @@ runbooks/
 
 # Generated Drift OS artifacts (rendered from scripts/, like dist/)
 drift-map.html
+
+# Local-only assets sitting untracked in the working tree — never publish.
+# (Design dumps / marketing / screenshots; guard against an accidental `git add -A`.)
+_marketing/
+UI model/
+/Screenshot*.png
