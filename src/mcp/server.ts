@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // linksee-memory MCP server (stdio transport).
 // Tools: remember / recall / read_smart / drift_status / check_decision / declare_anchor / resolve_drift / flag_proposals / dream / resolve_proposal
-// v0.9.0 — Dreaming Memory: orphaned proposal detection + North Star triage
+// v0.10.0 — Re-injection layer: pre-action guard (PreToolUse/SessionStart hooks) + extraction
+//           quality gate + distillation routine (dream distill_queue) + harden/soften escalation
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -32,7 +33,7 @@ import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engi
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
 import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
 
-const SERVER_VERSION = '0.9.0';
+const SERVER_VERSION = '0.10.0';
 
 const db = openDb();
 runMigrations(db);

@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.michielinksee/linksee-memory",
-  "description": "Local-first cross-agent memory with drift detection. 7 MCP tools: remember/recall/read_smart + 4 drift tools (drift_status/check_decision/declare_anchor/resolve_drift). 6-layer WHY structure, AST diff cache (86% token savings), works across Claude/Cursor/GPT/Codex/Gemini.",
+  "description": "Local-first cross-agent memory that enforces your decisions. 10 MCP tools: remember/recall/read_smart + drift tools (drift_status/check_decision/declare_anchor/resolve_drift/flag_proposals/dream/resolve_proposal) + a re-injection guard (Claude Code hooks) that re-surfaces locked decisions BEFORE the agent acts — and blocks hard contradictions. 6-layer WHY structure, AST diff cache, works across Claude/Cursor/GPT/Codex/Gemini.",
   "repository": {
     "url": "https://github.com/michielinksee/linksee-memory",
     "source": "github"
   },
-  "version": "0.8.0",
+  "version": "0.10.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "linksee-memory",
-      "version": "0.8.0",
+      "version": "0.10.0",
       "transport": {
         "type": "stdio"
       }
