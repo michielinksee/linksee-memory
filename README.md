@@ -2,9 +2,9 @@
 
 > **Your agent forgets everything when a session ends. Worse — it silently drifts from what you decided last week.**
 >
-> Local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY** it happened: 6-layer structured memory with precision recall, **plus drift detection that catches when reality diverges from your decisions**.
+> **Linksee Memory catches when your project drifts from its own decisions** — the option abandoned at a fork, the pipeline that quietly stalled, the code that contradicts what you agreed — and a re-injection guard re-surfaces the locked decision **before** the agent acts. Hard contradictions get blocked.
 >
-> Memory is the entry point. Drift detection is the real value.
+> Underneath sits a local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY**: 6-layer structured memory with precision recall and an AST-aware diff cache (50–99% token savings on re-reads).
 >
 > `npx linksee-memory-setup` — one command, done.
 
@@ -28,6 +28,24 @@
 ---
 
 ## 🎬 See it in action
+
+**Drift, caught.** Decisions don't survive session boundaries — but their consequences do. Ask any session:
+
+```
+You:    What's drifting right now?
+Agent:  [calls drift_status]
+
+        28 anchors: ⚪ 1 held · 🔵 27 aligned
+
+        Needs attention:
+        ⚪ HELD — "Focus on 4 areas: Recipe layer, agent-native API,
+           Japanese market, Agent Insights"
+           ↻ Reopens 2026-07-04
+
+        Everything else is aligned — no unaccounted divergence.
+```
+
+**The memory underneath.** Drift detection only works because the *why* survives the session boundary:
 
 **Without linksee-memory** — Monday morning, new Claude session:
 
@@ -59,73 +77,11 @@ That single `caveat` memory is what separates "flat fact storage" from "the agen
 
 ---
 
-## 🧠 The 6-layer structure
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 🎯 goal           ← what the user is working toward         │
-├─────────────────────────────────────────────────────────────┤
-│ 🧭 context        ← why this, why now — constraints, people │
-├─────────────────────────────────────────────────────────────┤
-│ 💗 emotion        ← user tone signals (frustration, etc.)   │
-├─────────────────────────────────────────────────────────────┤
-│ 🛠  implementation ← how it was done (+ what failed)         │
-├─────────────────────────────────────────────────────────────┤
-│ ⚠️  caveat         ← "never do this again" · auto-protected │
-├─────────────────────────────────────────────────────────────┤
-│ 🌱 learning       ← patterns distilled from cold memories   │
-└─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-           Ranked recall via relevance × heat × momentum × importance
-                  Returns match_reasons explaining each hit
-```
-
-Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories are auto-consolidated into `learning` entries on server startup.
-
----
-
-## What it does
-
-Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. **linksee-memory keeps the WHY.**
-
-It is a Model Context Protocol (MCP) server with **7 tools** that gives any AI agent structured memory + drift detection:
-
-| | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
-|---|---|---|---|
-| Cross-agent | △ (cloud) | ❌ Claude only | ✅ single SQLite file |
-| 6-layer WHY structure | ❌ flat | ❌ flat markdown | ✅ goal / context / emotion / impl / caveat / learning |
-| **Drift detection** | ❌ | ❌ | ✅ intent ↔ reality divergence tracking |
-| File diff cache | ❌ | ❌ | ✅ AST-aware, 50-99% token savings on re-reads |
-| Active forgetting | △ | ❌ | ✅ Ebbinghaus curve, caveat layer protected |
-| Local-first / private | ❌ | ✅ | ✅ |
-
-## Four pillars
-
-1. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
-2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI.
-3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
-4. **Drift detection** — declare decisions as anchors, then the engine automatically detects when committed reality diverges from stated intent. Think "Datadog for product decisions" — unaccounted divergences surface as drift, intentional evolution (recorded as supersede/fix) stays quiet.
-
 ## 🔍 Drift Detection — "Intent Datadog"
 
 Most teams make decisions, then forget them. The agent from last week decided "we'll use FTS5 instead of vector search" — but this week a new session installs `pgvector` without knowing why that was rejected. **That's drift.** Not a bug. Not malice. Just forgotten context.
 
-Linksee Memory's drift detection catches this:
-
-```
-You:    What's drifting right now?
-Agent:  [calls drift_status]
-
-        28 anchors: ⚪ 1 held · 🔵 27 aligned
-
-        Needs attention:
-        ⚪ HELD — "Focus on 4 areas: Recipe layer, agent-native API,
-           Japanese market, Agent Insights"
-           ↻ Reopens 2026-07-04
-
-        Everything else is aligned — no unaccounted divergence.
-```
+Memory tools remember what you did. Nothing notices when you drift from what you decided — that's the layer Linksee Memory adds. Think **"Datadog for product decisions"**: unaccounted divergences surface as drift, intentional evolution (recorded as supersede/fix) stays quiet.
 
 ### How it works
 
@@ -200,6 +156,55 @@ It's **project-scoped on purpose** — the guard enforces *this* repo's decision
 > Developing linksee-memory itself? The repo dogfoods the guard via a (gitignored) `.claude/settings.json` that points at the local build (`node ${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js`) so it runs against your uncommitted changes. End-user projects should use the published `npx -y linksee-memory-guard` form above.
 
 ---
+
+## What it does
+
+Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. And none of them notice when this week's work contradicts last week's decision. **linksee-memory keeps the WHY — and watches the drift.**
+
+It is a Model Context Protocol (MCP) server with **10 tools** that gives any AI agent structured memory + drift detection:
+
+| | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
+|---|---|---|---|
+| **Drift detection** | ❌ | ❌ | ✅ intent ↔ reality divergence tracking |
+| Cross-agent | △ (cloud) | ❌ Claude only | ✅ single SQLite file |
+| 6-layer WHY structure | ❌ flat | ❌ flat markdown | ✅ goal / context / emotion / impl / caveat / learning |
+| File diff cache | ❌ | ❌ | ✅ AST-aware, 50-99% token savings on re-reads |
+| Active forgetting | △ | ❌ | ✅ Ebbinghaus curve, caveat layer protected |
+| Local-first / private | ❌ | ✅ | ✅ |
+
+## Four pillars
+
+1. **Drift detection** — declare decisions as anchors, then the engine automatically detects when committed reality diverges from stated intent. Think "Datadog for product decisions" — unaccounted divergences surface as drift, intentional evolution (recorded as supersede/fix) stays quiet.
+2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI.
+3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
+4. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
+
+## 🧠 The 6-layer structure
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 🎯 goal           ← what the user is working toward         │
+├─────────────────────────────────────────────────────────────┤
+│ 🧭 context        ← why this, why now — constraints, people │
+├─────────────────────────────────────────────────────────────┤
+│ 💗 emotion        ← user tone signals (frustration, etc.)   │
+├─────────────────────────────────────────────────────────────┤
+│ 🛠  implementation ← how it was done (+ what failed)         │
+├─────────────────────────────────────────────────────────────┤
+│ ⚠️  caveat         ← "never do this again" · auto-protected │
+├─────────────────────────────────────────────────────────────┤
+│ 🌱 learning       ← patterns distilled from cold memories   │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+           Ranked recall via relevance × heat × momentum × importance
+                  Returns match_reasons explaining each hit
+```
+
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories are auto-consolidated into `learning` entries on server startup.
+
+---
+
 
 ## Quick Start — One Command
 
@@ -388,7 +393,7 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 
 </details>
 
-## 7 Tools (v0.8)
+## 10 Tools (v0.10)
 
 ### Memory tools
 
@@ -407,7 +412,15 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 | `declare_anchor` | **Record a decision as a truth-map anchor.** The drift detector checks these against committed reality. Supports v9 fields (domain, confidence, lifecycle, review_after). |
 | `resolve_drift` | **Close the loop.** Record a resolution: `fix` (reality now matches), `supersede` (intent evolved), `acknowledge` (parking with review date), or `dismiss` (false positive). |
 
-Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence. The memory tools are unchanged.
+### Fork-point tools (v0.10)
+
+| Tool | What it does |
+|---|---|
+| `flag_proposals` | **Record orphaned proposals** — options you presented that the user never addressed. Conversations are tree-shaped but experienced linearly; the branches nobody engaged with become unresolved fork points that both you and the user lose track of. |
+| `dream` | **Consolidate orphaned proposals against the North Star.** Returns the project's direction/goals/ICP alongside unresolved proposals; the evaluating agent decides per candidate: surface (genuinely important fork) or dismiss (outdated / irrelevant / implicitly resolved). |
+| `resolve_proposal` | **Record the verdict** for each dreamed proposal: `surface` (keep visible on the dashboard for human decision) or `dismiss` (remove from the dashboard). |
+
+Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence; v0.10 added the fork-point trio for orphaned-proposal triage. The memory tools are unchanged.
 
 ### CLI utilities
 
