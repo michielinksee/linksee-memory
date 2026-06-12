@@ -15,6 +15,16 @@
 
 🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
 
+## 🪄 Three spells to remember
+
+| Say this | What happens |
+|---|---|
+| **"use linksee"** ・「リンクシーして」 | Recalls relevant memories before acting |
+| **"linksee this"** ・「これ覚えて」 | Saves the decision / lesson right now |
+| **"what's drifting?"** ・「ズレてない？」 | Reconciles reality against your locked decisions |
+
+> Make it automatic: add **"Use Linksee Memory"** to your system prompt / `CLAUDE.md`.
+
 ## 📣 As featured on
 
 - **Zenn**: [あなたの Claude Code、 実は前回のセッションを完全に忘れている](https://zenn.dev/kanseilink/articles/linksee-memory-claude-code-recall-20260508) — 73 ♡ on Zenn, **165+ users on Hatena Bookmark**, picked up by tech blogs + YouTube shorts (May 2026)
