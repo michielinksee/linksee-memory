@@ -1,9 +1,0 @@
-# Smithery listing config — local stdio server (npm)
-# https://smithery.ai/docs — connect GitHub repo at smithery.ai/new after committing this file
-startCommand:
-  type: stdio
-  configSchema:
-    type: object
-    properties: {}
-  commandFunction: |-
-    (config) => ({ command: "npx", args: ["-y", "linksee-memory"] })
