@@ -2,7 +2,7 @@
 
 > **Your agent forgets everything when a session ends. Worse — it silently drifts from what you decided last week.**
 >
-> **Linksee Memory catches when your project drifts from its own decisions** — the option abandoned at a fork, the pipeline that quietly stalled, the code that contradicts what you agreed — and a re-injection guard re-surfaces the locked decision **before** the agent acts. Hard contradictions get blocked.
+> **Linksee Memory catches when your project drifts from its own decisions** — the option abandoned at a fork, the pipeline that quietly stalled, the code that contradicts what you agreed — and a re-injection guard re-surfaces the locked decision **before** the agent acts. Rules you've explicitly hardened get blocked.
 >
 > Underneath sits a local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY**: 6-layer structured memory with precision recall and an AST-aware diff cache (50–99% token savings on re-reads).
 >
@@ -102,7 +102,7 @@ Memory tools remember what you did. Nothing notices when you drift from what you
    - 🟡 **Review** — a soft signal awaits your decision
    - ⚪ **Held** — you acknowledged the gap, parked it with a review date
    - 🔵 **Aligned** — reality matches intent, or a recorded resolution explains the change
-4. **Resolve** with `fix`, `supersede`, `acknowledge`, or `dismiss`
+4. **Resolve** with `fix`, `supersede`, `acknowledge`, or `dismiss` — plus two gates: `harden` (PreToolUse will block) and `soften` (back to a warning)
 
 The **make-or-break rule**: a divergence accounted for by a recorded resolution (supersede/fix/acknowledge) is NOT drift. Only unaccounted gaps are flagged. This means intentional evolution stays quiet while silent abandonment gets caught.
 
