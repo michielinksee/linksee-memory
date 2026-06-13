@@ -356,12 +356,47 @@ export function detectDrift(
 // session_file_edits (so we know where the affects files actually live on disk); code
 // extensions only; most-recent first; capped per anchor. Purely additive — detectDrift is
 // untouched. Comment lines are skipped so a doc-mention of a forbidden term isn't a hit.
+// Prose (.md/.html) DESCRIBES rules; it is not where a code/operational constraint is *violated*.
+// Scanning it produced false positives (a SKILL.md line literally saying "NOT raw chat"). Code only.
 const CODE_EXT = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.sql', '.py', '.go', '.rs',
-  '.java', '.rb', '.php', '.sh', '.yml', '.yaml', '.toml', '.env', '.md', '.html',
+  '.java', '.rb', '.php', '.sh', '.yml', '.yaml', '.toml', '.env',
 ]);
 const MAX_FILES_PER_ANCHOR = 400;
 const COMMENT_PREFIXES = ['//', '*', '/*', '#', '<!--', '--'];
+
+// ── precision guards ─────────────────────────────────────────────────────────
+// A raw substring of a forbidden term is too weak a notion of "violation". On the real corpus
+// the bare-substring match produced ~90% false positives in three classes; reject each deductively:
+//   1. sub-token — "forget" inside "forgetting" / "decideForgetting"        → word-boundary match
+//   2. negated   — the line FORBIDS the term ("...NOT raw chat", "…禁止")     → negation window before
+//   3. citation  — a scrape-prohibition's host appears only as a stored value → require a real net call
+//                  ('cosmetic-info.jp' as a provenance label is not a fetch of it)
+const NEGATION_NEAR = /\b(?:not|never|no\s+longer|don'?t|do\s+not|avoid|without)\b|禁止|しない|させない|不可|避け|してはいけない|ではなく/i;
+const SCRAPE_ANCHOR = /crawl|scrap|robots|クロール|スクレイピング|スクレイプ|自動収集|自動巡回/i;
+const NET_CALL = /\b(?:fetch|axios|requests?|urllib|httpx|curl|wget|got|puppeteer|playwright|cheerio|beautifulsoup|selenium|crawl|scrape|scraping)\b|クロール|スクレイピング/i;
+
+// Locate a signal: ASCII signals must hit on a word boundary; CJK (no boundaries) stays substring.
+function signalIndex(lowerLine: string, signal: string): number {
+  if (/^[\x20-\x7e]+$/.test(signal)) {
+    const esc = signal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = new RegExp(`(?<![a-z0-9_])${esc}(?![a-z0-9_])`).exec(lowerLine);
+    return m ? m.index : -1;
+  }
+  return lowerLine.indexOf(signal);
+}
+
+// Deductive violation match with the three precision guards applied (returns the hit term or null).
+function matchViolation(rawLine: string, lowerLine: string, signals: string[], isScrapeAnchor: boolean): string | null {
+  for (const s of signals) {
+    const idx = signalIndex(lowerLine, s);
+    if (idx < 0) continue;                                                          // 1. word-boundary
+    if (NEGATION_NEAR.test(rawLine.slice(Math.max(0, idx - 24), idx))) continue;    // 2. negated context
+    if (isScrapeAnchor && !NET_CALL.test(rawLine)) continue;                        // 3. citation, no net call
+    return s;
+  }
+  return null;
+}
 
 export interface FileViolationSample {
   anchor_id: number;
@@ -433,6 +468,7 @@ export function detectFileViolations(
       const signals = parseArray(a.violation_signal).map((s) => s.trim().toLowerCase()).filter(Boolean);
       if (signals.length === 0) continue; // no signal → can't deduce a contradiction
       const terms = parseArray(a.detect_terms);
+      const isScrapeAnchor = SCRAPE_ANCHOR.test(a.statement);
       const aW = tierWeight(a.tier);
       const confidence = Math.min(aW, REALITY_TIER_WEIGHT) * SCOPE_WEIGHT_GLOB;
       if (confidence < emitThreshold) continue;
@@ -464,7 +500,7 @@ export function detectFileViolations(
           if (!trimmed) continue;
           if (COMMENT_PREFIXES.some((p) => trimmed.startsWith(p))) continue; // skip comments
           const ll = trimmed.toLowerCase();
-          const hit = signals.find((s) => ll.includes(s));
+          const hit = matchViolation(trimmed, ll, signals, isScrapeAnchor);
           if (hit) {
             found = { line_no: i + 1, line_text: trimmed.slice(0, 280), hit };
             break; // one edge per (anchor, file): first real hit
