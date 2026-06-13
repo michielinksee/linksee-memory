@@ -1,0 +1,385 @@
+# ============================================================================
+# Linksee Memory — Current Truth Map (desired state)
+# ============================================================================
+# 正本はこのファイル (anchor #58: git=desired-state, SQLite=runtime sync)。
+# spec: documents/product-drift-os-spec-v3.md / anchors #57-59
+# 構造: ルート=Job文 / 背骨=ジャーニー7段階 / 層=surface|implementation /
+#       エッジ=realizes・supports・must-stay-consistent-with(msc)・reflux(expand→discoverの還流)
+# 規律: ノード上限60。status語彙=active/experiment/commitment/planned/paused/suspect/future_thesis。
+#       suspect=現実との不整合の疑い(最初のdriftカード候補)。
+# v1 CONFIRMED (2026-06-13, Michie Q1-Q6回答反映)。scan-first draft by Claude 2026-06-12。
+# ============================================================================
+
+version: 1
+project: linksee-memory
+template: oss-developer-tool
+product_status: current   # Linksee Memory = current product / Drift OS = future thesis (Q6)
+
+job: >
+  複数プロジェクトで判断・実装・導線が散らばる中、自分とLLMが
+  「今どこを触っているか」を失わず、次に直すべき破損箇所を判断できるようにする。
+
+audience:                 # (Q1)
+  primary: 複数プロジェクトをLLMエージェントと並行して進める個人開発者
+  initial_icp: Claude Code 利用者
+  expansion: Codex / Cursor / Windsurf / Gemini など他エージェント利用者にも拡張可
+
+# related products (1 map = 1 product 原則 / Q4・Q6):
+related_projects:
+  - id: kanseilink
+    note: 兄弟事業。Zenn/動画/打鍵カレンダー等のコンテンツ資産は地続きだが
+      KanseiLINK側に属す。Linksee mapには発見・導入に直接効くものだけ入れる。
+  - id: drift-os
+    relation: spinout_candidate
+    note: >
+      future product thesis。Linksee Memoryの記憶基盤を「逆算的に」作っており、
+      その出口(マネタイズ)としてDrift OSを抽出するイメージ。current productには混ぜない。
+    spec: documents/product-drift-os-spec-v3.md
+
+stages:
+  - { id: discover,   label: 発見 }
+  - { id: understand, label: 理解 }
+  - { id: try,        label: 試用 }
+  - { id: adopt,      label: 導入 }
+  - { id: retain,     label: 継続 }
+  - { id: monetize,   label: 課金 }
+  - { id: expand,     label: 拡張 }
+# (Q2) expand = プロダクト機能拡張(チーム/remote)に限定。
+#       拡散(テンプレ寄稿→新規発見・口コミ)は discover への "reflux" 還流エッジで表現する。
+
+nodes:
+  # ── 発見 discover ──────────────────────────────────────────────
+  - id: npm-listing
+    layer: surface
+    stage: discover
+    statement: npm linksee-memory — 週次出荷で isLatest 鮮度維持(v0.10.0・週1,206DL)
+    status: active
+    facets: [distribution]
+
+  - id: github-repo
+    layer: surface
+    stage: discover
+    statement: github.com/michielinksee/linksee-memory — ★11・MIT・issue対応
+    status: active
+    facets: [distribution, community]
+
+  - id: registries-auto
+    layer: surface
+    stage: discover
+    statement: 公式MCP Registry/Glama/PulseMCP/mcpservers.org/mcp.so=npm自動同期(鮮度=npmが正本)
+    status: active
+    facets: [distribution]
+
+  - id: smithery
+    layer: surface
+    stage: discover
+    statement: Smithery掲載(品質74/100) — .mcpb手動配信。バージョン更新は manifest+VERSION書換→pack→API PUT が必要
+    status: suspect
+    note: 自動同期されない唯一の登録面=npmと乖離しやすい。空ワークスペース3つの削除=Michie作業残
+    facets: [distribution]
+
+  - id: content-jp
+    layer: surface
+    stage: discover
+    statement: Zenn旗艦94♡+はてブ165+X — JPの実績ある勝ち面。打鍵カレンダー本体はKanseiLINK資産(external)
+    status: active
+    facets: [marketing]
+    related_project: kanseilink   # (Q4) 地続きだが資産はKanseiLINK側。発見導線として参照のみ
+
+  - id: videos
+    layer: surface
+    stage: discover
+    statement: 動画3型(A覚えてた/Bズレを止めた/C同じ脳)を週1本→4面展開。A=EN master完成
+    status: experiment
+    facets: [marketing]
+    related_project: kanseilink   # (Q4) 制作パイプはKanseiLINK資産と共有
+
+  - id: hn-launch
+    layer: surface
+    stage: discover
+    statement: 6/23 Show HN — 弾=ベンチ結果。日程不動(anchor #59)
+    status: commitment
+    due: 2026-06-23
+    facets: [marketing]
+
+  - id: ph-launch
+    layer: surface
+    stage: discover
+    statement: ~6/30 Product Hunt — 弾=ダッシュボード(blueprintビュー)
+    status: commitment
+    due: 2026-06-30
+    facets: [marketing]
+
+  # ── 理解 understand ────────────────────────────────────────────
+  - id: readme
+    layer: surface
+    stage: understand
+    statement: README=事実上の主LP — Three spells/Quick Start/10 Tools/Pricing/Telemetry契約
+    status: active
+    facets: [docs]
+
+  - id: lp
+    layer: surface
+    stage: understand
+    statement: linksee-site.vercel.app — Driftセクション(PR#3)・3呪文・Pro節「ローカル永久無料」明示
+    status: suspect
+    note: PR#3マージ待ち — マージまでREADMEとLPの正準コピーが一時不整合
+    facets: [marketing, docs]
+
+  - id: docs-site
+    layer: surface
+    stage: understand
+    statement: Mintlify docs.linksee.app — introduction/reference公開済
+    status: active
+    facets: [docs]
+
+  - id: bench-evidence
+    layer: surface
+    stage: understand
+    statement: vs Anthropic Memory MCP 直接ベンチ — 「証拠で語る」原則のHN用の弾
+    status: experiment
+    due: 2026-06-23
+    facets: [marketing, engineering]
+
+  # ── 試用 try ───────────────────────────────────────────────────
+  - id: npx-onboarding
+    layer: surface
+    stage: try
+    statement: 1コマンド体験(npx -y linksee-memory / linksee-memory-setup) — 獲得4原則「1コマンド体験を守る」
+    status: active
+    facets: [product]
+
+  - id: mcpb-launcher
+    layer: surface
+    stage: try
+    statement: 薄いランチャー型.mcpb(2KB) — Smithery配信済。Claude Desktop拡張ディレクトリ提出=未
+    status: suspect
+    note: 同じバンドルでDesktop拡張に出せるのに未提出=absence候補
+    facets: [distribution]
+
+  # ── 導入 adopt ─────────────────────────────────────────────────
+  - id: client-configs
+    layer: surface
+    stage: adopt
+    statement: 6クライアント対応(Claude Desktop/Code/Cursor/Windsurf/Codex/Gemini) — READMEスニペット一貫
+    status: active
+    facets: [docs, product]
+
+  - id: skill-spells
+    layer: surface
+    stage: adopt
+    statement: SKILL.mdトリガー + 3呪文(use linksee/これ覚えて/what's drifting?) — 第4候補「Linksee Map」
+    status: active
+    facets: [product]
+
+  - id: guard-setup
+    layer: surface
+    stage: adopt
+    statement: Claude Codeフックで再注入ガード導入(claude-code#15443対策) — ブロックはharden済ルールのみ
+    status: active
+    facets: [product]
+
+  # ── 継続 retain ────────────────────────────────────────────────
+  - id: memory-loop
+    layer: surface
+    stage: retain
+    statement: remember/recall/read_smartの日常ループ — 6層記憶・read_smart 86%節約
+    status: active
+    facets: [product]
+
+  - id: drift-loop
+    layer: surface
+    stage: retain
+    statement: what's drifting? → 4状態 → 3-way解決 — 「ドリフトは評決ではなく問い」
+    status: active
+    facets: [product]
+
+  - id: dashboard-ui
+    layer: surface
+    stage: retain
+    statement: ダッシュボードのホーム=blueprintマップビュー(段階×状態色)、ログはドリルダウン (anchor #59)
+    status: commitment
+    due: 2026-06-23
+    note: 現状はログ一覧がホーム=これ自体が宣言済みdivergence(P1で解消)
+    facets: [product]
+
+  - id: cli-utilities
+    layer: surface
+    stage: retain
+    statement: CLI 9コマンド(setup/stats/import/sync/declare/detect/guard/install-skill/server)
+    status: active
+    facets: [product]
+
+  - id: cli-expansion
+    layer: surface
+    stage: retain
+    statement: CLI拡張構想(CI/pre-commitドリフトゲート、transcript一括import、claude-mem型スタンドアロン)
+    status: paused          # (Q5) 消さず明示。active化すると「今やる」に見えるので保留で固定
+    paused_reason: awaiting_owner_decision   # or: post-P1
+    facets: [product]
+
+  - id: telemetry-contract
+    layer: surface
+    stage: retain
+    statement: Telemetry=opt-in・off by default・Level 1契約をREADMEに明記
+    status: suspect
+    note: README§Telemetryは契約を公開済みだが、setup完了テレメトリは未実装(v0.11予定)。
+      文書が実装に先行 — 最初のdriftカード候補。
+    facets: [product, trust]
+
+  # ── 課金 monetize ──────────────────────────────────────────────
+  - id: pro-waitlist
+    layer: surface
+    stage: monetize
+    statement: Pro待ちリスト=LP稼働中(E2E済) — オーガニック3名=初の需要証拠
+    status: active
+    facets: [revenue]
+
+  - id: pro-offer
+    layer: surface
+    stage: monetize
+    statement: Pro=Summer 2026(デバイス間同期+チーム共有)。線引き=ドリフト+記憶コアは永久ローカル無料
+    status: commitment
+    facets: [revenue]
+
+  - id: drift-os-thesis
+    layer: surface
+    stage: monetize
+    statement: Product Drift OS=将来の別プロダクト候補(spec v1-v3、COO/Boardビュー)。Linksee記憶基盤の逆算的な出口
+    status: future_thesis    # (Q6) monetize中核ではなく spinout candidate。current productには混ぜない
+    spinout_candidate: true
+    facets: [revenue, strategy]
+    related_project: drift-os
+
+  # ── 拡張 expand ────────────────────────────────────────────────
+  - id: cross-llm
+    layer: surface
+    stage: expand
+    statement: クロスLLM=3エージェント横断実証(Claude+Cursor+Codex) — 中立パイプの核
+    status: active
+    facets: [product, strategy]
+
+  - id: remote-mcp
+    layer: surface
+    stage: expand
+    statement: linksee-memory-remote構想 — ChatGPT consumer到達、Pro同梱で収益化案
+    status: planned
+    facets: [product, revenue]
+
+  - id: team-sharing
+    layer: surface
+    stage: expand
+    statement: チーム共有(Pro機能) — 個人の記憶→チームの記憶へ
+    status: planned
+    facets: [product, revenue]
+
+  - id: map-templates
+    layer: surface
+    stage: expand
+    statement: templates/*.yaml 6アーキタイプ — コミュニティPRで増える寄稿面
+    status: planned
+    facets: [community, product]
+    role: diffusion   # (Q2) 機能拡張ではなく拡散面 — discoverへ還流(reflux edge)
+
+  # ── 実装 implementation ────────────────────────────────────────
+  - id: mcp-server
+    layer: implementation
+    statement: MCPサーバー10ツール(remember/recall/read_smart/dream/check_decision/anchor・drift・proposal系)
+    status: active
+    facets: [engineering]
+
+  - id: memory-core
+    layer: implementation
+    statement: SQLite 6層+3軸+忘却曲線/heat+caveat永久保護
+    status: active
+    facets: [engineering]
+
+  - id: read-smart-engine
+    layer: implementation
+    statement: AST差分キャッシュ — 実測86%/再読99%トークン節約
+    status: active
+    facets: [engineering]
+
+  - id: drift-engine
+    layer: implementation
+    statement: anchors4種+detection(v9 ProjectCoreNode)+3-way resolve+drift_edges(anchor↔reality)
+    status: active
+    facets: [engineering]
+
+  - id: map-engine
+    layer: implementation
+    statement: P1=ジャーニー背骨+anchor間型付きエッジ+where_am_i+map.yamlインポータ (spec v3)
+    status: planned
+    due: 2026-06-20
+    facets: [engineering]
+
+  - id: guard-hook
+    layer: implementation
+    statement: 行動前の決定再提示フック — 問うのが基本、ブロックはharden済みのみ
+    status: active
+    facets: [engineering]
+
+  - id: dashboard-app
+    layer: implementation
+    statement: Next.jsダッシュボード(別repo linksee-dashboard) — blueprintビューの実装先
+    status: active
+    facets: [engineering]
+
+  - id: map-wizard
+    layer: implementation
+    statement: scan-first対話ウィザード(P1.5) — 手書きmapで詰まった質問から作る。完了直後にreconciler実行
+    status: planned
+    facets: [engineering, product]
+
+  - id: bench-harness
+    layer: implementation
+    statement: vs Anthropic Memory MCPベンチハーネス
+    status: active
+    facets: [engineering]
+
+  - id: mcpb-bundle
+    layer: implementation
+    statement: .mcpbランチャーバンドル(2KB) — 更新手順=manifest+VERSION書換→pack→API PUT
+    status: active
+    facets: [engineering, distribution]
+
+edges:
+  # 実装 → 面 (realizes: これが壊れたらその面は成立しない)
+  - { from: mcp-server,        to: npm-listing,    type: realizes }
+  - { from: memory-core,       to: memory-loop,    type: realizes }
+  - { from: read-smart-engine, to: memory-loop,    type: supports }
+  - { from: drift-engine,      to: drift-loop,     type: realizes }
+  - { from: map-engine,        to: dashboard-ui,   type: realizes }
+  - { from: map-engine,        to: drift-engine,   type: supports }   # 影響伝播=ドリフト精度
+  - { from: guard-hook,        to: guard-setup,    type: realizes }
+  - { from: dashboard-app,     to: dashboard-ui,   type: realizes }
+  - { from: bench-harness,     to: bench-evidence, type: realizes }
+  - { from: mcpb-bundle,       to: mcpb-launcher,  type: realizes }
+  - { from: mcpb-bundle,       to: smithery,       type: realizes }   # Smitheryは.mcpb手動配信
+  - { from: map-wizard,        to: map-templates,  type: realizes }
+  - { from: map-wizard,        to: npx-onboarding, type: supports }   # ahaモーメント強化
+
+  # 面 → 面 (msc: 片方を変えたらもう片方も触らないとズレる)
+  - { from: readme,         to: lp,             type: must-stay-consistent-with }  # 正準コピー(問う/3呪文/Pro線引き)
+  - { from: readme,         to: docs-site,      type: must-stay-consistent-with }
+  - { from: readme,         to: skill-spells,   type: must-stay-consistent-with }  # 3呪文の統一表記
+  - { from: npx-onboarding, to: readme,         type: must-stay-consistent-with }  # installスニペット
+  - { from: client-configs, to: readme,         type: must-stay-consistent-with }
+  - { from: telemetry-contract, to: readme,     type: must-stay-consistent-with }  # 契約と実装の同期
+  - { from: pro-offer,      to: lp,             type: must-stay-consistent-with }  # Pro節・無料線引き
+  - { from: registries-auto, to: npm-listing,   type: must-stay-consistent-with }  # npm自動同期
+  - { from: smithery,       to: npm-listing,    type: must-stay-consistent-with }  # ★手動同期=乖離しやすい(Q3)
+
+  # 面 → 面 (supports: 上流が下流の成立を支える)
+  - { from: bench-evidence, to: hn-launch,      type: supports }
+  - { from: dashboard-ui,   to: ph-launch,      type: supports }
+  - { from: videos,         to: hn-launch,      type: supports }
+  - { from: content-jp,     to: npm-listing,    type: supports }   # JP発見導線→DL
+  - { from: pro-waitlist,   to: pro-offer,      type: supports }
+  - { from: cross-llm,      to: remote-mcp,     type: supports }
+  - { from: team-sharing,   to: pro-offer,      type: supports }
+  - { from: drift-os-thesis, to: memory-core,   type: supports }   # (Q6)逆算: 記憶基盤がthesisの出口を支える
+
+  # 還流 (reflux: expand → discover / Q2 拡散の表現)
+  - { from: map-templates,  to: github-repo,    type: reflux }   # コミュニティ寄稿が発見面に還る
+  - { from: drift-loop,     to: content-jp,     type: reflux }   # 「ズレを止めた」体験が口コミ/記事に還る
