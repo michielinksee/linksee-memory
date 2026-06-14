@@ -13,7 +13,8 @@
     "linksee-memory-setup": "dist/bin/setup.js",
     "linksee-memory-declare": "dist/bin/declare-anchor.js",
     "linksee-memory-detect": "dist/bin/detect-drift.js",
-    "linksee-memory-guard": "dist/bin/guard-hook.js"
+    "linksee-memory-guard": "dist/bin/guard-hook.js",
+    "linksee-memory-map": "dist/bin/map-import.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
@@ -61,7 +62,8 @@
     "@babel/parser": "^7.25.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.9.0",
-    "sqlite-vec": "^0.1.6"
+    "sqlite-vec": "^0.1.6",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

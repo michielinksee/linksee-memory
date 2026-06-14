@@ -197,9 +197,10 @@ nodes:
   - id: dashboard-ui
     layer: surface
     stage: retain
-    statement: ダッシュボードのホーム=blueprintマップビュー(段階×状態色)、ログはドリルダウン (anchor #59)
+    statement: ダッシュボードのホーム=blueprintマップビュー(段階×状態色)、ログはドリルダウン
     status: commitment
     due: 2026-06-23
+    anchor: 59   # 規範ノード→drift_anchors#59 にリンク(commitment, review 6/23)
     note: 現状はログ一覧がホーム=これ自体が宣言済みdivergence(P1で解消)
     facets: [product]
 

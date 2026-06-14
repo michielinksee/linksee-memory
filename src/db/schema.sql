@@ -359,6 +359,55 @@ CREATE INDEX IF NOT EXISTS idx_injlog_anchor  ON injection_log(anchor_id, occurr
 CREATE INDEX IF NOT EXISTS idx_injlog_session ON injection_log(session_id, occurred_at);
 
 -- ============================================================
+-- v11: Current Truth Map — journey-spine topology (Product Drift OS spec v3).
+-- map.yaml (git) is the desired-state SOURCE OF TRUTH (anchor #58); these tables
+-- are the runtime index the importer reconciles INTO. A map_node is product
+-- STRUCTURE (surface | implementation) — a SUPERSET of drift_anchors, which hold
+-- only NORMATIVE claims. A normative node links out via anchor_id; descriptive
+-- surfaces ("README exists") leave it NULL, so the violation scanner never sees
+-- them. Full-rebuild import: the importer wipes a project's rows and re-inserts.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS map_nodes (
+  id              TEXT PRIMARY KEY,                  -- stable slug from map.yaml (e.g. 'readme')
+  project         TEXT NOT NULL,
+  layer           TEXT NOT NULL,                     -- surface | implementation
+  stage           TEXT,                              -- journey stage id (NULL for implementation layer)
+  statement       TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'active',    -- active|experiment|commitment|planned|paused|suspect|future_thesis
+  facets          TEXT NOT NULL DEFAULT '[]',        -- JSON array (the demoted old domains, as tags)
+  role            TEXT,                              -- e.g. 'diffusion'
+  note            TEXT,
+  due             TEXT,                              -- ISO date (commitments)
+  paused_reason   TEXT,
+  related_project TEXT,
+  spinout_candidate INTEGER NOT NULL DEFAULT 0,
+  anchor_id       INTEGER REFERENCES drift_anchors(id) ON DELETE SET NULL,  -- link IFF normative
+  extra           TEXT NOT NULL DEFAULT '{}',        -- JSON catch-all (forward-compat fields)
+  updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_map_nodes_project ON map_nodes(project);
+CREATE INDEX IF NOT EXISTS idx_map_nodes_stage   ON map_nodes(stage);
+CREATE INDEX IF NOT EXISTS idx_map_nodes_status  ON map_nodes(status);
+CREATE INDEX IF NOT EXISTS idx_map_nodes_layer   ON map_nodes(layer);
+
+-- Node↔node typed edges — the topology that makes blast-radius computable.
+-- type: realizes (impl→surface) | supports | must-stay-consistent-with | reflux (expand→discover).
+-- Endpoints are map_nodes slugs (validated in the lib, not FK-constrained, to keep
+-- the wipe+reinsert import order trivial).
+CREATE TABLE IF NOT EXISTS map_edges (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  project   TEXT NOT NULL,
+  from_id   TEXT NOT NULL,
+  to_id     TEXT NOT NULL,
+  type      TEXT NOT NULL,                           -- realizes|supports|must-stay-consistent-with|reflux
+  note      TEXT,
+  UNIQUE(from_id, to_id, type)
+);
+CREATE INDEX IF NOT EXISTS idx_map_edges_from ON map_edges(from_id);
+CREATE INDEX IF NOT EXISTS idx_map_edges_to   ON map_edges(to_id);
+CREATE INDEX IF NOT EXISTS idx_map_edges_type ON map_edges(type);
+
+-- ============================================================
 -- Meta — schema version tracking
 -- ============================================================
 CREATE TABLE IF NOT EXISTS meta (
@@ -366,6 +415,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '10');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '11');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '10' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9');
+UPDATE meta SET value = '11' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10');
