@@ -27,6 +27,24 @@ export function statusColor(status: string): StatusColor {
   }
 }
 
+export interface ProjectMeta {
+  project: string; job: string | null; audience: Record<string, unknown>;
+  product_status: string | null; template: string | null;
+  stages: Array<{ id: string; label?: string }>; related_projects: unknown[];
+}
+export function getProjectMeta(db: Database.Database, project: string): ProjectMeta | undefined {
+  const r = db.prepare('SELECT * FROM map_projects WHERE project = ?').get(project) as any;
+  if (!r) return undefined;
+  const j = (s: string, dflt: unknown) => { try { return JSON.parse(s); } catch { return dflt; } };
+  return {
+    project: r.project, job: r.job, audience: j(r.audience, {}), product_status: r.product_status,
+    template: r.template, stages: j(r.stages, []), related_projects: j(r.related_projects, []),
+  };
+}
+export function listMapProjects(db: Database.Database): string[] {
+  return (db.prepare('SELECT project FROM map_projects ORDER BY project').all() as Array<{ project: string }>).map((r) => r.project);
+}
+
 export function getNode(db: Database.Database, project: string, id: string): NodeRow | undefined {
   return db.prepare('SELECT * FROM map_nodes WHERE project = ? AND id = ?').get(project, id) as NodeRow | undefined;
 }
@@ -77,10 +95,12 @@ export interface Blueprint {
 
 // The dashboard home: surface nodes laid out by journey stage (the columns),
 // implementation nodes in their own tray, every node carrying a status color.
-export function getBlueprint(db: Database.Database, project: string, stageOrder: Array<{ id: string; label?: string }>): Blueprint {
+export function getBlueprint(db: Database.Database, project: string, stageOrder?: Array<{ id: string; label?: string }>): Blueprint {
+  // Fall back to the persisted canonical spine when the caller didn't pass one (the dashboard path).
+  const order = stageOrder ?? getProjectMeta(db, project)?.stages ?? [];
   const all = db.prepare('SELECT * FROM map_nodes WHERE project = ? ORDER BY stage, id').all(project) as NodeRow[];
   const withColor = (n: NodeRow) => ({ ...n, color: statusColor(n.status) });
-  const stages: BlueprintCell[] = stageOrder.map((s) => ({
+  const stages: BlueprintCell[] = order.map((s) => ({
     stage: s.id,
     label: s.label ?? s.id,
     nodes: all.filter((n) => n.layer === 'surface' && n.stage === s.id).map(withColor),

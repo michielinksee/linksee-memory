@@ -407,6 +407,20 @@ CREATE INDEX IF NOT EXISTS idx_map_edges_from ON map_edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_map_edges_to   ON map_edges(to_id);
 CREATE INDEX IF NOT EXISTS idx_map_edges_type ON map_edges(type);
 
+-- Project-level Map meta — the spine order/labels + the Job statement live in map.yaml,
+-- NOT derivable from nodes alone. Persist them so any reader (dashboard) can render the
+-- canonical journey order and the Job headline without parsing the YAML.
+CREATE TABLE IF NOT EXISTS map_projects (
+  project          TEXT PRIMARY KEY,
+  job              TEXT,
+  audience         TEXT NOT NULL DEFAULT '{}',   -- JSON
+  product_status   TEXT,
+  template         TEXT,
+  stages           TEXT NOT NULL DEFAULT '[]',   -- JSON [{id,label}] — canonical spine order
+  related_projects TEXT NOT NULL DEFAULT '[]',   -- JSON
+  updated_at       INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- ============================================================
 -- Meta — schema version tracking
 -- ============================================================

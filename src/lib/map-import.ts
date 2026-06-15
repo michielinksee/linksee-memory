@@ -104,6 +104,23 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
   let linked = 0;
 
   const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO map_projects (project, job, audience, product_status, template, stages, related_projects, updated_at)
+      VALUES (@project, @job, @audience, @product_status, @template, @stages, @related_projects, unixepoch())
+      ON CONFLICT(project) DO UPDATE SET
+        job=excluded.job, audience=excluded.audience, product_status=excluded.product_status,
+        template=excluded.template, stages=excluded.stages, related_projects=excluded.related_projects,
+        updated_at=unixepoch()
+    `).run({
+      project: map.project,
+      job: map.job ?? null,
+      audience: JSON.stringify(map.audience ?? {}),
+      product_status: map.product_status ?? null,
+      template: map.template ?? null,
+      stages: JSON.stringify(map.stages),
+      related_projects: JSON.stringify(map.related_projects ?? []),
+    });
+
     db.prepare('DELETE FROM map_edges WHERE project = ?').run(map.project);
     db.prepare('DELETE FROM map_nodes WHERE project = ?').run(map.project);
 
