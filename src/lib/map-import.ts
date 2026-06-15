@@ -30,6 +30,7 @@ export interface MapNode {
   related_project?: string;
   spinout_candidate?: boolean;
   anchor?: number; // → drift_anchors.id, IFF this node is a normative claim
+  reality?: Record<string, unknown>; // how to verify this node from reality (kind/dir/signal/verdict_if_*)
   [k: string]: unknown; // forward-compat fields land in `extra`
 }
 export interface MapEdge { from: string; to: string; type: string; note?: string }
@@ -47,7 +48,7 @@ export interface ParsedMap {
 
 const KNOWN_NODE_COLS = new Set([
   'id', 'layer', 'stage', 'statement', 'status', 'facets', 'role', 'note',
-  'due', 'paused_reason', 'related_project', 'spinout_candidate', 'anchor',
+  'due', 'paused_reason', 'related_project', 'spinout_candidate', 'anchor', 'reality',
 ]);
 
 export function parseMapFile(path: string): ParsedMap {
@@ -127,10 +128,10 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
     const insNode = db.prepare(`
       INSERT INTO map_nodes
         (id, project, layer, stage, statement, status, facets, role, note, due,
-         paused_reason, related_project, spinout_candidate, anchor_id, extra, updated_at)
+         paused_reason, related_project, spinout_candidate, anchor_id, reality, extra, updated_at)
       VALUES
         (@id, @project, @layer, @stage, @statement, @status, @facets, @role, @note, @due,
-         @paused_reason, @related_project, @spinout_candidate, @anchor_id, @extra, unixepoch())
+         @paused_reason, @related_project, @spinout_candidate, @anchor_id, @reality, @extra, unixepoch())
     `);
     for (const n of map.nodes) {
       if (!n.id) continue;
@@ -156,6 +157,7 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
         related_project: n.related_project ?? null,
         spinout_candidate: n.spinout_candidate ? 1 : 0,
         anchor_id: anchorId,
+        reality: JSON.stringify(n.reality ?? {}),
         extra: JSON.stringify(extra),
       });
     }

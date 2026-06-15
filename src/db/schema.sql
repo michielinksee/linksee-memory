@@ -382,6 +382,10 @@ CREATE TABLE IF NOT EXISTS map_nodes (
   related_project TEXT,
   spinout_candidate INTEGER NOT NULL DEFAULT 0,
   anchor_id       INTEGER REFERENCES drift_anchors(id) ON DELETE SET NULL,  -- link IFF normative
+  reality         TEXT NOT NULL DEFAULT '{}',        -- JSON: how to verify this node from reality (kind/dir/signal)
+  live_verdict    TEXT,                              -- reconciler overlay: convergence|divergence|absence|NULL(unchecked)
+  verdict_evidence TEXT NOT NULL DEFAULT '{}',       -- JSON: file/line/term that decided the verdict
+  reconciled_at   INTEGER,                           -- when the reconciler last ran for this node
   extra           TEXT NOT NULL DEFAULT '{}',        -- JSON catch-all (forward-compat fields)
   updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -429,6 +433,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '11');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '12');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '11' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10');
+UPDATE meta SET value = '12' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11');

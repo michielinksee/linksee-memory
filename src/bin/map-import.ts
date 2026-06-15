@@ -13,7 +13,8 @@
 import { join } from 'node:path';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { parseMapFile, importMap } from '../lib/map-import.js';
-import { blastRadius, getSuspects, getBlueprint, statusColor } from '../lib/map-view.js';
+import { blastRadius, getSuspects, getBlueprint } from '../lib/map-view.js';
+import { reconcile } from '../lib/map-reconcile.js';
 
 function flagValue(argv: string[], name: string, dflt: string): string {
   const i = argv.indexOf(`--${name}`);
@@ -59,6 +60,25 @@ if (sub === 'import') {
   printSuspectsWithBlast();
 } else if (sub === 'suspects') {
   printSuspectsWithBlast();
+} else if (sub === 'reconcile') {
+  // Check declared intent against actual reality (local code/files). Scans process.cwd().
+  const flagRoot = flagValue(argv, 'root', process.cwd());
+  const res = reconcile(db, map.project, flagRoot);
+  console.log(`[reconcile] ${map.project} — ${res.checked} checked · ${res.external} external (human-confirmed)`);
+  if (res.refuted.length) {
+    console.log(`\n✓ ${res.refuted.length} suspect(s) REFUTED by reality (declared suspect → reality says convergence):`);
+    for (const v of res.refuted) console.log(`  🟢 ${v.id} — ${v.reason}\n     ${(v.evidence as any).file ?? ''}${(v.evidence as any).line_no ? ':' + (v.evidence as any).line_no : ''}`);
+  }
+  if (res.confirmed.length) {
+    console.log(`\n🔴 ${res.confirmed.length} suspect(s) CONFIRMED by reality:`);
+    for (const v of res.confirmed) console.log(`  🔴 ${v.id} — ${v.reason}`);
+  }
+  const newDiv = res.verdicts.filter((v) => v.flipped && v.verdict === 'divergence');
+  if (newDiv.length) {
+    console.log(`\n⚠ ${newDiv.length} node(s) reality flags as divergence (declared OK, reality disagrees):`);
+    for (const v of newDiv) console.log(`  🔴 ${v.id} — ${v.reason}`);
+  }
+  console.log(`\nVerdicts: ${res.verdicts.filter(v => v.verdict === 'convergence').length} convergence · ${res.verdicts.filter(v => v.verdict === 'divergence').length} divergence · ${res.verdicts.filter(v => v.verdict === 'absence').length} absence · ${res.external} external`);
 } else if (sub === 'blast') {
   const id = argv[1];
   if (!id) { console.error('usage: linksee-memory-map blast <node-id>'); process.exit(1); }

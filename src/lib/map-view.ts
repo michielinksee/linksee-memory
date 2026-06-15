@@ -10,6 +10,7 @@ export interface NodeRow {
   statement: string; status: string; facets: string; role: string | null;
   note: string | null; due: string | null; paused_reason: string | null;
   related_project: string | null; spinout_candidate: number; anchor_id: number | null;
+  live_verdict?: string | null; verdict_evidence?: string | null;
 }
 export interface EdgeRow { from_id: string; to_id: string; type: string; note: string | null }
 
@@ -25,6 +26,19 @@ export function statusColor(status: string): StatusColor {
     case 'experiment': return 'amber';                  // in flight, allowed to wobble
     default: return 'blue';
   }
+}
+// A live reconciler verdict (when present) OVERRIDES the declared-status color —
+// reality wins over what we hand-declared.
+export function verdictColor(verdict: string): StatusColor {
+  switch (verdict) {
+    case 'convergence': return 'green';
+    case 'divergence': return 'red';
+    case 'absence': return 'gray';
+    default: return 'blue';
+  }
+}
+export function nodeColor(n: { status: string; live_verdict?: string | null }): StatusColor {
+  return n.live_verdict ? verdictColor(n.live_verdict) : statusColor(n.status);
 }
 
 export interface ProjectMeta {
@@ -161,7 +175,7 @@ export function getBlueprint(db: Database.Database, project: string, stageOrder?
   // Fall back to the persisted canonical spine when the caller didn't pass one (the dashboard path).
   const order = stageOrder ?? getProjectMeta(db, project)?.stages ?? [];
   const all = db.prepare('SELECT * FROM map_nodes WHERE project = ? ORDER BY stage, id').all(project) as NodeRow[];
-  const withColor = (n: NodeRow) => ({ ...n, color: statusColor(n.status) });
+  const withColor = (n: NodeRow) => ({ ...n, color: nodeColor(n) });
   const stages: BlueprintCell[] = order.map((s) => ({
     stage: s.id,
     label: s.label ?? s.id,
