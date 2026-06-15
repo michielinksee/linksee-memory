@@ -85,6 +85,68 @@ export function blastRadius(db: Database.Database, project: string, id: string):
   return [...hits.values()];
 }
 
+// ── where_am_i: explicit-query positional locate (spec v3) ────────────────────
+// The per-turn re-anchor primitive. Given a topic string or a node id, locate it
+// on the Map and return "you are here + blast radius + the decision behind it".
+// Matching is LEXICAL only (no embeddings) — consistent with the drift detector.
+export interface WhereAmIMatch {
+  node: NodeRow;
+  stage_label: string | null;
+  match_reason: string;
+  blast: BlastHit[];
+  anchor: { id: number; statement: string } | null;
+}
+export interface WhereAmIResult {
+  project: string;
+  job: string | null;
+  matched: WhereAmIMatch[];
+}
+
+function queryTerms(q: string): string[] {
+  return q.toLowerCase().split(/[\s、。,.\/_()「」"'`:：]+/).map((t) => t.trim()).filter((t) => t.length >= 2);
+}
+
+export function whereAmI(
+  db: Database.Database,
+  opts: { project?: string; query?: string; node_id?: string; limit?: number }
+): WhereAmIResult {
+  const project = opts.project
+    ?? (db.prepare('SELECT project FROM map_projects ORDER BY updated_at DESC LIMIT 1').get() as { project?: string } | undefined)?.project
+    ?? '';
+  const meta = project ? getProjectMeta(db, project) : undefined;
+  const stageLabel = (stageId: string | null): string | null =>
+    stageId ? meta?.stages.find((s) => s.id === stageId)?.label ?? stageId : null;
+  const anchorOf = (n: NodeRow) => n.anchor_id != null
+    ? (db.prepare('SELECT id, statement FROM drift_anchors WHERE id = ?').get(n.anchor_id) as { id: number; statement: string } | undefined) ?? null
+    : null;
+  const wrap = (n: NodeRow, reason: string): WhereAmIMatch => ({
+    node: n, stage_label: stageLabel(n.stage), match_reason: reason,
+    blast: blastRadius(db, project, n.id), anchor: anchorOf(n),
+  });
+
+  // 1. exact node id
+  if (opts.node_id) {
+    const n = getNode(db, project, opts.node_id);
+    return { project, job: meta?.job ?? null, matched: n ? [wrap(n, 'exact node id')] : [] };
+  }
+  // 2. lexical scoring over id + statement + note + facets
+  const limit = opts.limit ?? 3;
+  const terms = queryTerms(opts.query ?? '');
+  const all = db.prepare('SELECT * FROM map_nodes WHERE project = ?').all(project) as NodeRow[];
+  const scored = all.map((n) => {
+    const hay = `${n.id} ${n.statement} ${n.note ?? ''} ${n.facets}`.toLowerCase();
+    let score = 0;
+    if (terms.some((t) => n.id.toLowerCase() === t)) score += 10; // id hit dominates
+    for (const t of terms) if (hay.includes(t)) score += n.id.toLowerCase().includes(t) ? 3 : 1;
+    return { n, score };
+  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+
+  return {
+    project, job: meta?.job ?? null,
+    matched: scored.map((x) => wrap(x.n, `lexical match (score ${x.score})`)),
+  };
+}
+
 export interface BlueprintCell { stage: string; label: string; nodes: Array<NodeRow & { color: StatusColor }> }
 export interface Blueprint {
   project: string;

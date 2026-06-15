@@ -32,6 +32,7 @@ import { confirmForget } from './elicitation.js';
 import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engine.js';
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
 import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
+import { whereAmI } from '../lib/map-view.js';
 
 const SERVER_VERSION = '0.10.0';
 
@@ -175,6 +176,20 @@ const TOOLS = [
       properties: {
         domain: { type: 'string', description: 'Filter by domain (strategy, product, engineering, growth, etc.)' },
         decision_mode: { type: 'string', description: 'Filter by decision_mode (hypothesis, constraint, commitment, source_of_truth)' },
+      },
+    },
+  },
+  {
+    name: 'where_am_i',
+    description:
+      'Locate the current topic on the Current Truth Map and report "you are here" + blast radius — the per-turn re-anchor.\n\nGiven what you are about to touch (a topic string or a node id), returns:\n• the matching Map node(s) and their journey stage (発見→…→拡張)\n• BLAST RADIUS — what becomes suspect if you change this (the must-stay-consistent-with / realizes / supports dependents). e.g. editing the README implicates the LP.\n• the decision behind the node (linked anchor), if any\n\nThis is how you avoid optimizing one node while silently breaking its neighbors (change the spec → npm/Docs/LP must move too). Matching is lexical (no embeddings).\n\nWHEN TO CALL:\n• Before editing a file or making a change — "where on the Map is this, and what else does it touch?"\n• When the topic of the conversation shifts — re-anchor to the new node\n• When the user asks "what does changing X affect?" / "where does this fit?"',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Topic / what you are about to touch (e.g. "changing the telemetry contract")' },
+        node_id: { type: 'string', description: 'Exact Map node id, if known (e.g. "readme") — bypasses lexical match' },
+        project: { type: 'string', description: 'Map project slug (defaults to the most recently imported Map)' },
+        limit: { type: 'number', description: 'Max matches for a query (default 3)' },
       },
     },
   },
@@ -1279,6 +1294,35 @@ function handleDriftStatus(args: any): string {
   });
 }
 
+function handleWhereAmI(args: any): string {
+  const res = whereAmI(db, {
+    query: args?.query, node_id: args?.node_id, project: args?.project, limit: args?.limit,
+  });
+  if (res.matched.length === 0) {
+    return JSON.stringify({
+      ok: true, project: res.project, located: false,
+      hint: res.project ? 'No node matched. Try a node id or a topical keyword.' : 'No Map imported yet — run linksee-memory-map.',
+    });
+  }
+  const located = res.matched.map((m) => ({
+    node: m.node.id,
+    stage: m.stage_label,
+    status: m.node.status,
+    statement: m.node.statement,
+    why: m.match_reason,
+    // the whole point: what else moves if you touch this
+    blast_radius: m.blast.map((b) => `${b.id} (${b.relation})`),
+    decision: m.anchor ? `#${m.anchor.id}: ${m.anchor.statement}` : null,
+  }));
+  const top = res.matched[0];
+  const youAreHere = `You are at "${top.node.id}"`
+    + (top.stage_label ? ` in stage 「${top.stage_label}」` : '')
+    + `. Touching it implicates ${top.blast.length} node(s)`
+    + (top.blast.length ? `: ${top.blast.map((b) => b.id).join(', ')}` : ' (isolated)')
+    + '.';
+  return JSON.stringify({ ok: true, project: res.project, located: true, you_are_here: youAreHere, job: res.job, matched: located });
+}
+
 function handleCheckDecision(args: any): string {
   if (!args?.anchor_id) throw new Error('anchor_id is required');
   const detail = getDecisionDetail(db, args.anchor_id);
@@ -1716,6 +1760,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'read_smart': text = handleReadSmart(args); break;
       // Drift tools (v0.8.0)
       case 'drift_status': text = handleDriftStatus(args); break;
+      case 'where_am_i': text = handleWhereAmI(args); break;
       case 'check_decision': text = handleCheckDecision(args); break;
       case 'declare_anchor': text = handleDeclareAnchor(args); break;
       case 'resolve_drift': text = handleResolveDrift(args); break;
