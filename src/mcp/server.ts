@@ -33,8 +33,26 @@ import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engi
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
 import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
 import { whereAmI } from '../lib/map-view.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
-const SERVER_VERSION = '0.10.0';
+// Single source of truth: read our own version from package.json so the MCP
+// serverInfo can never drift from the published package version. (We catch
+// doc/code drift for a living — our own version string shouldn't drift.)
+function readServerVersion(): string {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    // dist/mcp/server.js → ../../package.json
+    const pkgPath = join(dirname(dirname(dirname(here))), 'package.json');
+    if (existsSync(pkgPath)) {
+      return String(JSON.parse(readFileSync(pkgPath, 'utf8')).version || '0.0.0');
+    }
+  } catch { /* fall through */ }
+  return '0.0.0';
+}
+
+const SERVER_VERSION = readServerVersion();
 
 const db = openDb();
 runMigrations(db);
