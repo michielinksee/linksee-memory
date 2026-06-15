@@ -158,13 +158,46 @@ export function whereAmI(
     blast: blastRadius(db, project, n.id), anchor: anchorOf(n),
   });
 
+  const limit = opts.limit ?? 3;
+  const norm = (p: string) => p.replace(/\\/g, '/');
+  const nodePaths = (n: NodeRow): string[] => {
+    let r: any = {}; try { r = JSON.parse((n as any).reality || '{}'); } catch { /* none */ }
+    const ps: string[] = [];
+    if (r.path) ps.push(norm(r.path));
+    for (const c of (r.checks ?? [])) if (c.path) ps.push(norm(c.path));
+    return ps;
+  };
+
   // 1. exact node id
   if (opts.node_id) {
     const n = getNode(db, project, opts.node_id);
     return { project, job: meta?.job ?? null, matched: n ? [wrap(n, 'exact node id')] : [] };
   }
-  // 2. lexical scoring over id + statement + note + facets
-  const limit = opts.limit ?? 3;
+
+  // 2. AUTO-INFERENCE: no query/node_id → locate from what you just edited (the per-turn
+  // re-anchor with zero args). Recent edit/write file paths → the node that owns the file.
+  if (!opts.query) {
+    const recents = db.prepare(
+      "SELECT file_path, MAX(occurred_at) AS t FROM session_file_edits WHERE operation IN ('edit','write') GROUP BY file_path ORDER BY t DESC LIMIT 25"
+    ).all() as Array<{ file_path: string }>;
+    const all = db.prepare('SELECT * FROM map_nodes WHERE project = ?').all(project) as NodeRow[];
+    const matched: WhereAmIMatch[] = [];
+    const seen = new Set<string>();
+    for (const r of recents) {
+      const fp = norm(r.file_path);
+      for (const n of all) {
+        if (seen.has(n.id)) continue;
+        if (nodePaths(n).some((p) => fp === p || fp.endsWith('/' + p))) {
+          seen.add(n.id);
+          matched.push(wrap(n, `recently edited ${r.file_path.split(/[\\/]/).pop()}`));
+        }
+      }
+      if (matched.length >= limit) break;
+    }
+    return { project, job: meta?.job ?? null, matched: matched.slice(0, limit) };
+  }
+
+  // 3. lexical scoring over id + statement + note + facets
   const terms = queryTerms(opts.query ?? '');
   const all = db.prepare('SELECT * FROM map_nodes WHERE project = ?').all(project) as NodeRow[];
   const scored = all.map((n) => {

@@ -182,14 +182,14 @@ const TOOLS = [
   {
     name: 'where_am_i',
     description:
-      'Locate the current topic on the Current Truth Map and report "you are here" + blast radius — the per-turn re-anchor.\n\nGiven what you are about to touch (a topic string or a node id), returns:\n• the matching Map node(s) and their journey stage (発見→…→拡張)\n• BLAST RADIUS — what becomes suspect if you change this (the must-stay-consistent-with / realizes / supports dependents). e.g. editing the README implicates the LP.\n• the decision behind the node (linked anchor), if any\n\nThis is how you avoid optimizing one node while silently breaking its neighbors (change the spec → npm/Docs/LP must move too). Matching is lexical (no embeddings).\n\nWHEN TO CALL:\n• Before editing a file or making a change — "where on the Map is this, and what else does it touch?"\n• When the topic of the conversation shifts — re-anchor to the new node\n• When the user asks "what does changing X affect?" / "where does this fit?"',
+      'Locate the current topic on the Current Truth Map and report "you are here" + blast radius — the per-turn re-anchor.\n\nReturns the matching Map node(s) + journey stage (発見→…→拡張), the BLAST RADIUS (what becomes suspect if you change this — the must-stay-consistent-with / should-align-with / realizes dependents; e.g. editing the README implicates the LP), and the decision behind the node (linked anchor), if any.\n\nThree ways to call:\n• NO ARGS → auto-locates from the files you JUST edited this session (the zero-effort re-anchor — call it freely as you work).\n• query: "<topic>" → lexical locate by topic.\n• node_id: "<id>" → exact node.\n\nThis is how you avoid optimizing one node while silently breaking its neighbors (change the spec → npm/Docs/LP must move too). Matching is lexical (no embeddings).\n\nWHEN TO CALL:\n• Right after editing files — call with no args to see what you just touched + its blast radius.\n• When the topic shifts — re-anchor to the new node.\n• When the user asks "what does changing X affect?" / "where does this fit?"',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Topic / what you are about to touch (e.g. "changing the telemetry contract")' },
+        query: { type: 'string', description: 'Topic to locate (e.g. "changing the telemetry contract"). Omit to auto-locate from your recent edits.' },
         node_id: { type: 'string', description: 'Exact Map node id, if known (e.g. "readme") — bypasses lexical match' },
         project: { type: 'string', description: 'Map project slug (defaults to the most recently imported Map)' },
-        limit: { type: 'number', description: 'Max matches for a query (default 3)' },
+        limit: { type: 'number', description: 'Max matches (default 3)' },
       },
     },
   },
