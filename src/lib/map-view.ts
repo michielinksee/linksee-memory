@@ -12,7 +12,21 @@ export interface NodeRow {
   related_project: string | null; spinout_candidate: number; anchor_id: number | null;
   live_verdict?: string | null; verdict_evidence?: string | null;
 }
-export interface EdgeRow { from_id: string; to_id: string; type: string; note: string | null }
+export interface EdgeRow { from_id: string; to_id: string; type: string; strength: string | null; note: string | null }
+
+// Edge strength controls AFFECTS noise: hard = mismatch is a clear problem · soft =
+// should align · watch = informational (shown in AFFECTS, never in Needs attention).
+export type EdgeStrength = 'hard' | 'soft' | 'watch';
+const DEFAULT_STRENGTH: Record<string, EdgeStrength> = {
+  'must-stay-consistent-with': 'hard',
+  realizes: 'hard',
+  'should-align-with': 'soft',
+  supports: 'soft',
+  mentions: 'watch',
+  reflux: 'watch',
+};
+export const edgeStrength = (e: { type: string; strength?: string | null }): EdgeStrength =>
+  (e.strength as EdgeStrength) || DEFAULT_STRENGTH[e.type] || 'soft';
 
 // Verdict color = Reflexion vocabulary (spec v2): convergence / divergence / absence.
 // We can't know the live verdict without running the reconciler, so the dashboard
@@ -66,7 +80,7 @@ export function getSuspects(db: Database.Database, project: string): NodeRow[] {
   return db.prepare("SELECT * FROM map_nodes WHERE project = ? AND status = 'suspect' ORDER BY stage, id").all(project) as NodeRow[];
 }
 
-export interface BlastHit { id: string; statement: string; status: string; via: string; relation: string }
+export interface BlastHit { id: string; statement: string; status: string; via: string; relation: string; strength: EdgeStrength }
 
 // 1-hop blast radius. Propagation rules, by edge type:
 //   must-stay-consistent-with — SYMMETRIC: touch either end, the other is suspect.
@@ -76,27 +90,33 @@ export interface BlastHit { id: string; statement: string; status: string; via: 
 //   reflux                    — informational only (expand→discover feedback), not
 //     a breakage path; excluded from the suspect set.
 export function blastRadius(db: Database.Database, project: string, id: string): BlastHit[] {
-  const edges = db.prepare('SELECT from_id, to_id, type, note FROM map_edges WHERE project = ? AND (from_id = ? OR to_id = ?)')
+  const edges = db.prepare('SELECT from_id, to_id, type, strength, note FROM map_edges WHERE project = ? AND (from_id = ? OR to_id = ?)')
     .all(project, id, id) as EdgeRow[];
   const hits = new Map<string, BlastHit>();
-  const add = (other: string, relation: string) => {
-    if (other === id || hits.has(other)) return;
+  const rank: Record<EdgeStrength, number> = { hard: 0, soft: 1, watch: 2 };
+  const add = (other: string, relation: string, strength: EdgeStrength) => {
+    if (other === id) return;
+    const existing = hits.get(other);
+    if (existing && rank[existing.strength] <= rank[strength]) return; // keep the stronger edge
     const n = getNode(db, project, other);
     if (!n) return;
-    hits.set(other, { id: n.id, statement: n.statement, status: n.status, via: id, relation });
+    hits.set(other, { id: n.id, statement: n.statement, status: n.status, via: id, relation, strength });
   };
   for (const e of edges) {
-    if (e.type === 'reflux') continue;
-    if (e.type === 'must-stay-consistent-with') {
-      add(e.from_id === id ? e.to_id : e.from_id, 'must-stay-consistent-with');
-    } else if (e.type === 'realizes') {
-      if (e.from_id === id) add(e.to_id, 'realizes→ (impl change threatens surface)');
-      else add(e.from_id, '←realizes (surface intent change implicates impl)');
+    if (e.type === 'reflux') continue; // feedback loop, not a dependency path
+    const s = edgeStrength(e);
+    if (e.type === 'must-stay-consistent-with') add(e.from_id === id ? e.to_id : e.from_id, e.type, s);
+    else if (e.type === 'should-align-with') add(e.from_id === id ? e.to_id : e.from_id, e.type, s);
+    else if (e.type === 'mentions') add(e.from_id === id ? e.to_id : e.from_id, e.type, s);
+    else if (e.type === 'realizes') {
+      if (e.from_id === id) add(e.to_id, 'realizes→ (impl change threatens surface)', s);
+      else add(e.from_id, '←realizes (surface intent change implicates impl)', s);
     } else if (e.type === 'supports') {
-      if (e.from_id === id) add(e.to_id, 'supports→ (this underpins it)');
+      if (e.from_id === id) add(e.to_id, 'supports→ (this underpins it)', s);
     }
   }
-  return [...hits.values()];
+  // hard first, then soft, then watch
+  return [...hits.values()].sort((a, b) => rank[a.strength] - rank[b.strength]);
 }
 
 // ── where_am_i: explicit-query positional locate (spec v3) ────────────────────

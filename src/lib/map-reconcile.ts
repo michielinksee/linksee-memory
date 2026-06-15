@@ -17,13 +17,14 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.next', 'coverage', 
 const COMMENT_PREFIXES = ['//', '*', '/*', '#', '<!--', '--'];
 const MAX_FILES = 4000;
 
-type CheckKind = 'signal_present' | 'signal_absent' | 'file_present' | 'file_absent';
+type CheckKind = 'signal_present' | 'signal_absent' | 'regex_present' | 'regex_absent' | 'file_present' | 'file_absent';
 interface Check {
   claim: string;           // human-readable claim this check verifies (shown in `explain`)
   kind: CheckKind;
   dir?: string;            // subtree to scan (code; comments skipped)
   path?: string;           // single file to scan or test for existence (any type; e.g. README.md)
-  signal?: string[];       // terms to look for
+  signal?: string[];       // terms to look for (signal_*)
+  pattern?: string;        // JS regex source (regex_*) — for "string present but meaning differs"
 }
 interface Reality {
   kind?: CheckKind | 'external';   // single-check shorthand (back-compat)
@@ -78,18 +79,31 @@ type Hit = { file: string; line_no: number; line_text: string; hit: string };
 
 // Scan a single file (any type; e.g. README.md) for the first signal match.
 function scanFileForSignal(file: string, signals: string[], skipComments: boolean): Hit | null {
+  return scanFile(file, (line) => signalHit(line, signals, skipComments));
+}
+// Scan a single file for the first regex match (meaning-aware: "where_am_i\s+.*(tool|MCP)").
+function scanFileForRegex(file: string, re: RegExp, skipComments: boolean): Hit | null {
+  return scanFile(file, (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    if (skipComments && COMMENT_PREFIXES.some((p) => trimmed.startsWith(p))) return null;
+    const m = re.exec(trimmed);
+    return m ? m[0].slice(0, 60) : null;
+  });
+}
+function scanFile(file: string, match: (line: string) => string | null): Hit | null {
   let text: string;
   try { text = readFileSync(file, 'utf8'); } catch { return null; }
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
-    const hit = signalHit(lines[i], signals, skipComments);
+    const hit = match(lines[i]);
     if (hit) return { file, line_no: i + 1, line_text: lines[i].trim().slice(0, 200), hit };
   }
   return null;
 }
 
-// Walk a subtree for the first code line matching any signal. Returns evidence or null.
-function scanForSignal(root: string, signals: string[]): Hit | null {
+// Walk a code subtree, applying a per-file matcher (comments skipped). Returns first hit or null.
+function scanDir(root: string, perFile: (file: string) => Hit | null): Hit | null {
   let scanned = 0;
   const stack = [root];
   while (stack.length) {
@@ -103,22 +117,36 @@ function scanForSignal(root: string, signals: string[]): Hit | null {
       if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) stack.push(full); continue; }
       if (!CODE_EXT.has(extname(name))) continue;
       if (++scanned > MAX_FILES) return null;
-      const hit = scanFileForSignal(full, signals, true);
+      const hit = perFile(full);
       if (hit) return hit;
     }
   }
   return null;
 }
+const scanForSignal = (root: string, signals: string[]) => scanDir(root, (f) => scanFileForSignal(f, signals, true));
+const scanForRegex = (root: string, re: RegExp) => scanDir(root, (f) => scanFileForRegex(f, re, true));
 
 // Run ONE check → ✓/✗ with evidence. path-targeted scans don't skip comments (docs).
 function runCheck(check: Check, repoRoot: string): CheckResult {
-  const signals = (check.signal ?? []).filter(Boolean);
   if (check.kind === 'file_present' || check.kind === 'file_absent') {
     const present = check.path ? existsSync(join(repoRoot, check.path)) : false;
     const ok = check.kind === 'file_present' ? present : !present;
     return { claim: check.claim, ok, file: check.path ?? null, line: null, detail: present ? 'file present' : 'file absent' };
   }
+  // regex check — meaning-aware ("where_am_i\s+.*(tool|MCP)"), beats a bare substring
+  if (check.kind === 'regex_present' || check.kind === 'regex_absent') {
+    let re: RegExp;
+    try { re = new RegExp(check.pattern ?? '', 'i'); } catch { return { claim: check.claim, ok: false, file: null, line: null, detail: `bad regex: ${check.pattern}` }; }
+    const hit = check.path ? scanFileForRegex(join(repoRoot, check.path), re, false) : scanForRegex(join(repoRoot, check.dir ?? '.'), re);
+    const found = hit != null;
+    const ok = check.kind === 'regex_present' ? found : !found;
+    return {
+      claim: check.claim, ok, file: hit ? hit.file : (check.path ?? check.dir ?? null), line: hit ? hit.line_no : null,
+      detail: found ? `matched /${check.pattern}/` : `/${check.pattern}/ not matched`,
+    };
+  }
   // signal scan: a single path (doc, no comment-skip) or a code subtree (comment-skip)
+  const signals = (check.signal ?? []).filter(Boolean);
   const hit = check.path
     ? scanFileForSignal(join(repoRoot, check.path), signals, false)
     : scanForSignal(join(repoRoot, check.dir ?? '.'), signals);

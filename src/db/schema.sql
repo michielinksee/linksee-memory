@@ -382,6 +382,8 @@ CREATE TABLE IF NOT EXISTS map_nodes (
   related_project TEXT,
   spinout_candidate INTEGER NOT NULL DEFAULT 0,
   anchor_id       INTEGER REFERENCES drift_anchors(id) ON DELETE SET NULL,  -- link IFF normative
+  review_by       TEXT,                              -- ISO date: when an accounted-for/deferred node must be revisited
+  revival_condition TEXT,                            -- the release condition that clears a deferral (anti-graveyard)
   reality         TEXT NOT NULL DEFAULT '{}',        -- JSON: how to verify this node from reality (kind/dir/signal)
   live_verdict    TEXT,                              -- reconciler overlay: convergence|divergence|absence|NULL(unchecked)
   verdict_evidence TEXT NOT NULL DEFAULT '{}',       -- JSON: file/line/term that decided the verdict
@@ -403,7 +405,8 @@ CREATE TABLE IF NOT EXISTS map_edges (
   project   TEXT NOT NULL,
   from_id   TEXT NOT NULL,
   to_id     TEXT NOT NULL,
-  type      TEXT NOT NULL,                           -- realizes|supports|must-stay-consistent-with|reflux
+  type      TEXT NOT NULL,                           -- realizes|supports|must-stay-consistent-with|should-align-with|mentions|reflux
+  strength  TEXT,                                    -- hard|soft|watch (controls AFFECTS noise); NULL → derived from type
   note      TEXT,
   UNIQUE(from_id, to_id, type)
 );
@@ -433,6 +436,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '12');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '13');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '12' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11');
+UPDATE meta SET value = '13' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12');

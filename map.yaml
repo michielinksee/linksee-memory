@@ -76,6 +76,7 @@ nodes:
     statement: Smithery掲載(品質74/100) — .mcpb手動配信。バージョン更新は manifest+VERSION書換→pack→API PUT が必要
     status: suspect
     note: 自動同期されない唯一の登録面=npmと乖離しやすい。空ワークスペース3つの削除=Michie作業残
+    review_by: 2026-06-30    # ローンチ週に再確認（期限を切る）
     reality:
       kind: external           # ネット越し。ローカル不可
       expected: Smithery掲載のバージョンが npm latest と一致している
@@ -120,6 +121,7 @@ nodes:
     stage: understand
     statement: README=事実上の主LP — Three spells/Quick Start/10 Tools/Pricing/Telemetry契約
     status: active
+    revival_condition: where_am_i を npm publish したら README の tools 一覧を11に更新して解消（accounted-for）
     reality:
       why: READMEは「10 tools」のまま。コードは where_am_i 追加で11ツール登録、READMEに記載なし。
       fix:
@@ -135,6 +137,7 @@ nodes:
     statement: linksee-site.vercel.app — Driftセクション(PR#3)・3呪文・Pro節「ローカル永久無料」明示
     status: suspect
     note: PR#3マージ待ち — マージまでREADMEとLPの正準コピーが一時不整合
+    revival_condition: PR#3 がマージされたら解消
     reality:
       kind: external           # 別repo(linksee-site)+PR状態=ローカル不可
       expected: PR#3 がマージされ LP の正準コピー(問う/3呪文/Pro線引き)が README と一致
@@ -241,6 +244,8 @@ nodes:
     statement: CLI拡張構想(CI/pre-commitドリフトゲート、transcript一括import、claude-mem型スタンドアロン)
     status: paused          # (Q5) 消さず明示。active化すると「今やる」に見えるので保留で固定
     paused_reason: awaiting_owner_decision   # or: post-P1
+    review_by: 2026-07-01   # 墓場化防止: この日に再検討（期限なしの放置を禁止）
+    revival_condition: P1マージ後にCLIスコープを再判断
     facets: [product]
 
   - id: telemetry-contract
@@ -249,11 +254,11 @@ nodes:
     statement: Telemetry=opt-in・off by default・Level 1契約をREADMEに明記
     status: suspect
     note: 手書きでは「文書が実装に先行＝未実装」と疑った。reconcilerが現実から検証する対象。
-    reality:                       # 現実から検証: 契約はコードで実体化されているか
-      why: 手書きで「未実装」と疑ったが、現実のコードに telemetry 実装あり（要確認を反証）。
-      kind: signal_present
-      dir: src
-      signal: [sendTelemetry, buildPayload]
+    reality:                       # 「存在」と「配線済み」は別物 → 2チェックに分解
+      why: 手書きで「未実装」と疑ったが、現実は実装あり＋sync-sessionに配線済み（要確認を反証）。
+      checks:
+        - { claim: 'telemetry送信が実装されている', kind: signal_present, dir: src, signal: [buildPayload] }
+        - { claim: 'telemetryがsync-sessionで実際に呼ばれている(配線)', kind: regex_present, path: src/bin/sync-session.ts, pattern: 'sendTelemetry\s*\(' }
     facets: [product, trust]
 
   # ── 課金 monetize ──────────────────────────────────────────────
@@ -393,12 +398,13 @@ edges:
   - { from: map-wizard,        to: npx-onboarding, type: supports }   # ahaモーメント強化
 
   # 面 → 面 (msc: 片方を変えたらもう片方も触らないとズレる)
-  - { from: readme,         to: lp,             type: must-stay-consistent-with }  # 正準コピー(問う/3呪文/Pro線引き)
-  - { from: readme,         to: docs-site,      type: must-stay-consistent-with }
-  - { from: readme,         to: skill-spells,   type: must-stay-consistent-with }  # 3呪文の統一表記
-  - { from: npx-onboarding, to: readme,         type: must-stay-consistent-with }  # installスニペット
-  - { from: client-configs, to: readme,         type: must-stay-consistent-with }
-  - { from: telemetry-contract, to: readme,     type: must-stay-consistent-with }  # 契約と実装の同期
+  # 強度: must-stay-consistent-with=hard(不一致=明確に問題) / should-align-with=soft / mentions=watch(参考)
+  - { from: readme,         to: lp,             type: must-stay-consistent-with }  # 正準コピー=必ず一致
+  - { from: readme,         to: docs-site,      type: must-stay-consistent-with }  # docsはREADMEの鏡=必ず一致
+  - { from: readme,         to: skill-spells,   type: should-align-with }          # 3呪文表記=揃えたい
+  - { from: npx-onboarding, to: readme,         type: should-align-with }          # installスニペット=揃えたい
+  - { from: client-configs, to: readme,         type: should-align-with }          # クライアント設定=揃えたい
+  - { from: telemetry-contract, to: readme,     type: mentions }                   # READMEで言及=参考
   - { from: pro-offer,      to: lp,             type: must-stay-consistent-with }  # Pro節・無料線引き
   - { from: registries-auto, to: npm-listing,   type: must-stay-consistent-with }  # npm自動同期
   - { from: smithery,       to: npm-listing,    type: must-stay-consistent-with }  # ★手動同期=乖離しやすい(Q3)

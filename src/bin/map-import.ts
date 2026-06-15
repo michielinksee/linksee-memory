@@ -63,6 +63,24 @@ const truncate = (s: string, n: number) => (s && s.length > n ? s.slice(0, n) + 
 const shortPath = (p: string | null) => (p ? p.split(/[\\/]/).slice(-2).join('/') : '');
 // External = verified outside the repo (network/human); not fixable in code right now.
 const isExternal = (n: any) => parseJson(n.reality, {}).kind === 'external';
+const TODAY = new Date().toISOString().slice(0, 10);
+// Accounted-for = parked with a reason (paused / external / has a revival plan).
+const isAccountedFor = (n: any) => n.status === 'paused' || isExternal(n) || !!n.revival_condition || !!n.review_by;
+const isOverdue = (n: any) => !!n.review_by && n.review_by < TODAY;          // promised by a date, now past it
+const noExpiry = (n: any) => isAccountedFor(n) && !n.review_by && !n.revival_condition; // graveyard risk
+const facetsOf = (n: any): string[] => parseJson(n.facets, []);
+// AFFECTS grouped by edge strength so a big blast radius isn't flat noise.
+function printAffects(id: string, indent = '  ') {
+  const blast = blastRadius(db, map.project, id);
+  if (!blast.length) { console.log(`${indent}(none)`); return; }
+  const groups: Array<[string, string]> = [['hard', '必ず一緒に直す'], ['soft', 'できれば揃える'], ['watch', '参考（連鎖の可能性）']];
+  for (const [s, label] of groups) {
+    const hits = blast.filter((b) => b.strength === s);
+    if (!hits.length) continue;
+    console.log(`${indent}${label} (${s}):`);
+    for (const b of hits) console.log(`${indent}  ${b.id}  (${b.relation})`);
+  }
+}
 const STATUS_JP: Record<string, string> = {
   active: '健全（稼働中）', commitment: '約束（締切あり）', suspect: '要確認（ズレの疑い）',
   planned: '計画', paused: '保留', future_thesis: '将来構想', experiment: '実験中',
@@ -166,6 +184,18 @@ if (sub === 'import') {
     });
   }
 
+  // accounted-for can't become a drift graveyard: overdue deferrals re-escalate, missing expiries are flagged.
+  const overdue = nodes.filter(isOverdue);
+  if (overdue.length) {
+    console.log(`\n⏰ Overdue deferrals (promised by a date, now past ${TODAY}):`);
+    for (const n of overdue) console.log(`    ${n.id}  review_by ${n.review_by}${n.revival_condition ? ' — ' + n.revival_condition : ''}`);
+  }
+  const graveyard = nodes.filter(noExpiry);
+  if (graveyard.length) {
+    console.log(`\n⚠ Deferrals with no expiry/condition (graveyard risk): ${graveyard.map((n: any) => n.id).join(', ')}`);
+    console.log('    → add review_by: <date> or revival_condition: <text> in map.yaml');
+  }
+
   console.log(`\nVerified by reality: ${verified.length}`);
   for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? 'refuted suspect → convergence' : 'verified'}`);
   console.log(`\nNo action: ${nodes.length - attention.length - verified.length}`);
@@ -179,7 +209,8 @@ if (sub === 'import') {
   const stageLabel = node.stage ? (meta?.stages.find((s: any) => s.id === node.stage)?.label ?? node.stage) : null;
   const v = node.live_verdict as string | null;
   const isExt = parseJson(node.reality, {}).kind === 'external';
-  console.log(`${node.id}${stageLabel ? `   [${stageLabel}]` : ''}`);
+  const facets = facetsOf(node);
+  console.log(`${node.id}${stageLabel ? `   [${stageLabel}]` : ''}${facets.length ? `   {${facets.join(', ')}}` : ''}`);
   console.log(node.statement);
   // declared state and reality verdict are DIFFERENT things — show them separately.
   console.log('\nSTATUS');
@@ -207,16 +238,20 @@ if (sub === 'import') {
     console.log('  自動チェック未設定（宣言ベース）');
   }
   if (ev.fix && ev.fix.length) { console.log('\nFIX'); ev.fix.forEach((f: string, i: number) => console.log(`  ${i + 1}. ${f}`)); }
-  const blast = blastRadius(db, map.project, id);
-  console.log(`\nAFFECTS${blast.length ? '' : '  (none)'}`);
-  for (const b of blast) console.log(`  ${b.id}  (${b.relation})`);
+  if (node.review_by || node.revival_condition) {
+    console.log('\nDEFERRED UNTIL');
+    if (node.review_by) console.log(`  review_by: ${node.review_by}${isOverdue(node) ? '  ⏰ OVERDUE' : ''}`);
+    if (node.revival_condition) console.log(`  condition: ${node.revival_condition}`);
+  }
+  console.log('\nAFFECTS（変えたら一緒に直す先・強度順）');
+  printAffects(id);
   console.log(`\nNEXT\n  linksee-memory-map reconcile          # re-check after a fix\n  linksee-memory-map affects ${id}`);
 } else if (sub === 'affects') {
   const id = argv[1];
   if (!id) { console.error('usage: linksee-memory-map affects <node>'); process.exit(1); }
   const blast = blastRadius(db, map.project, id);
-  console.log(`${id} を変えたら一緒に直す先 (${blast.length}):`);
-  for (const b of blast) console.log(`  • ${b.id} [${b.status}] — ${b.relation}\n    ${b.statement}`);
+  console.log(`${id} を変えたら一緒に直す先 (${blast.length}) — 強度順:`);
+  printAffects(id);
 } else if (sub === 'next') {
   // local-first: what you can fix in code now, then what to verify externally.
   const attention = allNodes().filter(needsAttention);

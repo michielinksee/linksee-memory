@@ -144,6 +144,19 @@ export function runMigrations(db: Database.Database): void {
     }
   }
 
+  // v12 → v13: edge strength + accounted-for expiry (anti-noise / anti-graveyard).
+  if (currentVersion > 0 && currentVersion < 13) {
+    const has = (table: string, col: string) =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_edges'").get()) {
+      if (!has('map_edges', 'strength')) db.exec('ALTER TABLE map_edges ADD COLUMN strength TEXT');
+    }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_nodes'").get()) {
+      if (!has('map_nodes', 'review_by')) db.exec('ALTER TABLE map_nodes ADD COLUMN review_by TEXT');
+      if (!has('map_nodes', 'revival_condition')) db.exec('ALTER TABLE map_nodes ADD COLUMN revival_condition TEXT');
+    }
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {

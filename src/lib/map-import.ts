@@ -8,7 +8,8 @@ import type Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 
-export const EDGE_TYPES = new Set(['realizes', 'supports', 'must-stay-consistent-with', 'reflux']);
+export const EDGE_TYPES = new Set(['realizes', 'supports', 'must-stay-consistent-with', 'should-align-with', 'mentions', 'reflux']);
+export const EDGE_STRENGTHS = new Set(['hard', 'soft', 'watch']);
 export const NODE_LAYERS = new Set(['surface', 'implementation']);
 // Recognized statuses — anything else imports but is flagged as a warning (so a
 // typo can't silently become a phantom lifecycle the dashboard renders blank).
@@ -30,10 +31,12 @@ export interface MapNode {
   related_project?: string;
   spinout_candidate?: boolean;
   anchor?: number; // → drift_anchors.id, IFF this node is a normative claim
+  review_by?: string;          // ISO date: when a deferred/accounted-for node must be revisited
+  revival_condition?: string;  // the release condition that clears a deferral
   reality?: Record<string, unknown>; // how to verify this node from reality (kind/dir/signal/verdict_if_*)
   [k: string]: unknown; // forward-compat fields land in `extra`
 }
-export interface MapEdge { from: string; to: string; type: string; note?: string }
+export interface MapEdge { from: string; to: string; type: string; strength?: string; note?: string }
 export interface ParsedMap {
   project: string;
   template?: string;
@@ -49,6 +52,7 @@ export interface ParsedMap {
 const KNOWN_NODE_COLS = new Set([
   'id', 'layer', 'stage', 'statement', 'status', 'facets', 'role', 'note',
   'due', 'paused_reason', 'related_project', 'spinout_candidate', 'anchor', 'reality',
+  'review_by', 'revival_condition',
 ]);
 
 export function parseMapFile(path: string): ParsedMap {
@@ -97,6 +101,7 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
   // validate edges
   for (const e of map.edges) {
     if (!EDGE_TYPES.has(e.type)) warnings.push(`edge ${e.from}→${e.to}: unknown type "${e.type}"`);
+    if (e.strength && !EDGE_STRENGTHS.has(e.strength)) warnings.push(`edge ${e.from}→${e.to}: unknown strength "${e.strength}"`);
     if (!nodeIds.has(e.from)) warnings.push(`edge endpoint "${e.from}" is not a node (dangling)`);
     if (!nodeIds.has(e.to)) warnings.push(`edge endpoint "${e.to}" is not a node (dangling)`);
   }
@@ -128,10 +133,10 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
     const insNode = db.prepare(`
       INSERT INTO map_nodes
         (id, project, layer, stage, statement, status, facets, role, note, due,
-         paused_reason, related_project, spinout_candidate, anchor_id, reality, extra, updated_at)
+         paused_reason, related_project, spinout_candidate, anchor_id, review_by, revival_condition, reality, extra, updated_at)
       VALUES
         (@id, @project, @layer, @stage, @statement, @status, @facets, @role, @note, @due,
-         @paused_reason, @related_project, @spinout_candidate, @anchor_id, @reality, @extra, unixepoch())
+         @paused_reason, @related_project, @spinout_candidate, @anchor_id, @review_by, @revival_condition, @reality, @extra, unixepoch())
     `);
     for (const n of map.nodes) {
       if (!n.id) continue;
@@ -157,16 +162,18 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
         related_project: n.related_project ?? null,
         spinout_candidate: n.spinout_candidate ? 1 : 0,
         anchor_id: anchorId,
+        review_by: n.review_by ?? null,
+        revival_condition: n.revival_condition ?? null,
         reality: JSON.stringify(n.reality ?? {}),
         extra: JSON.stringify(extra),
       });
     }
 
     const insEdge = db.prepare(`
-      INSERT OR IGNORE INTO map_edges (project, from_id, to_id, type, note)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO map_edges (project, from_id, to_id, type, strength, note)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
-    for (const e of map.edges) insEdge.run(map.project, e.from, e.to, e.type, e.note ?? null);
+    for (const e of map.edges) insEdge.run(map.project, e.from, e.to, e.type, e.strength ?? null, e.note ?? null);
   });
   tx();
 
