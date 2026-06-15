@@ -17,17 +17,32 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.next', 'coverage', 
 const COMMENT_PREFIXES = ['//', '*', '/*', '#', '<!--', '--'];
 const MAX_FILES = 4000;
 
-interface Reality {
-  kind?: 'signal_present' | 'signal_absent' | 'file_present' | 'file_absent' | 'external';
-  dir?: string;            // subtree to scan (relative to repoRoot)
-  path?: string;           // file for file_present/absent
-  signal?: string[];       // terms to look for (code lines; comments skipped)
+type CheckKind = 'signal_present' | 'signal_absent' | 'file_present' | 'file_absent';
+interface Check {
+  claim: string;           // human-readable claim this check verifies (shown in `explain`)
+  kind: CheckKind;
+  dir?: string;            // subtree to scan (code; comments skipped)
+  path?: string;           // single file to scan or test for existence (any type; e.g. README.md)
+  signal?: string[];       // terms to look for
 }
+interface Reality {
+  kind?: CheckKind | 'external';   // single-check shorthand (back-compat)
+  dir?: string;
+  path?: string;
+  signal?: string[];
+  checks?: Check[];        // NEW: multiple named claims, each → ✓/✗ with evidence
+  why?: string;            // authored one-line WHY (else derived from failing checks)
+  fix?: string[];          // authored FIX options
+}
+export interface CheckResult { claim: string; ok: boolean; file: string | null; line: number | null; detail: string }
 export interface NodeVerdict {
   id: string;
   status: string;          // declared status
   verdict: Verdict | null; // null = not locally checkable (external / no reality)
   reason: string;
+  why: string | null;      // one-line WHY (authored or derived from failing checks)
+  fix: string[];           // FIX options
+  checks: CheckResult[];   // per-claim ✓/✗ breakdown (for `explain`)
   evidence: Record<string, unknown>;
   flipped: boolean;        // declared suspect but reality disagrees (or vice-versa)
 }
@@ -40,10 +55,12 @@ export interface ReconcileResult {
   confirmed: NodeVerdict[]; // hand-declared suspect → reality agrees (divergence/absence)
 }
 
-function signalHit(line: string, signals: string[]): string | null {
+function signalHit(line: string, signals: string[], skipComments: boolean): string | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
-  if (COMMENT_PREFIXES.some((p) => trimmed.startsWith(p))) return null; // prose/comments describe, don't realize
+  // For CODE scans, a comment MENTIONS a term but doesn't realize it — skip. For DOC
+  // scans (README etc.) the content IS in those lines, so don't skip.
+  if (skipComments && COMMENT_PREFIXES.some((p) => trimmed.startsWith(p))) return null;
   const lower = trimmed.toLowerCase();
   for (const s of signals) {
     const sl = s.toLowerCase();
@@ -55,8 +72,22 @@ function signalHit(line: string, signals: string[]): string | null {
   return null;
 }
 
+type Hit = { file: string; line_no: number; line_text: string; hit: string };
+
+// Scan a single file (any type; e.g. README.md) for the first signal match.
+function scanFileForSignal(file: string, signals: string[], skipComments: boolean): Hit | null {
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch { return null; }
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const hit = signalHit(lines[i], signals, skipComments);
+    if (hit) return { file, line_no: i + 1, line_text: lines[i].trim().slice(0, 200), hit };
+  }
+  return null;
+}
+
 // Walk a subtree for the first code line matching any signal. Returns evidence or null.
-function scanForSignal(root: string, signals: string[]): { file: string; line_no: number; line_text: string; hit: string } | null {
+function scanForSignal(root: string, signals: string[]): Hit | null {
   let scanned = 0;
   const stack = [root];
   while (stack.length) {
@@ -70,47 +101,60 @@ function scanForSignal(root: string, signals: string[]): { file: string; line_no
       if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) stack.push(full); continue; }
       if (!CODE_EXT.has(extname(name))) continue;
       if (++scanned > MAX_FILES) return null;
-      let text: string;
-      try { text = readFileSync(full, 'utf8'); } catch { continue; }
-      const lines = text.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const hit = signalHit(lines[i], signals);
-        if (hit) return { file: full, line_no: i + 1, line_text: lines[i].trim().slice(0, 200), hit };
-      }
+      const hit = scanFileForSignal(full, signals, true);
+      if (hit) return hit;
     }
   }
   return null;
 }
 
-function evaluate(reality: Reality, repoRoot: string): { verdict: Verdict | null; reason: string; evidence: Record<string, unknown> } {
-  const kind = reality.kind;
-  if (!kind || kind === 'external') {
-    return { verdict: null, reason: 'external — not locally verifiable; stays human-confirmed', evidence: {} };
+// Run ONE check → ✓/✗ with evidence. path-targeted scans don't skip comments (docs).
+function runCheck(check: Check, repoRoot: string): CheckResult {
+  const signals = (check.signal ?? []).filter(Boolean);
+  if (check.kind === 'file_present' || check.kind === 'file_absent') {
+    const present = check.path ? existsSync(join(repoRoot, check.path)) : false;
+    const ok = check.kind === 'file_present' ? present : !present;
+    return { claim: check.claim, ok, file: check.path ?? null, line: null, detail: present ? 'file present' : 'file absent' };
   }
-  if (kind === 'file_present' || kind === 'file_absent') {
-    const p = reality.path ? join(repoRoot, reality.path) : null;
-    const present = p ? existsSync(p) : false;
-    if (kind === 'file_present') return present
-      ? { verdict: 'convergence', reason: `file present: ${reality.path}`, evidence: { path: reality.path } }
-      : { verdict: 'absence', reason: `file absent: ${reality.path}`, evidence: { path: reality.path } };
-    return present
-      ? { verdict: 'divergence', reason: `file present but expected absent: ${reality.path}`, evidence: { path: reality.path } }
-      : { verdict: 'convergence', reason: `file absent as expected: ${reality.path}`, evidence: { path: reality.path } };
+  // signal scan: a single path (doc, no comment-skip) or a code subtree (comment-skip)
+  const hit = check.path
+    ? scanFileForSignal(join(repoRoot, check.path), signals, false)
+    : scanForSignal(join(repoRoot, check.dir ?? '.'), signals);
+  const found = hit != null;
+  const ok = check.kind === 'signal_present' ? found : !found;
+  return {
+    claim: check.claim, ok,
+    file: hit ? hit.file : (check.path ?? check.dir ?? null), line: hit ? hit.line_no : null,
+    detail: found ? `found "${hit!.hit}"` : `"${signals.join(', ')}" not found`,
+  };
+}
+
+interface EvalResult { verdict: Verdict | null; reason: string; why: string | null; fix: string[]; checks: CheckResult[] }
+
+function evaluate(reality: Reality, repoRoot: string): EvalResult {
+  if (!reality.kind && !reality.checks) {
+    return { verdict: null, reason: 'no reality declaration — stays human-declared', why: null, fix: [], checks: [] };
   }
-  // signal_present / signal_absent
-  const signals = (reality.signal ?? []).filter(Boolean);
-  if (signals.length === 0) return { verdict: null, reason: 'reality.signal empty — cannot check', evidence: {} };
-  const dir = join(repoRoot, reality.dir ?? '.');
-  const hit = scanForSignal(dir, signals);
-  if (kind === 'signal_present') {
-    return hit
-      ? { verdict: 'convergence', reason: `code signal found: ${hit.hit}`, evidence: hit }
-      : { verdict: 'divergence', reason: `code signal NOT found (declared/contract but unimplemented): ${signals.join(', ')}`, evidence: { searched: reality.dir ?? '.', signals } };
+  if (reality.kind === 'external') {
+    return { verdict: null, reason: 'external state — not locally verifiable; human-confirmed', why: reality.why ?? null, fix: reality.fix ?? [], checks: [] };
   }
-  // signal_absent (prohibition style)
-  return hit
-    ? { verdict: 'divergence', reason: `forbidden signal present: ${hit.hit}`, evidence: hit }
-    : { verdict: 'convergence', reason: `forbidden signal absent as expected: ${signals.join(', ')}`, evidence: { searched: reality.dir ?? '.', signals } };
+  // Multiple named checks, or one check from the single-kind shorthand (back-compat).
+  const checks: Check[] = reality.checks ?? [{
+    claim: reality.kind === 'signal_present' ? `code implements: ${(reality.signal ?? []).join(', ')}`
+      : reality.kind === 'signal_absent' ? `forbidden absent: ${(reality.signal ?? []).join(', ')}`
+      : reality.kind === 'file_present' ? `file present: ${reality.path}`
+      : `file absent: ${reality.path}`,
+    kind: reality.kind as CheckKind, dir: reality.dir, path: reality.path, signal: reality.signal,
+  }];
+
+  const results = checks.map((c) => runCheck(c, repoRoot));
+  const failed = results.filter((r) => !r.ok);
+  const verdict: Verdict = failed.length === 0 ? 'convergence' : 'divergence';
+  const why = reality.why ?? (failed.length === 0
+    ? 'all checks pass — reality matches the declaration'
+    : `${failed.length} check(s) fail: ${failed.map((f) => f.claim).join('; ')}`);
+  const reason = failed.length === 0 ? `verified: ${results.length} check(s) pass` : `${failed.length}/${results.length} checks failed`;
+  return { verdict, reason, why, fix: reality.fix ?? [], checks: results };
 }
 
 export function reconcile(db: Database.Database, project: string, repoRoot: string): ReconcileResult {
@@ -124,15 +168,20 @@ export function reconcile(db: Database.Database, project: string, repoRoot: stri
     for (const r of rows) {
       let reality: Reality = {};
       try { reality = JSON.parse(r.reality || '{}'); } catch { /* malformed → treat as none */ }
-      const { verdict, reason, evidence } = evaluate(reality, repoRoot);
-      if (verdict === null) { external++; upd.run(null, JSON.stringify({ reason }), project, r.id); }
-      else { checked++; upd.run(verdict, JSON.stringify({ reason, ...evidence }), project, r.id); }
+      const { verdict, reason, why, fix, checks } = evaluate(reality, repoRoot);
+      const firstShown = checks.find((c) => !c.ok) ?? checks[0];
+      const evidence: Record<string, unknown> = {
+        reason, why, fix, checks,
+        file: firstShown?.file ?? null, line_no: firstShown?.line ?? null, // compact convenience for the dashboard
+      };
+      if (verdict === null) { external++; upd.run(null, JSON.stringify(evidence), project, r.id); }
+      else { checked++; upd.run(verdict, JSON.stringify(evidence), project, r.id); }
 
       // "flipped" = hand-declared suspect that reality contradicts (suspect→convergence),
       // or a non-suspect that reality flags (→divergence).
       const flipped = (r.status === 'suspect' && verdict === 'convergence')
         || (r.status !== 'suspect' && verdict === 'divergence');
-      verdicts.push({ id: r.id, status: r.status, verdict, reason, evidence, flipped });
+      verdicts.push({ id: r.id, status: r.status, verdict, reason, why, fix, checks, evidence, flipped });
     }
   });
   tx();

@@ -3,17 +3,20 @@
 // and answer topology questions. map.yaml is the desired-state source of truth (anchor
 // #58); this reconciles it into map_nodes/map_edges (full rebuild per project).
 //
-// Usage:
-//   linksee-memory-map                       # import ./map.yaml, print summary + suspects
-//   linksee-memory-map --file path/to/map.yaml
-//   linksee-memory-map blast <node-id>       # show 1-hop blast radius for a node
-//   linksee-memory-map blueprint             # print the stage×node blueprint (dashboard data)
-//   linksee-memory-map suspects              # list suspect nodes + their blast radius
+// Usage (CLI-first triage, not a list):
+//   linksee-memory-map status                # health % + what needs attention now (the triage)
+//   linksee-memory-map explain <node>        # WHY this status + ✓/✗ evidence + FIX + AFFECTS (the hero)
+//   linksee-memory-map affects <node>        # what to change together if you touch this node
+//   linksee-memory-map next                  # the prioritized next fix candidate(s)
+//   linksee-memory-map reconcile             # check the hand-written Map against real code/files
+//   linksee-memory-map inspect --json        # machine-readable dump (CI / tooling)
+//   linksee-memory-map blueprint             # stage×node board (dashboard data)
+//   linksee-memory-map [--file map.yaml] [--root <repo>]
 
 import { join } from 'node:path';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { parseMapFile, importMap } from '../lib/map-import.js';
-import { blastRadius, getSuspects, getBlueprint } from '../lib/map-view.js';
+import { blastRadius, getSuspects, getBlueprint, getNode, getProjectMeta } from '../lib/map-view.js';
 import { reconcile } from '../lib/map-reconcile.js';
 
 function flagValue(argv: string[], name: string, dflt: string): string {
@@ -33,6 +36,31 @@ const map = parseMapFile(mapPath);
 const res = importMap(db, map);
 
 const COLOR_DOT: Record<string, string> = { green: '🟢', red: '🔴', gray: '⚪', amber: '🟡', blue: '🔵' };
+const repoRoot = flagValue(argv, 'root', process.cwd());
+
+// Triage/diagnosis commands reflect REALITY, so reconcile first (scans repoRoot).
+const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect']);
+if (DIAG_SUBS.has(sub)) reconcile(db, map.project, repoRoot);
+
+interface VerdictEvidence { reason?: string; why?: string; fix?: string[]; checks?: Array<{ claim: string; ok: boolean; file: string | null; line: number | null; detail: string }> }
+function diagOf(id: string): { node: any; ev: VerdictEvidence } | null {
+  const node = getNode(db, map.project, id);
+  if (!node) return null;
+  let ev: VerdictEvidence = {};
+  try { ev = JSON.parse((node as any).verdict_evidence || '{}'); } catch { /* none */ }
+  return { node, ev };
+}
+// A node "needs attention" if reality flags it (divergence/absence) or it's a hand-declared
+// suspect reality hasn't cleared. A suspect REFUTED by reality (→convergence) does NOT.
+function needsAttention(n: any): boolean {
+  if (n.live_verdict === 'divergence' || n.live_verdict === 'absence') return true;
+  if (n.status === 'suspect' && n.live_verdict !== 'convergence') return true;
+  return false;
+}
+const allNodes = () => db.prepare('SELECT * FROM map_nodes WHERE project = ?').all(map.project) as any[];
+const parseJson = (s: string, dflt: any) => { try { return JSON.parse(s || ''); } catch { return dflt; } };
+const truncate = (s: string, n: number) => (s && s.length > n ? s.slice(0, n) + '…' : s ?? '');
+const shortPath = (p: string | null) => (p ? p.split(/[\\/]/).slice(-2).join('/') : '');
 
 function printSuspectsWithBlast() {
   const suspects = getSuspects(db, map.project);
@@ -96,6 +124,87 @@ if (sub === 'import') {
   }
   console.log('\n▌implementation');
   for (const n of bp.implementation) console.log(`   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}`);
+} else if (sub === 'status') {
+  // Triage, not a list — health + what needs attention now.
+  const nodes = allNodes();
+  const attention = nodes.filter(needsAttention);
+  const verified = nodes.filter((n) => n.live_verdict === 'convergence');
+  const health = nodes.length ? Math.round(100 * (nodes.length - attention.length) / nodes.length) : 100;
+  console.log(`Product: ${map.project}`);
+  console.log(`Health:  ${health}%`);
+  console.log(`\nNeeds attention: ${attention.length}`);
+  attention.forEach((n, i) => {
+    const ev = parseJson(n.verdict_evidence, {});
+    const failed = (ev.checks ?? []).find((c: any) => !c.ok);
+    const evidence = failed ? `${shortPath(failed.file)}${failed.line ? ':' + failed.line : ''} (${failed.detail})`
+      : parseJson(n.reality, {}).kind === 'external' ? 'external check required' : '—';
+    console.log(`  ${i + 1}. ${n.id}  ${n.live_verdict ?? n.status}`);
+    console.log(`     ${truncate(ev.why || n.note || n.statement, 92)}`);
+    console.log(`     evidence: ${evidence}`);
+    console.log(`     next: linksee-memory-map explain ${n.id}`);
+  });
+  console.log(`\nVerified by reality: ${verified.length}`);
+  for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? 'refuted suspect → convergence' : 'verified'}`);
+  console.log(`\nNo action: ${nodes.length - attention.length - verified.length}`);
+} else if (sub === 'explain') {
+  const id = argv[1];
+  if (!id) { console.error('usage: linksee-memory-map explain <node>'); process.exit(1); }
+  const d = diagOf(id);
+  if (!d) { console.error(`node not found: ${id}`); process.exit(1); }
+  const { node, ev } = d;
+  const meta = getProjectMeta(db, map.project);
+  const stageLabel = node.stage ? (meta?.stages.find((s: any) => s.id === node.stage)?.label ?? node.stage) : null;
+  const v = node.live_verdict as string | null;
+  const verdictJP = v === 'convergence' ? '一致 — 現実が実装を確認' : v === 'divergence' ? 'ズレ — 現実が宣言と食い違う' : v === 'absence' ? '未実現' : null;
+  console.log(`${node.id}${stageLabel ? `   [${stageLabel}]` : ''}`);
+  console.log(node.statement);
+  console.log(`\nSTATUS\n  ${node.status}${verdictJP ? `  →  ${verdictJP}` : ''}`);
+  console.log(`\nWHY\n  ${ev.why || node.note || '宣言ベース（現実の自動チェックは未設定）'}`);
+  console.log('\nEVIDENCE');
+  if (ev.checks && ev.checks.length) {
+    for (const c of ev.checks) console.log(`  ${c.ok ? '✓' : '✗'} ${c.claim}\n      ${shortPath(c.file)}${c.line ? ':' + c.line : ''} — ${c.detail}`);
+  } else {
+    console.log(`  ${parseJson(node.reality, {}).kind === 'external' ? '外部状態のため自動確認なし（人が確認）' : '自動チェック未設定（宣言ベース）'}`);
+  }
+  if (ev.fix && ev.fix.length) { console.log('\nFIX'); ev.fix.forEach((f: string, i: number) => console.log(`  ${i + 1}. ${f}`)); }
+  const blast = blastRadius(db, map.project, id);
+  console.log(`\nAFFECTS${blast.length ? '' : '  (none)'}`);
+  for (const b of blast) console.log(`  ${b.id}  (${b.relation})`);
+  console.log(`\nNEXT\n  linksee-memory-map reconcile          # re-check after a fix\n  linksee-memory-map affects ${id}`);
+} else if (sub === 'affects') {
+  const id = argv[1];
+  if (!id) { console.error('usage: linksee-memory-map affects <node>'); process.exit(1); }
+  const blast = blastRadius(db, map.project, id);
+  console.log(`${id} を変えたら一緒に直す先 (${blast.length}):`);
+  for (const b of blast) console.log(`  • ${b.id} [${b.status}] — ${b.relation}\n    ${b.statement}`);
+} else if (sub === 'next') {
+  const attention = allNodes().filter(needsAttention);
+  const rank = (n: any) => (n.live_verdict === 'divergence' ? 0 : n.live_verdict === 'absence' ? 1 : 2);
+  attention.sort((a, b) => rank(a) - rank(b) || blastRadius(db, map.project, b.id).length - blastRadius(db, map.project, a.id).length);
+  if (!attention.length) { console.log('✓ Nothing needs attention — the Map matches reality.'); }
+  else {
+    console.log(`Next fix candidate${attention.length > 1 ? 's' : ''}:`);
+    attention.slice(0, 3).forEach((n, i) => {
+      const ev = parseJson(n.verdict_evidence, {});
+      console.log(`  ${i + 1}. ${n.id}  — ${truncate(ev.why || n.note || n.statement, 90)}`);
+      console.log(`     → linksee-memory-map explain ${n.id}`);
+    });
+  }
+} else if (sub === 'inspect') {
+  const nodes = allNodes();
+  const out = {
+    project: map.project,
+    health: nodes.length ? Math.round(100 * (nodes.length - nodes.filter(needsAttention).length) / nodes.length) : 100,
+    nodes: nodes.map((n) => {
+      const ev = parseJson(n.verdict_evidence, {});
+      return {
+        id: n.id, stage: n.stage, layer: n.layer, status: n.status, live_verdict: n.live_verdict,
+        why: ev.why ?? null, checks: ev.checks ?? [], fix: ev.fix ?? [],
+        affects: blastRadius(db, map.project, n.id).map((b) => b.id), needs_attention: needsAttention(n),
+      };
+    }),
+  };
+  console.log(JSON.stringify(out, null, 2));
 } else {
   console.error(`unknown subcommand: ${sub}`);
   process.exit(1);

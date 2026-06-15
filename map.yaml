@@ -117,6 +117,13 @@ nodes:
     stage: understand
     statement: README=事実上の主LP — Three spells/Quick Start/10 Tools/Pricing/Telemetry契約
     status: active
+    reality:
+      why: READMEは「10 tools」のまま。コードは where_am_i 追加で11ツール登録、READMEに記載なし。
+      fix:
+        - READMEの「10 Tools / 10 tools」を11に更新し where_am_i を記載
+        - もしくは where_am_i を次リリースまで非公開にする
+      checks:
+        - { claim: 'READMEが where_am_i ツールを記載している', kind: signal_present, path: README.md, signal: [where_am_i] }
     facets: [docs]
 
   - id: lp
@@ -149,6 +156,11 @@ nodes:
     stage: try
     statement: 1コマンド体験(npx -y linksee-memory / linksee-memory-setup) — 獲得4原則「1コマンド体験を守る」
     status: active
+    reality:
+      why: READMEの「1コマンド」主張は setup.ts に裏打ちされている(MCP登録+SKILL+Stopフック+ガード配線)。
+      checks:
+        - { claim: 'READMEが「one command」setupを約束している', kind: signal_present, path: README.md, signal: ["one command"] }
+        - { claim: 'setup.ts が .claude/settings.json にフックを配線する', kind: signal_present, dir: src/bin, signal: [PROJECT_SETTINGS_PATH] }
     facets: [product]
 
   - id: mcpb-launcher
