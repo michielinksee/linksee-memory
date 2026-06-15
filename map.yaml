@@ -316,8 +316,11 @@ nodes:
   # ── 実装 implementation ────────────────────────────────────────
   - id: mcp-server
     layer: implementation
-    statement: MCPサーバー10ツール(remember/recall/read_smart/dream/check_decision/anchor・drift・proposal系)
+    statement: MCPサーバー11ツール(remember/recall/read_smart/where_am_i/dream/check_decision/anchor・drift・proposal系)
     status: active
+    reality:                       # READMEの「11 tools」とコードのツール数が一致しているか
+      checks:
+        - { claim: 'server.ts に where_am_i ツールが登録されている', kind: regex_present, path: src/mcp/server.ts, pattern: "name:\\s*'where_am_i'" }
     facets: [engineering]
 
   - id: memory-core
