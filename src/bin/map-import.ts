@@ -3,15 +3,16 @@
 // and answer topology questions. map.yaml is the desired-state source of truth (anchor
 // #58); this reconciles it into map_nodes/map_edges (full rebuild per project).
 //
-// Usage (CLI-first triage, not a list):
-//   linksee-memory-map status                # health % + what needs attention now (the triage)
-//   linksee-memory-map explain <node>        # WHY this status + ✓/✗ evidence + FIX + AFFECTS (the hero)
+// Usage (CLI-first triage, not a list). The natural working flow:
+//   linksee-memory-map where [<file>]        # WHERE am I? (no arg = infer from recent edits) → node + AFFECTS
 //   linksee-memory-map affects <node>        # what to change together if you touch this node
-//   linksee-memory-map where <file|topic>    # which Map node a file/work-target belongs to
+//   linksee-memory-map explain <node>        # WHY this status + ✓/✗ evidence + FIX (the diagnosis)
+//   linksee-memory-map status                # whole-project health % + what needs attention
+//   ── also ──
 //   linksee-memory-map next                  # the prioritized next fix candidate(s)
 //   linksee-memory-map reconcile             # check the hand-written Map against real code/files
 //   linksee-memory-map inspect --json        # machine-readable dump (CI / tooling)
-//   linksee-memory-map blueprint             # stage×node board (dashboard data)
+//   linksee-memory-map blueprint             # stage×node board (colors reflect the live verdict)
 //   linksee-memory-map [--file map.yaml] [--root <repo>]
 
 import { join } from 'node:path';
@@ -48,7 +49,7 @@ const COLOR_DOT: Record<string, string> = { green: '🟢', red: '🔴', gray: '�
 const repoRoot = flagValue(argv, 'root', process.cwd());
 
 // Triage/diagnosis commands reflect REALITY, so reconcile first (scans repoRoot).
-const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect', 'where']);
+const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect', 'where', 'blueprint']);
 if (DIAG_SUBS.has(sub)) reconcile(db, map.project, repoRoot);
 
 interface VerdictEvidence { reason?: string; why?: string; fix?: string[]; expected?: string; check?: string; checks?: Array<{ claim: string; ok: boolean; file: string | null; line: number | null; detail: string }> }
@@ -78,6 +79,15 @@ const isAccountedFor = (n: any) => n.status === 'paused' || isExternal(n) || !!n
 const isOverdue = (n: any) => !!n.review_by && n.review_by < TODAY;          // promised by a date, now past it
 const noExpiry = (n: any) => isAccountedFor(n) && !n.review_by && !n.revival_condition; // graveyard risk
 const facetsOf = (n: any): string[] => parseJson(n.facets, []);
+// A short tag when reality's verdict differs from / confirms the declared status.
+const verdictMark = (n: any): string => {
+  if (!n.live_verdict) return '';
+  if (n.status === 'suspect' && n.live_verdict === 'convergence') return '  ✓ declared suspect, reality verified';
+  if (n.live_verdict === 'divergence') return '  ✗ reality drift';
+  if (n.live_verdict === 'absence') return '  ⚪ declared but absent';
+  if (n.live_verdict === 'convergence') return '  ✓ reality verified';
+  return '';
+};
 // AFFECTS grouped by edge strength so a big blast radius isn't flat noise.
 function printAffects(id: string, indent = '  ') {
   const blast = blastRadius(db, map.project, id);
@@ -148,16 +158,22 @@ if (sub === 'import') {
   console.log(`blast radius for ${id} (${blast.length}):`);
   for (const b of blast) console.log(`  • ${b.id} [${b.status}] via ${b.relation}\n    ${b.statement}`);
 } else if (sub === 'blueprint') {
+  // reconcile ran (DIAG_SUBS) → colors reflect the live verdict, not just the declared status.
   const bp = getBlueprint(db, map.project, map.stages);
+  const all = allNodes();
+  const verified = all.filter((n) => n.live_verdict === 'convergence').length;
+  const attention = all.filter(needsAttention).length;
   console.log(`Blueprint — ${bp.project}`);
-  console.log(`status counts: ${Object.entries(bp.counts).map(([k, v]) => `${k}=${v}`).join('  ')}`);
+  console.log(`declared: ${Object.entries(bp.counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  console.log(`reality:  verified=${verified}  needs-attention=${attention}`);
+  const line = (n: any) => `   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}${verdictMark(n)}`;
   for (const cell of bp.stages) {
     console.log(`\n▌${cell.label} (${cell.stage})`);
     if (cell.nodes.length === 0) { console.log('   (empty — absence)'); continue; }
-    for (const n of cell.nodes) console.log(`   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}`);
+    for (const n of cell.nodes) console.log(line(n));
   }
   console.log('\n▌implementation');
-  for (const n of bp.implementation) console.log(`   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}`);
+  for (const n of bp.implementation) console.log(line(n));
 } else if (sub === 'status') {
   // Triage, not a list. Local-actionable first (fixable now, has evidence), then external.
   const nodes = allNodes();
