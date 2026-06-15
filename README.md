@@ -775,6 +775,15 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 
 ## Changelog
 
+### v0.11.0 — The Map: `where_am_i` + `linksee-memory-map` (2026-06-15)
+
+**Memory is the entry point; the product map is the new surface.** Drift detection grows up from individual anchors into a whole-product map you navigate from the CLI.
+
+- **`where_am_i`** (11th MCP tool) — locate the current topic/file on the Current Truth Map and get its blast radius. Call it with no args to auto-locate from your recent edits.
+- **`linksee-memory-map`** CLI — `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. A `map.yaml` (git source of truth) describes how value reaches your user; the reconciler checks it against your code with file:line evidence. Bilingual: add `--lang ja`.
+- Graded blast radius (`must fix together` / `should align` / `fyi`), declared-vs-reality verdicts, and an anti-graveyard guard for accounted-for drift.
+- Per-project keys so the Map handles many projects at once.
+
 ### v0.8.0 — Drift Detection MCP Tools (2026-06-08)
 
 **3 tools → 7 tools.** The biggest update since launch — agents can now detect, query, and resolve intent ↔ reality drift.
