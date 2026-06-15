@@ -2,9 +2,9 @@
 // setup: One-command setup for Linksee Memory — the "Use Linksee" installer.
 //
 // Usage:
-//   npx linksee-memory-setup          (interactive setup)
-//   npx linksee-memory-setup --yes    (accept all defaults, no prompts)
-//   npx linksee-memory-setup --dry-run
+//   npx linksee-memory setup          (interactive setup)
+//   npx linksee-memory setup --yes    (accept all defaults, no prompts)
+//   npx linksee-memory setup --dry-run
 //
 // Does four things:
 //   1. Registers the MCP server with Claude Code
@@ -38,9 +38,9 @@ if (showHelp) {
   console.log(`linksee-memory-setup — One-command setup for Linksee Memory
 
 Usage:
-  npx linksee-memory-setup          Interactive setup
-  npx linksee-memory-setup --yes    Accept all defaults, no prompts
-  npx linksee-memory-setup --dry-run Show what would happen
+  npx linksee-memory setup          Interactive setup
+  npx linksee-memory setup --yes    Accept all defaults, no prompts
+  npx linksee-memory setup --dry-run Show what would happen
 
 What it does:
   1. Registers linksee-memory MCP server with Claude Code
@@ -64,13 +64,15 @@ const SKILL_SRC = join(dirname(__filename), '..', 'skill', 'SKILL.md');
 
 const SERVER_NAME = 'linksee';
 const MCP_COMMAND = `claude mcp add -s user ${SERVER_NAME} -- npx -y linksee-memory`;
-const HOOK_COMMAND = 'npx -y linksee-memory-sync';
+// Subcommand form (npx -y linksee-memory <sub>) so the hooks resolve for a cold user —
+// npx can resolve the package name, but not sibling bin names like linksee-memory-sync.
+const HOOK_COMMAND = 'npx -y linksee-memory sync';
 
 // Re-injection guard — wired into the PROJECT (not user-global) settings, because it enforces THIS
 // project's accepted decisions. Mirrors the dogfood wiring's ${CLAUDE_PROJECT_DIR}/dist/bin path, but
 // points at the globally-installed `linksee-memory-guard` bin so it ships without a build step. Shell
 // form (resolved at run time) survives npx-cache eviction; a baked dist path would not.
-const GUARD_COMMAND = 'npx -y linksee-memory-guard';
+const GUARD_COMMAND = 'npx -y linksee-memory guard';
 const PROJECT_DIR = process.cwd();
 const PROJECT_CLAUDE_DIR = join(PROJECT_DIR, '.claude');
 const PROJECT_SETTINGS_PATH = join(PROJECT_CLAUDE_DIR, 'settings.json');
@@ -341,7 +343,7 @@ console.log('How it works:');
 console.log(`  ${DIM}• Every session is auto-captured (decisions, caveats, learnings)${RESET}`);
 console.log(`  ${DIM}• Agent auto-recalls past context when starting a task${RESET}`);
 console.log(`  ${DIM}• Memory is local-first (nothing leaves your machine)${RESET}`);
-console.log(`  ${DIM}• Works across Claude Code, Cursor, ChatGPT (cross-LLM)${RESET}`);
+console.log(`  ${DIM}• Works across Claude Code, Cursor, Windsurf, Codex, Gemini (cross-agent)${RESET}`);
 if (guardConfigured) {
   console.log(`  ${DIM}• Re-injection guard re-surfaces this project's accepted decisions before edits${RESET}`);
 }

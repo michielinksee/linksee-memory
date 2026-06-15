@@ -16,6 +16,7 @@
 //   linksee-memory-map [--file map.yaml] [--root <repo>]
 
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { parseMapFile, importMap } from '../lib/map-import.js';
 import { blastRadius, getSuspects, getBlueprint, getNode, getProjectMeta, whereAmI } from '../lib/map-view.js';
@@ -40,6 +41,25 @@ const mapPath = flagValue(argv, 'file', join(process.cwd(), 'map.yaml'));
 
 const db = openDb();
 runMigrations(db);
+
+// Graceful exit when there's no map yet (the cold-user state) — never a raw stack trace.
+if (!existsSync(mapPath)) {
+  const ja = flagValue(argv, 'lang', 'en') === 'ja';
+  process.stderr.write(
+    ja
+      ? `map.yaml が見つかりません（探した場所: ${mapPath}）\n\n` +
+        `プロダクトMapは手書き（またはスキャン生成）の map.yaml で、git が正本です。\n` +
+        `リポジトリのルートに作成してから、もう一度実行してください:\n` +
+        `  npx -y linksee-memory map status\n\n` +
+        `書式と例: https://docs.linksee.app/concepts/product-map\n`
+      : `No map.yaml found (looked in: ${mapPath})\n\n` +
+        `The product map is a map.yaml you hand-write (or scan-generate); git is the source of truth.\n` +
+        `Create one in your repo root, then run:\n` +
+        `  npx -y linksee-memory map status\n\n` +
+        `Format & examples: https://docs.linksee.app/concepts/product-map\n`,
+  );
+  process.exit(1);
+}
 
 const map = parseMapFile(mapPath);
 // Always (re)import first so reads reflect the file — map.yaml is authoritative.

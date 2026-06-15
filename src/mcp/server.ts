@@ -36,6 +36,7 @@ import { whereAmI } from '../lib/map-view.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 // Single source of truth: read our own version from package.json so the MCP
 // serverInfo can never drift from the published package version. (We catch
@@ -53,6 +54,30 @@ function readServerVersion(): string {
 }
 
 const SERVER_VERSION = readServerVersion();
+
+// ── Subcommand dispatch ───────────────────────────────────────────────────────
+// Each CLI ships as its own bin (linksee-memory-setup, …) AND as a subcommand of
+// the main bin, so `npx -y linksee-memory <sub>` works for a cold user: npx can
+// only resolve the package name (linksee-memory), not sibling bin names like
+// linksee-memory-setup. Run as the MCP server (no subcommand / stdio) → skip this.
+const SUBCOMMANDS: Record<string, string> = {
+  setup: 'setup.js',
+  map: 'map-import.js',
+  sync: 'sync-session.js',
+  guard: 'guard-hook.js',
+  stats: 'stats.js',
+  import: 'import-sessions.js',
+  'install-skill': 'install-skill.js',
+  declare: 'declare-anchor.js',
+  detect: 'detect-drift.js',
+};
+const subcommand = process.argv[2];
+if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand)) {
+  // Spawn the target bin as a child (shebang-safe, argv/stdio correct) and exit with its code.
+  const binPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', SUBCOMMANDS[subcommand]);
+  const r = spawnSync(process.execPath, [binPath, ...process.argv.slice(3)], { stdio: 'inherit' });
+  process.exit(r.status ?? (r.signal ? 1 : 0));
+}
 
 const db = openDb();
 runMigrations(db);
