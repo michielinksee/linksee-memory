@@ -125,6 +125,38 @@ export function runMigrations(db: Database.Database): void {
     addCol('owner', 'owner TEXT');
   }
 
+  // v11 → v12: reconciler overlay columns on map_nodes (the Map shipped at v11
+  // without them). Only ALTER if map_nodes already exists; a v10→v12 jump creates
+  // it fresh (with the columns) via db.exec(sql) below.
+  if (currentVersion > 0 && currentVersion < 12) {
+    const hasMapNodes = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_nodes'"
+    ).get();
+    if (hasMapNodes) {
+      const have = new Set(
+        (db.prepare('PRAGMA table_info(map_nodes)').all() as Array<{ name: string }>).map((c) => c.name)
+      );
+      const addCol = (name: string, ddl: string) => { if (!have.has(name)) db.exec(`ALTER TABLE map_nodes ADD COLUMN ${ddl}`); };
+      addCol('reality', "reality TEXT NOT NULL DEFAULT '{}'");
+      addCol('live_verdict', 'live_verdict TEXT');
+      addCol('verdict_evidence', "verdict_evidence TEXT NOT NULL DEFAULT '{}'");
+      addCol('reconciled_at', 'reconciled_at INTEGER');
+    }
+  }
+
+  // v12 → v13: edge strength + accounted-for expiry (anti-noise / anti-graveyard).
+  if (currentVersion > 0 && currentVersion < 13) {
+    const has = (table: string, col: string) =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_edges'").get()) {
+      if (!has('map_edges', 'strength')) db.exec('ALTER TABLE map_edges ADD COLUMN strength TEXT');
+    }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='map_nodes'").get()) {
+      if (!has('map_nodes', 'review_by')) db.exec('ALTER TABLE map_nodes ADD COLUMN review_by TEXT');
+      if (!has('map_nodes', 'revival_condition')) db.exec('ALTER TABLE map_nodes ADD COLUMN revival_condition TEXT');
+    }
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {
