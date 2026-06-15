@@ -42,7 +42,7 @@ const repoRoot = flagValue(argv, 'root', process.cwd());
 const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect']);
 if (DIAG_SUBS.has(sub)) reconcile(db, map.project, repoRoot);
 
-interface VerdictEvidence { reason?: string; why?: string; fix?: string[]; checks?: Array<{ claim: string; ok: boolean; file: string | null; line: number | null; detail: string }> }
+interface VerdictEvidence { reason?: string; why?: string; fix?: string[]; expected?: string; check?: string; checks?: Array<{ claim: string; ok: boolean; file: string | null; line: number | null; detail: string }> }
 function diagOf(id: string): { node: any; ev: VerdictEvidence } | null {
   const node = getNode(db, map.project, id);
   if (!node) return null;
@@ -61,6 +61,13 @@ const allNodes = () => db.prepare('SELECT * FROM map_nodes WHERE project = ?').a
 const parseJson = (s: string, dflt: any) => { try { return JSON.parse(s || ''); } catch { return dflt; } };
 const truncate = (s: string, n: number) => (s && s.length > n ? s.slice(0, n) + '…' : s ?? '');
 const shortPath = (p: string | null) => (p ? p.split(/[\\/]/).slice(-2).join('/') : '');
+// External = verified outside the repo (network/human); not fixable in code right now.
+const isExternal = (n: any) => parseJson(n.reality, {}).kind === 'external';
+const STATUS_JP: Record<string, string> = {
+  active: '健全（稼働中）', commitment: '約束（締切あり）', suspect: '要確認（ズレの疑い）',
+  planned: '計画', paused: '保留', future_thesis: '将来構想', experiment: '実験中',
+};
+const declaredJP = (s: string) => STATUS_JP[s] ?? s;
 
 function printSuspectsWithBlast() {
   const suspects = getSuspects(db, map.project);
@@ -125,24 +132,40 @@ if (sub === 'import') {
   console.log('\n▌implementation');
   for (const n of bp.implementation) console.log(`   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}`);
 } else if (sub === 'status') {
-  // Triage, not a list — health + what needs attention now.
+  // Triage, not a list. Local-actionable first (fixable now, has evidence), then external.
   const nodes = allNodes();
   const attention = nodes.filter(needsAttention);
+  const local = attention.filter((n) => !isExternal(n));
+  const external = attention.filter(isExternal);
   const verified = nodes.filter((n) => n.live_verdict === 'convergence');
   const health = nodes.length ? Math.round(100 * (nodes.length - attention.length) / nodes.length) : 100;
   console.log(`Product: ${map.project}`);
   console.log(`Health:  ${health}%`);
   console.log(`\nNeeds attention: ${attention.length}`);
-  attention.forEach((n, i) => {
-    const ev = parseJson(n.verdict_evidence, {});
-    const failed = (ev.checks ?? []).find((c: any) => !c.ok);
-    const evidence = failed ? `${shortPath(failed.file)}${failed.line ? ':' + failed.line : ''} (${failed.detail})`
-      : parseJson(n.reality, {}).kind === 'external' ? 'external check required' : '—';
-    console.log(`  ${i + 1}. ${n.id}  ${n.live_verdict ?? n.status}`);
-    console.log(`     ${truncate(ev.why || n.note || n.statement, 92)}`);
-    console.log(`     evidence: ${evidence}`);
-    console.log(`     next: linksee-memory-map explain ${n.id}`);
-  });
+
+  if (local.length) {
+    console.log('\n  Actionable now (local, fixable):');
+    local.forEach((n, i) => {
+      const ev = parseJson(n.verdict_evidence, {});
+      const failed = (ev.checks ?? []).find((c: any) => !c.ok);
+      const evidence = failed ? `${shortPath(failed.file)}${failed.line ? ':' + failed.line : ''} (${failed.detail})` : '—';
+      console.log(`    ${i + 1}. ${n.id}  ${n.live_verdict ?? n.status}`);
+      console.log(`       ${truncate(ev.why || n.note || n.statement, 88)}`);
+      console.log(`       evidence: ${evidence}`);
+      console.log(`       next: linksee-memory-map explain ${n.id}`);
+    });
+  }
+  if (external.length) {
+    console.log('\n  External checks (verify outside the repo):');
+    external.forEach((n, i) => {
+      const ev = parseJson(n.verdict_evidence, {});
+      console.log(`    ${local.length + i + 1}. ${n.id}  ${n.status}`);
+      console.log(`       ${truncate(ev.why || n.note || n.statement, 88)}`);
+      if (ev.expected) console.log(`       expected: ${ev.expected}`);
+      if (ev.check) console.log(`       check:    ${ev.check}`);
+    });
+  }
+
   console.log(`\nVerified by reality: ${verified.length}`);
   for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? 'refuted suspect → convergence' : 'verified'}`);
   console.log(`\nNo action: ${nodes.length - attention.length - verified.length}`);
@@ -155,16 +178,33 @@ if (sub === 'import') {
   const meta = getProjectMeta(db, map.project);
   const stageLabel = node.stage ? (meta?.stages.find((s: any) => s.id === node.stage)?.label ?? node.stage) : null;
   const v = node.live_verdict as string | null;
-  const verdictJP = v === 'convergence' ? '一致 — 現実が実装を確認' : v === 'divergence' ? 'ズレ — 現実が宣言と食い違う' : v === 'absence' ? '未実現' : null;
+  const isExt = parseJson(node.reality, {}).kind === 'external';
   console.log(`${node.id}${stageLabel ? `   [${stageLabel}]` : ''}`);
   console.log(node.statement);
-  console.log(`\nSTATUS\n  ${node.status}${verdictJP ? `  →  ${verdictJP}` : ''}`);
+  // declared state and reality verdict are DIFFERENT things — show them separately.
+  console.log('\nSTATUS');
+  console.log(`  宣言状態: ${declaredJP(node.status)}`);
+  if (v) {
+    const realityJP = v === 'convergence' ? '実装あり / 一致' : v === 'divergence' ? 'ズレあり' : '未実現';
+    const concl = node.status === 'suspect' && v === 'convergence' ? '要確認は現実により反証 (refuted suspect → convergence)'
+      : v === 'divergence' ? '宣言と現実がズレている (drift)'
+      : v === 'convergence' ? '宣言と現実が一致 (verified)'
+      : '宣言が現実に未実現 (absence)';
+    console.log(`  現実判定: ${realityJP}`);
+    console.log(`  結論:     ${concl}`);
+  } else {
+    console.log(`  現実判定: ${isExt ? '外部確認待ち（自動確認なし）' : '自動チェック未設定'}`);
+  }
   console.log(`\nWHY\n  ${ev.why || node.note || '宣言ベース（現実の自動チェックは未設定）'}`);
   console.log('\nEVIDENCE');
   if (ev.checks && ev.checks.length) {
     for (const c of ev.checks) console.log(`  ${c.ok ? '✓' : '✗'} ${c.claim}\n      ${shortPath(c.file)}${c.line ? ':' + c.line : ''} — ${c.detail}`);
+  } else if (isExt) {
+    console.log('  外部状態のため自動確認なし（人が確認）');
+    if (ev.expected) console.log(`  expected: ${ev.expected}`);
+    if (ev.check) console.log(`  check:    ${ev.check}`);
   } else {
-    console.log(`  ${parseJson(node.reality, {}).kind === 'external' ? '外部状態のため自動確認なし（人が確認）' : '自動チェック未設定（宣言ベース）'}`);
+    console.log('  自動チェック未設定（宣言ベース）');
   }
   if (ev.fix && ev.fix.length) { console.log('\nFIX'); ev.fix.forEach((f: string, i: number) => console.log(`  ${i + 1}. ${f}`)); }
   const blast = blastRadius(db, map.project, id);
@@ -178,17 +218,28 @@ if (sub === 'import') {
   console.log(`${id} を変えたら一緒に直す先 (${blast.length}):`);
   for (const b of blast) console.log(`  • ${b.id} [${b.status}] — ${b.relation}\n    ${b.statement}`);
 } else if (sub === 'next') {
+  // local-first: what you can fix in code now, then what to verify externally.
   const attention = allNodes().filter(needsAttention);
-  const rank = (n: any) => (n.live_verdict === 'divergence' ? 0 : n.live_verdict === 'absence' ? 1 : 2);
-  attention.sort((a, b) => rank(a) - rank(b) || blastRadius(db, map.project, b.id).length - blastRadius(db, map.project, a.id).length);
+  const local = attention.filter((n) => !isExternal(n))
+    .sort((a, b) => blastRadius(db, map.project, b.id).length - blastRadius(db, map.project, a.id).length);
+  const external = attention.filter(isExternal);
   if (!attention.length) { console.log('✓ Nothing needs attention — the Map matches reality.'); }
   else {
-    console.log(`Next fix candidate${attention.length > 1 ? 's' : ''}:`);
-    attention.slice(0, 3).forEach((n, i) => {
-      const ev = parseJson(n.verdict_evidence, {});
-      console.log(`  ${i + 1}. ${n.id}  — ${truncate(ev.why || n.note || n.statement, 90)}`);
-      console.log(`     → linksee-memory-map explain ${n.id}`);
-    });
+    if (local.length) {
+      console.log('Next local fix:');
+      local.slice(0, 3).forEach((n, i) => {
+        const ev = parseJson(n.verdict_evidence, {});
+        console.log(`  ${i + 1}. ${n.id}  — ${truncate(ev.why || n.note || n.statement, 88)}`);
+        console.log(`     → linksee-memory-map explain ${n.id}`);
+      });
+    }
+    if (external.length) {
+      console.log(`${local.length ? '\n' : ''}Next external checks:`);
+      external.forEach((n) => {
+        const ev = parseJson(n.verdict_evidence, {});
+        console.log(`  • ${n.id}${ev.check ? `  — ${ev.check}` : ''}`);
+      });
+    }
   }
 } else if (sub === 'inspect') {
   const nodes = allNodes();

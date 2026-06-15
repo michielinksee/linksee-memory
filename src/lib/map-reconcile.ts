@@ -33,6 +33,8 @@ interface Reality {
   checks?: Check[];        // NEW: multiple named claims, each → ✓/✗ with evidence
   why?: string;            // authored one-line WHY (else derived from failing checks)
   fix?: string[];          // authored FIX options
+  expected?: string;       // (external) what a passing state looks like
+  check?: string;          // (external) the manual step to verify it
 }
 export interface CheckResult { claim: string; ok: boolean; file: string | null; line: number | null; detail: string }
 export interface NodeVerdict {
@@ -129,14 +131,18 @@ function runCheck(check: Check, repoRoot: string): CheckResult {
   };
 }
 
-interface EvalResult { verdict: Verdict | null; reason: string; why: string | null; fix: string[]; checks: CheckResult[] }
+interface EvalResult { verdict: Verdict | null; reason: string; why: string | null; fix: string[]; checks: CheckResult[]; expected: string | null; check: string | null }
 
 function evaluate(reality: Reality, repoRoot: string): EvalResult {
   if (!reality.kind && !reality.checks) {
-    return { verdict: null, reason: 'no reality declaration — stays human-declared', why: null, fix: [], checks: [] };
+    return { verdict: null, reason: 'no reality declaration — stays human-declared', why: null, fix: [], checks: [], expected: null, check: null };
   }
   if (reality.kind === 'external') {
-    return { verdict: null, reason: 'external state — not locally verifiable; human-confirmed', why: reality.why ?? null, fix: reality.fix ?? [], checks: [] };
+    return {
+      verdict: null, reason: 'external state — not locally verifiable; human-confirmed',
+      why: reality.why ?? null, fix: reality.fix ?? [], checks: [],
+      expected: reality.expected ?? null, check: reality.check ?? null,
+    };
   }
   // Multiple named checks, or one check from the single-kind shorthand (back-compat).
   const checks: Check[] = reality.checks ?? [{
@@ -154,7 +160,7 @@ function evaluate(reality: Reality, repoRoot: string): EvalResult {
     ? 'all checks pass — reality matches the declaration'
     : `${failed.length} check(s) fail: ${failed.map((f) => f.claim).join('; ')}`);
   const reason = failed.length === 0 ? `verified: ${results.length} check(s) pass` : `${failed.length}/${results.length} checks failed`;
-  return { verdict, reason, why, fix: reality.fix ?? [], checks: results };
+  return { verdict, reason, why, fix: reality.fix ?? [], checks: results, expected: null, check: null };
 }
 
 export function reconcile(db: Database.Database, project: string, repoRoot: string): ReconcileResult {
@@ -168,10 +174,10 @@ export function reconcile(db: Database.Database, project: string, repoRoot: stri
     for (const r of rows) {
       let reality: Reality = {};
       try { reality = JSON.parse(r.reality || '{}'); } catch { /* malformed → treat as none */ }
-      const { verdict, reason, why, fix, checks } = evaluate(reality, repoRoot);
+      const { verdict, reason, why, fix, checks, expected, check } = evaluate(reality, repoRoot);
       const firstShown = checks.find((c) => !c.ok) ?? checks[0];
       const evidence: Record<string, unknown> = {
-        reason, why, fix, checks,
+        reason, why, fix, checks, expected, check,
         file: firstShown?.file ?? null, line_no: firstShown?.line ?? null, // compact convenience for the dashboard
       };
       if (verdict === null) { external++; upd.run(null, JSON.stringify(evidence), project, r.id); }
