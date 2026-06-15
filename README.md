@@ -119,6 +119,57 @@ Anchors are classified into four species with different display formats:
 
 ---
 
+<a id="the-map"></a>
+
+## 🗺️ The Map — `linksee-memory-map`
+
+Drift detection (above) checks individual anchors. The **Map** lifts it to the whole product: a `map.yaml` describing how value reaches your user (`discover → understand → try → adopt → retain → monetize → expand`), with typed dependencies between the pieces — README, npm listing, onboarding, the engine that powers them. The reconciler checks that map against your real code, and the CLI answers the question an engineer actually has:
+
+> *I'm touching this file — where is it on the map, and what else must move?*
+
+**1. Where am I?** — locate a file (or, with no argument, infer from your recent edits):
+
+```
+$ linksee-memory-map where README.md
+"README.md" belongs to this Map node:
+
+  readme  [understand]  convergence
+    changes ripple to:
+      must fix together (hard):  lp, docs-site
+      should align (soft):       onboarding, client-configs
+      fyi (may ripple):          telemetry-contract
+```
+
+The blast radius is **graded** — `must fix together` vs `should align` vs `fyi` — so a wide ripple isn't flat noise.
+
+**2. Why is it in this state?** — the diagnosis, with file:line evidence:
+
+```
+$ linksee-memory-map explain readme
+
+STATUS
+  declared: healthy (active)
+  reality:  implemented / matches
+  verdict:  declared and reality agree (verified)
+
+EVIDENCE
+  ✓ README's Tools section lists where_am_i
+      README.md:424 — found "where_am_i" in section "Tools"
+```
+
+Declared state and the reality verdict are shown **separately** — a hand-declared `suspect` the scanner refutes reads as *"declared suspect, refuted by reality (→ convergence)"*, not a confusing mix.
+
+**3. Whole-project triage:** `linksee-memory-map status` — a health %, what is *fixable now in code* vs *external checks*, and any deferral with no expiry (so "accounted-for" can't quietly become a drift graveyard).
+
+**How it works**
+- **`map.yaml`** (repo root) is the desired-state source of truth: a journey spine × surface/implementation layers × typed edges (`must-stay-consistent-with` / `should-align-with` / `realizes`).
+- **`reconcile`** checks each node's declared `reality` against the code (`signal` / `regex` / `section_contains` / file checks) and overlays a verdict — reality overrides what you hand-declared, with evidence.
+- `where_am_i` is also an **MCP tool**, so a coding agent can re-anchor itself mid-task.
+
+Commands: `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. Add `--lang ja` for Japanese labels.
+
+---
+
 <a id="reinjection-guard"></a>
 
 ## 🛡 Re-injection Guard — enforce decisions *before* the action

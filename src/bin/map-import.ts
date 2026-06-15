@@ -28,7 +28,7 @@ function flagValue(argv: string[], name: string, dflt: string): string {
 
 const argv = process.argv.slice(2);
 // positional args, skipping flags and their values (so `where --file x` doesn't read "--file" as the target)
-const VALUE_FLAGS = new Set(['--file', '--root', '--limit']);
+const VALUE_FLAGS = new Set(['--file', '--root', '--limit', '--lang']);
 const positionals: string[] = [];
 for (let i = 0; i < argv.length; i++) {
   if (argv[i].startsWith('--')) { if (VALUE_FLAGS.has(argv[i])) i++; continue; }
@@ -47,6 +47,52 @@ const res = importMap(db, map);
 
 const COLOR_DOT: Record<string, string> = { green: '🟢', red: '🔴', gray: '⚪', amber: '🟡', blue: '🔵' };
 const repoRoot = flagValue(argv, 'root', process.cwd());
+
+// ── i18n: English by default, Japanese with --lang ja (map.yaml content stays the user's language) ──
+const lang = flagValue(argv, 'lang', 'en') === 'ja' ? 'ja' : 'en';
+const EN = {
+  status: { active: 'healthy (active)', commitment: 'commitment (has a due date)', suspect: 'needs review (possible drift)', planned: 'planned', paused: 'paused', future_thesis: 'future thesis', experiment: 'experiment' } as Record<string, string>,
+  affHard: 'must fix together', affSoft: 'should align', affWatch: 'fyi (may ripple)',
+  declared: 'declared:', reality: 'reality: ', verdict: 'verdict: ',
+  rConv: 'implemented / matches', rDiv: 'drifted', rAbs: 'not realized',
+  cRefuted: 'declared suspect, refuted by reality (→ convergence)', cDrift: 'declared vs reality disagree (drift)', cVerified: 'declared and reality agree (verified)', cAbsence: 'declared but not realized (absence)',
+  realityExt: 'awaiting external check (no auto-verify)', realityNone: 'no auto-check configured',
+  whyFallback: 'declared color (no auto-check configured)',
+  evExt: 'external state — verified by a human, not the scanner', evNone: 'no auto-check configured (declared)',
+  affectsHdr: 'AFFECTS (change these together — by strength)', affectsSub: 'changes ripple to:',
+  affectsCmd: (id: string, n: number) => `change ${id} → fix these together (${n}) — by strength:`,
+  whereAutoHdr: 'Inferred "you are here" from your recent edits:', whereAutoNone: 'Could not locate you on the Map from recent edits.',
+  whereOwns: (t: string) => `"${t}" belongs to this Map node:`, whereTopic: 'No file match → closest nodes by topic:',
+  whereNone: (t: string) => `No file or topic on the Map matched "${t}".`,
+  needs: 'Needs attention:', actionable: 'Actionable now (local, fixable):', external: 'External checks (verify outside the repo):',
+  verified: 'Verified by reality:', noAction: 'No action:', refutedTag: 'refuted suspect → convergence', verifiedTag: 'verified',
+  graveyard: 'Deferrals with no expiry/condition (graveyard risk):', graveyardHint: 'add review_by: <date> or revival_condition: <text> in map.yaml',
+  overdue: (d: string) => `Overdue deferrals (promised by a date, now past ${d}):`,
+  nLocal: 'Next local fix:', nExternal: 'Next external checks:', nNothing: 'Nothing needs attention — the Map matches reality.',
+  evidence: 'evidence:', next: 'next:', empty: '(empty — absence)', impl: 'implementation', notFound: 'node not found',
+};
+const JA: typeof EN = {
+  status: { active: '健全（稼働中）', commitment: '約束（締切あり）', suspect: '要確認（ズレの疑い）', planned: '計画', paused: '保留', future_thesis: '将来構想', experiment: '実験中' },
+  affHard: '必ず一緒に直す', affSoft: 'できれば揃える', affWatch: '参考（連鎖の可能性）',
+  declared: '宣言状態:', reality: '現実判定:', verdict: '結論:    ',
+  rConv: '実装あり / 一致', rDiv: 'ズレあり', rAbs: '未実現',
+  cRefuted: '要確認は現実により反証 (refuted suspect → convergence)', cDrift: '宣言と現実がズレている (drift)', cVerified: '宣言と現実が一致 (verified)', cAbsence: '宣言が現実に未実現 (absence)',
+  realityExt: '外部確認待ち（自動確認なし）', realityNone: '自動チェック未設定',
+  whyFallback: '宣言ベース（現実の自動チェックは未設定）',
+  evExt: '外部状態のため自動確認なし（人が確認）', evNone: '自動チェック未設定（宣言ベース）',
+  affectsHdr: 'AFFECTS（変えたら一緒に直す先・強度順）', affectsSub: '変えたら一緒に直す先:',
+  affectsCmd: (id: string, n: number) => `${id} を変えたら一緒に直す先 (${n}) — 強度順:`,
+  whereAutoHdr: '直近の編集から推定した「今いる場所」:', whereAutoNone: '直近の編集からMap上の位置を特定できませんでした。',
+  whereOwns: (t: string) => `"${t}" は Map 上のこのノードに属します:`, whereTopic: 'ファイル一致なし → トピックとして近いノード:',
+  whereNone: (t: string) => `Map上で "${t}" に該当するファイル/トピックは見つかりませんでした。`,
+  needs: '要対応:', actionable: '今すぐ直せる（ローカル）:', external: '外部チェック（リポジトリ外で確認）:',
+  verified: '現実で検証済み:', noAction: '対応不要:', refutedTag: '要確認→現実で反証 (convergence)', verifiedTag: '検証済み',
+  graveyard: '期限/条件のない保留（墓場リスク）:', graveyardHint: 'map.yaml に review_by: <日付> か revival_condition: <条件> を追加',
+  overdue: (d: string) => `期限切れの保留（${d} を過ぎている）:`,
+  nLocal: '次に直す（ローカル）:', nExternal: '次の外部チェック:', nNothing: '対応事項なし — Mapと現実が一致。',
+  evidence: 'evidence:', next: 'next:', empty: '(empty — absence)', impl: 'implementation', notFound: 'node not found',
+};
+const T = lang === 'ja' ? JA : EN;
 
 // Triage/diagnosis commands reflect REALITY, so reconcile first (scans repoRoot).
 const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect', 'where', 'blueprint']);
@@ -92,7 +138,7 @@ const verdictMark = (n: any): string => {
 function printAffects(id: string, indent = '  ') {
   const blast = blastRadius(db, map.project, id);
   if (!blast.length) { console.log(`${indent}(none)`); return; }
-  const groups: Array<[string, string]> = [['hard', '必ず一緒に直す'], ['soft', 'できれば揃える'], ['watch', '参考（連鎖の可能性）']];
+  const groups: Array<[string, string]> = [['hard', T.affHard], ['soft', T.affSoft], ['watch', T.affWatch]];
   for (const [s, label] of groups) {
     const hits = blast.filter((b) => b.strength === s);
     if (!hits.length) continue;
@@ -100,11 +146,7 @@ function printAffects(id: string, indent = '  ') {
     for (const b of hits) console.log(`${indent}  ${b.id}  (${b.relation})`);
   }
 }
-const STATUS_JP: Record<string, string> = {
-  active: '健全（稼働中）', commitment: '約束（締切あり）', suspect: '要確認（ズレの疑い）',
-  planned: '計画', paused: '保留', future_thesis: '将来構想', experiment: '実験中',
-};
-const declaredJP = (s: string) => STATUS_JP[s] ?? s;
+const declaredJP = (s: string) => T.status[s] ?? s;
 
 function printSuspectsWithBlast() {
   const suspects = getSuspects(db, map.project);
@@ -169,10 +211,10 @@ if (sub === 'import') {
   const line = (n: any) => `   ${COLOR_DOT[n.color]} ${n.id} — ${n.statement}${verdictMark(n)}`;
   for (const cell of bp.stages) {
     console.log(`\n▌${cell.label} (${cell.stage})`);
-    if (cell.nodes.length === 0) { console.log('   (empty — absence)'); continue; }
+    if (cell.nodes.length === 0) { console.log(`   ${T.empty}`); continue; }
     for (const n of cell.nodes) console.log(line(n));
   }
-  console.log('\n▌implementation');
+  console.log(`\n▌${T.impl}`);
   for (const n of bp.implementation) console.log(line(n));
 } else if (sub === 'status') {
   // Triage, not a list. Local-actionable first (fixable now, has evidence), then external.
@@ -184,22 +226,22 @@ if (sub === 'import') {
   const health = nodes.length ? Math.round(100 * (nodes.length - attention.length) / nodes.length) : 100;
   console.log(`Product: ${map.project}`);
   console.log(`Health:  ${health}%`);
-  console.log(`\nNeeds attention: ${attention.length}`);
+  console.log(`\n${T.needs} ${attention.length}`);
 
   if (local.length) {
-    console.log('\n  Actionable now (local, fixable):');
+    console.log(`\n  ${T.actionable}`);
     local.forEach((n, i) => {
       const ev = parseJson(n.verdict_evidence, {});
       const failed = (ev.checks ?? []).find((c: any) => !c.ok);
       const evidence = failed ? `${shortPath(failed.file)}${failed.line ? ':' + failed.line : ''} (${failed.detail})` : '—';
       console.log(`    ${i + 1}. ${n.id}  ${n.live_verdict ?? n.status}`);
       console.log(`       ${truncate(ev.why || n.note || n.statement, 88)}`);
-      console.log(`       evidence: ${evidence}`);
-      console.log(`       next: linksee-memory-map explain ${n.id}`);
+      console.log(`       ${T.evidence} ${evidence}`);
+      console.log(`       ${T.next} linksee-memory-map explain ${n.id}`);
     });
   }
   if (external.length) {
-    console.log('\n  External checks (verify outside the repo):');
+    console.log(`\n  ${T.external}`);
     external.forEach((n, i) => {
       const ev = parseJson(n.verdict_evidence, {});
       console.log(`    ${local.length + i + 1}. ${n.id}  ${n.status}`);
@@ -212,18 +254,18 @@ if (sub === 'import') {
   // accounted-for can't become a drift graveyard: overdue deferrals re-escalate, missing expiries are flagged.
   const overdue = nodes.filter(isOverdue);
   if (overdue.length) {
-    console.log(`\n⏰ Overdue deferrals (promised by a date, now past ${TODAY}):`);
+    console.log(`\n⏰ ${T.overdue(TODAY)}`);
     for (const n of overdue) console.log(`    ${n.id}  review_by ${n.review_by}${n.revival_condition ? ' — ' + n.revival_condition : ''}`);
   }
   const graveyard = nodes.filter(noExpiry);
   if (graveyard.length) {
-    console.log(`\n⚠ Deferrals with no expiry/condition (graveyard risk): ${graveyard.map((n: any) => n.id).join(', ')}`);
-    console.log('    → add review_by: <date> or revival_condition: <text> in map.yaml');
+    console.log(`\n⚠ ${T.graveyard} ${graveyard.map((n: any) => n.id).join(', ')}`);
+    console.log(`    → ${T.graveyardHint}`);
   }
 
-  console.log(`\nVerified by reality: ${verified.length}`);
-  for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? 'refuted suspect → convergence' : 'verified'}`);
-  console.log(`\nNo action: ${nodes.length - attention.length - verified.length}`);
+  console.log(`\n${T.verified} ${verified.length}`);
+  for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? T.refutedTag : T.verifiedTag}`);
+  console.log(`\n${T.noAction} ${nodes.length - attention.length - verified.length}`);
 } else if (sub === 'explain') {
   const id = arg1;
   if (!id) { console.error('usage: linksee-memory-map explain <node>'); process.exit(1); }
@@ -239,28 +281,28 @@ if (sub === 'import') {
   console.log(node.statement);
   // declared state and reality verdict are DIFFERENT things — show them separately.
   console.log('\nSTATUS');
-  console.log(`  宣言状態: ${declaredJP(node.status)}`);
+  console.log(`  ${T.declared} ${declaredJP(node.status)}`);
   if (v) {
-    const realityJP = v === 'convergence' ? '実装あり / 一致' : v === 'divergence' ? 'ズレあり' : '未実現';
-    const concl = node.status === 'suspect' && v === 'convergence' ? '要確認は現実により反証 (refuted suspect → convergence)'
-      : v === 'divergence' ? '宣言と現実がズレている (drift)'
-      : v === 'convergence' ? '宣言と現実が一致 (verified)'
-      : '宣言が現実に未実現 (absence)';
-    console.log(`  現実判定: ${realityJP}`);
-    console.log(`  結論:     ${concl}`);
+    const realityV = v === 'convergence' ? T.rConv : v === 'divergence' ? T.rDiv : T.rAbs;
+    const concl = node.status === 'suspect' && v === 'convergence' ? T.cRefuted
+      : v === 'divergence' ? T.cDrift
+      : v === 'convergence' ? T.cVerified
+      : T.cAbsence;
+    console.log(`  ${T.reality} ${realityV}`);
+    console.log(`  ${T.verdict} ${concl}`);
   } else {
-    console.log(`  現実判定: ${isExt ? '外部確認待ち（自動確認なし）' : '自動チェック未設定'}`);
+    console.log(`  ${T.reality} ${isExt ? T.realityExt : T.realityNone}`);
   }
-  console.log(`\nWHY\n  ${ev.why || node.note || '宣言ベース（現実の自動チェックは未設定）'}`);
+  console.log(`\nWHY\n  ${ev.why || node.note || T.whyFallback}`);
   console.log('\nEVIDENCE');
   if (ev.checks && ev.checks.length) {
     for (const c of ev.checks) console.log(`  ${c.ok ? '✓' : '✗'} ${c.claim}\n      ${shortPath(c.file)}${c.line ? ':' + c.line : ''} — ${c.detail}`);
   } else if (isExt) {
-    console.log('  外部状態のため自動確認なし（人が確認）');
+    console.log(`  ${T.evExt}`);
     if (ev.expected) console.log(`  expected: ${ev.expected}`);
     if (ev.check) console.log(`  check:    ${ev.check}`);
   } else {
-    console.log('  自動チェック未設定（宣言ベース）');
+    console.log(`  ${T.evNone}`);
   }
   if (ev.fix && ev.fix.length) { console.log('\nFIX'); ev.fix.forEach((f: string, i: number) => console.log(`  ${i + 1}. ${f}`)); }
   if (node.review_by || node.revival_condition) {
@@ -268,14 +310,14 @@ if (sub === 'import') {
     if (node.review_by) console.log(`  review_by: ${node.review_by}${isOverdue(node) ? '  ⏰ OVERDUE' : ''}`);
     if (node.revival_condition) console.log(`  condition: ${node.revival_condition}`);
   }
-  console.log('\nAFFECTS（変えたら一緒に直す先・強度順）');
+  console.log(`\n${T.affectsHdr}`);
   printAffects(id);
   console.log(`\nNEXT\n  linksee-memory-map reconcile          # re-check after a fix\n  linksee-memory-map affects ${id}`);
 } else if (sub === 'affects') {
   const id = arg1;
   if (!id) { console.error('usage: linksee-memory-map affects <node>'); process.exit(1); }
   const blast = blastRadius(db, map.project, id);
-  console.log(`${id} を変えたら一緒に直す先 (${blast.length}) — 強度順:`);
+  console.log(T.affectsCmd(id, blast.length));
   printAffects(id);
 } else if (sub === 'where') {
   // "I'm about to touch this file — where is it on the Map, and what does it touch?"
@@ -283,12 +325,12 @@ if (sub === 'import') {
   if (!target) {
     // no arg → auto-locate from what you just edited this session
     const res = whereAmI(db, { project: map.project });
-    if (!res.matched.length) { console.log('直近の編集からMap上の位置を特定できませんでした。'); }
+    if (!res.matched.length) { console.log(T.whereAutoNone); }
     else {
-      console.log('直近の編集から推定した「今いる場所」:');
+      console.log(T.whereAutoHdr);
       for (const m of res.matched) {
         console.log(`\n  ${m.node.id}${m.stage_label ? `  [${m.stage_label}]` : ''}  ${m.node.live_verdict ?? m.node.status}  (${m.match_reason})`);
-        console.log('    変えたら一緒に直す先:');
+        console.log(`    ${T.affectsSub}`);
         printAffects(m.node.id, '      ');
       }
     }
@@ -309,19 +351,19 @@ if (sub === 'import') {
     return paths.some((p) => t === p);
   });
   if (matched.length) {
-    console.log(`"${target}" は Map 上のこのノードに属します:`);
+    console.log(T.whereOwns(target));
     for (const n of matched) {
       console.log(`\n  ${n.id}${n.stage ? `  [${stageLabel(n.stage)}]` : ''}  ${n.live_verdict ?? n.status}`);
       console.log(`    ${n.statement}`);
-      console.log('    変えたら一緒に直す先:');
+      console.log(`    ${T.affectsSub}`);
       printAffects(n.id, '      ');
     }
   } else {
     // no file match → treat the arg as a topic (lexical locate, like where_am_i)
     const res = whereAmI(db, { project: map.project, query: target });
-    if (!res.matched.length) { console.log(`Map上で "${target}" に該当するファイル/トピックは見つかりませんでした。`); }
+    if (!res.matched.length) { console.log(T.whereNone(target)); }
     else {
-      console.log(`ファイル一致なし → トピックとして近いノード:`);
+      console.log(T.whereTopic);
       for (const m of res.matched) console.log(`  ${m.node.id}${m.stage_label ? `  [${m.stage_label}]` : ''}  (${m.match_reason})`);
     }
   }
@@ -331,10 +373,10 @@ if (sub === 'import') {
   const local = attention.filter((n) => !isExternal(n))
     .sort((a, b) => blastRadius(db, map.project, b.id).length - blastRadius(db, map.project, a.id).length);
   const external = attention.filter(isExternal);
-  if (!attention.length) { console.log('✓ Nothing needs attention — the Map matches reality.'); }
+  if (!attention.length) { console.log(`✓ ${T.nNothing}`); }
   else {
     if (local.length) {
-      console.log('Next local fix:');
+      console.log(T.nLocal);
       local.slice(0, 3).forEach((n, i) => {
         const ev = parseJson(n.verdict_evidence, {});
         console.log(`  ${i + 1}. ${n.id}  — ${truncate(ev.why || n.note || n.statement, 88)}`);
@@ -342,7 +384,7 @@ if (sub === 'import') {
       });
     }
     if (external.length) {
-      console.log(`${local.length ? '\n' : ''}Next external checks:`);
+      console.log(`${local.length ? '\n' : ''}${T.nExternal}`);
       external.forEach((n) => {
         const ev = parseJson(n.verdict_evidence, {});
         console.log(`  • ${n.id}${ev.check ? `  — ${ev.check}` : ''}`);
