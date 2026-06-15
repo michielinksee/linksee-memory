@@ -29,13 +29,17 @@
 
 Memory is the entry point. Tie it to a `map.yaml` of how your product fits together, and the `linksee-memory-map` CLI catches drift with file:line evidence:
 
+![linksee-memory-map catching doc/code drift in 30 seconds](demo/where-demo.gif)
+
+**The 30-second demo above:** the README says `--export`. The code doesn't. Linksee catches it — and shows what else a change would touch.
+
 ```bash
 linksee-memory-map where README.md   # this file belongs to the README node — and what it touches
 linksee-memory-map explain readme    # README promises --export; the code doesn't implement it — drift, with evidence
 linksee-memory-map affects readme    # changing the README also touches docs, the CLI help, and the npm listing
 ```
 
-**The 30-second demo:** the README says `--export`. The code doesn't. Linksee catches it. → see [The Map](#the-map) for the full flow.
+→ see [The Map](#the-map) for the full flow.
 
 ## 📣 As featured on
 
