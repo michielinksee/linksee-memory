@@ -6,7 +6,7 @@
 >
 > Underneath sits a local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY**: 6-layer structured memory with precision recall and an AST-aware diff cache (50–99% token savings on re-reads).
 >
-> `npx linksee-memory-setup` — one command, done.
+> `npx -y linksee-memory setup` — one command, done.
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -28,16 +28,16 @@
 
 ## 🗺️ Not just memory — a product map
 
-Memory is the entry point. Tie it to a `map.yaml` of how your product fits together, and the `linksee-memory-map` CLI catches drift with file:line evidence:
+Memory is the entry point. Tie it to a `map.yaml` of how your product fits together, and the `linksee-memory map` CLI catches drift with file:line evidence:
 
 ![linksee-memory-map catching doc/code drift in 30 seconds](demo/where-demo.gif)
 
 **The 30-second demo above:** the README says `--export`. The code doesn't. Linksee catches it — and shows what else a change would touch.
 
 ```bash
-linksee-memory-map where README.md   # this file belongs to the README node — and what it touches
-linksee-memory-map explain readme    # README promises --export; the code doesn't implement it — drift, with evidence
-linksee-memory-map affects readme    # changing the README also touches docs, the CLI help, and the npm listing
+npx -y linksee-memory map where README.md   # this file belongs to the README node — and what it touches
+npx -y linksee-memory map explain readme    # README promises --export; the code doesn't implement it — drift, with evidence
+npx -y linksee-memory map affects readme    # changing the README also touches docs, the CLI help, and the npm listing
 ```
 
 → see [The Map](#the-map) for the full flow.
@@ -138,7 +138,7 @@ Anchors are classified into four species with different display formats:
 
 <a id="the-map"></a>
 
-## 🗺️ The Map — `linksee-memory-map`
+## 🗺️ The Map — `linksee-memory map`
 
 Drift detection (above) checks individual anchors. The **Map** lifts it to the whole product: a `map.yaml` describing how value reaches your user (`discover → understand → try → adopt → retain → monetize → expand`), with typed dependencies between the pieces — README, npm listing, onboarding, the engine that powers them. The reconciler checks that map against your real code, and the CLI answers the question an engineer actually has:
 
@@ -147,7 +147,7 @@ Drift detection (above) checks individual anchors. The **Map** lifts it to the w
 **1. Where am I?** — locate a file (or, with no argument, infer from your recent edits):
 
 ```
-$ linksee-memory-map where README.md
+$ npx -y linksee-memory map where README.md
 "README.md" belongs to this Map node:
 
   readme  [understand]  convergence
@@ -162,7 +162,7 @@ The blast radius is **graded** — `must fix together` vs `should align` vs `fyi
 **2. Why is it in this state?** — the diagnosis, with file:line evidence:
 
 ```
-$ linksee-memory-map explain readme
+$ npx -y linksee-memory map explain readme
 
 STATUS
   declared: healthy (active)
@@ -176,7 +176,7 @@ EVIDENCE
 
 Declared state and the reality verdict are shown **separately** — a hand-declared `suspect` the scanner refutes reads as *"declared suspect, refuted by reality (→ convergence)"*, not a confusing mix.
 
-**3. Whole-project triage:** `linksee-memory-map status` — a health %, what is *fixable now in code* vs *external checks*, and any deferral with no expiry (so "accounted-for" can't quietly become a drift graveyard).
+**3. Whole-project triage:** `npx -y linksee-memory map status` — a health %, what is *fixable now in code* vs *external checks*, and any deferral with no expiry (so "accounted-for" can't quietly become a drift graveyard).
 
 **How it works**
 - **`map.yaml`** (repo root) is the desired-state source of truth: a journey spine × surface/implementation layers × typed edges (`must-stay-consistent-with` / `should-align-with` / `realizes`).
@@ -204,7 +204,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
 
 ### Enable it
 
-`npx linksee-memory-setup` offers to wire this into your **project's** `.claude/settings.json` (Step 4). To do it by hand, drop this block into `.claude/settings.json` at your project root — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
+`npx -y linksee-memory setup` offers to wire this into your **project's** `.claude/settings.json` (Step 4). To do it by hand, drop this block into `.claude/settings.json` at your project root — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
 
 ```json
 {
@@ -213,7 +213,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
       {
         "matcher": "startup|resume|compact",
         "hooks": [
-          { "type": "command", "command": "npx -y linksee-memory-guard", "timeout": 15 }
+          { "type": "command", "command": "npx -y linksee-memory guard", "timeout": 15 }
         ]
       }
     ],
@@ -221,7 +221,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
       {
         "matcher": "Edit|Write|Bash",
         "hooks": [
-          { "type": "command", "command": "npx -y linksee-memory-guard", "timeout": 8 }
+          { "type": "command", "command": "npx -y linksee-memory guard", "timeout": 8 }
         ]
       }
     ]
@@ -231,7 +231,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
 
 It's **project-scoped on purpose** — the guard enforces *this* repo's decisions, and you opt in per project rather than letting it deny tool calls everywhere (the Stop hook from setup, by contrast, is user-global). Declare what it should watch with `declare_anchor(...)`; set `card_policy.gate_mode:'hard'` on an anchor to make a contradiction **block** instead of just warn (the soft default only re-injects). Anchors that are stale (`at_risk`), superseded, or card-disabled never gate.
 
-> Developing linksee-memory itself? The repo dogfoods the guard via a (gitignored) `.claude/settings.json` that points at the local build (`node ${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js`) so it runs against your uncommitted changes. End-user projects should use the published `npx -y linksee-memory-guard` form above.
+> Developing linksee-memory itself? The repo dogfoods the guard via a (gitignored) `.claude/settings.json` that points at the local build (`node ${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js`) so it runs against your uncommitted changes. End-user projects should use the published `npx -y linksee-memory guard` form above.
 
 ---
 
@@ -287,7 +287,7 @@ Every memory is tagged with **exactly one layer**. `caveat`-layer entries are pr
 ## Quick Start — One Command
 
 ```bash
-npx linksee-memory-setup
+npx -y linksee-memory setup
 ```
 
 This does everything:
@@ -314,7 +314,7 @@ Tools appear as `mcp__linksee__remember`, `mcp__linksee__recall`, `mcp__linksee_
 **Install the skill (auto-invocation):**
 
 ```bash
-npx -y linksee-memory-install-skill
+npx -y linksee-memory install-skill
 ```
 
 Copies `SKILL.md` to `~/.claude/skills/linksee-memory/`. Agent auto-fires on phrases like "前に…", "また同じエラー", "覚えておいて", new task starts, file edits, etc.
@@ -330,7 +330,7 @@ Add to `~/.claude/settings.json`:
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "npx -y linksee-memory-sync" }
+          { "type": "command", "command": "npx -y linksee-memory sync" }
         ]
       }
     ]
@@ -388,20 +388,15 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 <summary><strong>OpenAI Codex CLI</strong></summary>
 
 ```bash
-codex --mcp-server "npx -y linksee-memory"
+codex mcp add linksee -- npx -y linksee-memory
 ```
 
-Or add to `~/.codex/config.json`:
+Or add to `~/.codex/config.toml`:
 
-```json
-{
-  "mcpServers": {
-    "linksee": {
-      "command": "npx",
-      "args": ["-y", "linksee-memory"]
-    }
-  }
-}
+```toml
+[mcp_servers.linksee]
+command = "npx"
+args = ["-y", "linksee-memory"]
 ```
 
 </details>
@@ -464,7 +459,7 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 
 | Feature | Detail |
 |---|---|
-| **One-command setup** | `npx linksee-memory-setup` — registers MCP server, installs skill, configures auto-capture hook. One command instead of three. |
+| **One-command setup** | `npx -y linksee-memory setup` — registers MCP server, installs skill, configures auto-capture hook. One command instead of three. |
 | **Structured memory v2** | 3-axis classification (altitude × type × state) for every memory. Auto-extraction from sessions produces machine-scannable JSON, not raw chat dumps. |
 | **Precision recall guide** | SKILL.md now teaches agents HOW to write effective queries, WHEN to recall vs skip, and WHEN to proactively surface caveats before risky actions. |
 | **Five MCP Blocks** | Tools + Resources + Prompts + Sampling + Roots + Elicitation. Most MCP servers expose only Tools; linksee-memory implements all five primitives. |
@@ -505,13 +500,13 @@ Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents
 
 | Command | Purpose |
 |---|---|
-| `npx linksee-memory-setup` | One-command setup: MCP server + skill + Stop hook, then offers to wire the re-injection guard into this project. Idempotent — skips what's already done. |
+| `npx -y linksee-memory setup` | One-command setup: MCP server + skill + Stop hook, then offers to wire the re-injection guard into this project. Idempotent — skips what's already done. |
 | `npx linksee-memory` | MCP server (stdio) |
-| `npx linksee-memory-sync` | Claude Code Stop-hook entry point |
-| `npx linksee-memory-guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired per-project (see [Re-injection Guard](#reinjection-guard)); fail-open. |
-| `npx linksee-memory-import` | Batch-import Claude Code session JSONL history |
-| `npx linksee-memory-install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
-| `npx linksee-memory-stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
+| `npx -y linksee-memory sync` | Claude Code Stop-hook entry point |
+| `npx -y linksee-memory guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired per-project (see [Re-injection Guard](#reinjection-guard)); fail-open. |
+| `npx -y linksee-memory import` | Batch-import Claude Code session JSONL history |
+| `npx -y linksee-memory install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
+| `npx -y linksee-memory stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
 
 ## The 6 memory layers
 
@@ -561,7 +556,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ Five MCP Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
 - ✅ Stop-hook auto-capture for Claude Code
 - ✅ JP/EN trigram FTS5
-- ✅ One-command setup (`npx linksee-memory-setup`)
+- ✅ One-command setup (`npx -y linksee-memory setup`)
 - ✅ Structured memory v2 (3-axis classification: altitude × type × state)
 - ✅ Cross-LLM: Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI
 - ✅ Landing page ([linksee-site.vercel.app](https://linksee-site.vercel.app))
@@ -638,7 +633,7 @@ No account, no credit card, no API key. Just install and use.
    ```bash
    ls ~/.claude/skills/linksee-memory/SKILL.md
    ```
-   If absent, run `npx -y linksee-memory-install-skill`.
+   If absent, run `npx -y linksee-memory install-skill`.
 2. Restart Claude Code. Skills are indexed on session start.
 3. Check that the MCP is registered under the name `linksee` (the skill expects `mcp__linksee__*` tool names):
    ```bash
@@ -653,9 +648,9 @@ No account, no credit card, no API key. Just install and use.
 1. Check the hook log: `cat ~/.linksee-memory/hook.log`
 2. Run a manual test:
    ```bash
-   echo '{"session_id":"test","transcript_path":"/path/to/some.jsonl"}' | npx linksee-memory-sync
+   echo '{"session_id":"test","transcript_path":"/path/to/some.jsonl"}' | npx -y linksee-memory sync
    ```
-3. Make sure the `Stop` hook in `~/.claude/settings.json` points to `npx -y linksee-memory-sync` (not the old `-import`).
+3. Make sure the `Stop` hook in `~/.claude/settings.json` points to `npx -y linksee-memory sync` (not the old `-import`).
 </details>
 
 <details>
@@ -664,7 +659,7 @@ No account, no credit card, no API key. Just install and use.
 v0.0.6+ fixed the entity detection bug that collapsed all memories into the session's starting cwd. To re-index existing history with correct project attribution, run:
 
 ```bash
-npx linksee-memory-import --all
+npx -y linksee-memory import --all
 ```
 
 The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
@@ -792,12 +787,18 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 
 ## Changelog
 
-### v0.11.0 — The Map: `where_am_i` + `linksee-memory-map` (2026-06-15)
+### v0.11.1 — Cold-start fixes (2026-06-16)
+
+- **Run any CLI through the package name:** `npx -y linksee-memory setup` (and `map`, `sync`, `guard`, `stats`, `import`, `install-skill`). A fresh user couldn't reach the standalone bins (`linksee-memory-setup`, …) via `npx` — npx resolves package names, not sibling bin names — so the one-command install 404'd. The main bin now dispatches subcommands; the standalone bins remain as aliases.
+- **`map` exits gracefully** with a next-step message when there's no `map.yaml` yet (was a raw stack trace — the exact state of a first-time user).
+- **serverInfo** now reports the real package version (was pinned to an old string).
+
+### v0.11.0 — The Map: `where_am_i` + `linksee-memory map` (2026-06-15)
 
 **Memory is the entry point; the product map is the new surface.** Drift detection grows up from individual anchors into a whole-product map you navigate from the CLI.
 
 - **`where_am_i`** (11th MCP tool) — locate the current topic/file on the Current Truth Map and get its blast radius. Call it with no args to auto-locate from your recent edits.
-- **`linksee-memory-map`** CLI — `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. A `map.yaml` (git source of truth) describes how value reaches your user; the reconciler checks it against your code with file:line evidence. Bilingual: add `--lang ja`.
+- **`linksee-memory map`** CLI — `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. A `map.yaml` (git source of truth) describes how value reaches your user; the reconciler checks it against your code with file:line evidence. Bilingual: add `--lang ja`.
 - Graded blast radius (`must fix together` / `should align` / `fyi`), declared-vs-reality verdicts, and an anti-graveyard guard for accounted-for drift.
 - Per-project keys so the Map handles many projects at once.
 
@@ -901,7 +902,7 @@ Based on one week of dogfooding, here's what changed:
 **New tools**
 - `update_memory` — atomic edit with preserved `memory_id`. Solves the "forget+remember breaks session_file_edits links" bug.
 - `list_entities` — fast "what do I know about?" primitive for session init. Supports `kind`/`min_memories` filters and returns layer breakdown.
-- `npx linksee-memory-stats` — local DB summary CLI.
+- `npx -y linksee-memory stats` — local DB summary CLI.
 
 **`recall` enhancements**
 - `match_reasons` array on each memory: e.g. `["content_match_fts", "heat:hot", "pinned"]`.
