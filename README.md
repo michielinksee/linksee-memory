@@ -171,7 +171,7 @@ It's **project-scoped on purpose** — the guard enforces *this* repo's decision
 
 Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. And none of them notice when this week's work contradicts last week's decision. **linksee-memory keeps the WHY — and watches the drift.**
 
-It is a Model Context Protocol (MCP) server with **10 tools** that gives any AI agent structured memory + drift detection:
+It is a Model Context Protocol (MCP) server with **11 tools** that gives any AI agent structured memory + drift detection:
 
 | | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
 |---|---|---|---|
@@ -403,7 +403,7 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 
 </details>
 
-## 10 Tools (v0.10)
+## 11 Tools
 
 ### Memory tools
 
@@ -421,6 +421,7 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 | `check_decision` | **Deep-dive into a specific decision.** Returns the full context: what was decided, why, what reality says, pending candidates, and drift edges. |
 | `declare_anchor` | **Record a decision as a truth-map anchor.** The drift detector checks these against committed reality. Supports v9 fields (domain, confidence, lifecycle, review_after). |
 | `resolve_drift` | **Close the loop.** Record a resolution: `fix` (reality now matches), `supersede` (intent evolved), `acknowledge` (parking with review date), or `dismiss` (false positive). |
+| `where_am_i` | **"Where on the Map am I, and what else does this touch?"** Locates the current topic/file on the Current Truth Map and returns its journey stage + blast radius (the `must-stay-consistent-with` / `should-align-with` dependents) + the decision behind it. The per-turn re-anchor that stops you optimizing one node while silently breaking its neighbors. |
 
 ### Fork-point tools (v0.10)
 
@@ -430,7 +431,7 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 | `dream` | **Consolidate orphaned proposals against the North Star.** Returns the project's direction/goals/ICP alongside unresolved proposals; the evaluating agent decides per candidate: surface (genuinely important fork) or dismiss (outdated / irrelevant / implicitly resolved). |
 | `resolve_proposal` | **Record the verdict** for each dreamed proposal: `surface` (keep visible on the dashboard for human decision) or `dismiss` (remove from the dashboard). |
 
-Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence; v0.10 added the fork-point trio for orphaned-proposal triage. The memory tools are unchanged.
+Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence; v0.10 added the fork-point trio for orphaned-proposal triage; `where_am_i` adds the Current Truth Map's per-turn positional re-anchor. The memory tools are unchanged.
 
 ### CLI utilities
 
