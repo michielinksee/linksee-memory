@@ -121,7 +121,9 @@ nodes:
     stage: understand
     statement: README=事実上の主LP — Three spells/Quick Start/10 Tools/Pricing/Telemetry契約
     status: active
-    revival_condition: where_am_i を npm publish したら README の tools 一覧を11に更新して解消（accounted-for）
+    # accounted-for は必ず「解除条件＋期限」を持つ（墓場化防止 / engineer review）
+    revival_condition: where_am_i を npm publish したら README の tools 一覧を11に更新して解消
+    review_by: 2026-06-23   # where_am_i 出荷目標(HN)。過ぎたら readme ドリフトが再エスカレーション
     reality:
       why: READMEは「10 tools」のまま。コードは where_am_i 追加で11ツール登録、READMEに記載なし。
       fix:
