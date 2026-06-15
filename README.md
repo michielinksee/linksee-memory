@@ -19,9 +19,9 @@
 
 | Say this | What happens |
 |---|---|
-| **"use linksee"** ・「リンクシーして」 | Recalls relevant memories before acting |
-| **"linksee this"** ・「これ覚えて」 | Saves the decision / lesson right now |
-| **"what's drifting?"** ・「ズレてない？」 | Reconciles reality against your locked decisions |
+| **"use linksee"** | Recalls relevant memories before acting |
+| **"linksee this"** | Saves the decision / lesson right now |
+| **"what's drifting?"** | Reconciles reality against your locked decisions |
 
 > Make it automatic: add **"Use Linksee Memory"** to your system prompt / `CLAUDE.md`.
 
