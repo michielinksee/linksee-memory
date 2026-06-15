@@ -1,0 +1,65 @@
+# Demo Map for `linksee-memory-map`. Run from this folder:
+#   linksee-memory-map where README.md --file map.yaml
+#   linksee-memory-map explain readme  --file map.yaml
+#   linksee-memory-map status          --file map.yaml
+version: 1
+project: notekeeper
+template: oss-developer-tool
+
+job: >
+  Ship a tiny note CLI where the README, the code, and the package
+  never quietly drift apart.
+
+stages:
+  - { id: discover,   label: discover }
+  - { id: understand, label: understand }
+  - { id: try,        label: try }
+
+nodes:
+  - id: npm
+    layer: surface
+    stage: discover
+    statement: npm package — notekeeper
+    status: active
+    facets: [distribution]
+
+  - id: readme
+    layer: surface
+    stage: understand
+    statement: README — the commands users see (--init / --list / --export)
+    status: active
+    reality:
+      why: The README documents an --export flag, but src/cli.js does not implement it.
+      fix:
+        - implement --export in src/cli.js
+        - or drop the --export claim from the README
+      checks:
+        - { claim: 'README documents the --export flag', kind: signal_present, path: README.md, signal: ['--export'] }
+        - { claim: 'src/cli.js implements --export',      kind: signal_present, dir: src,       signal: ['--export'] }
+    facets: [docs]
+
+  - id: docs-site
+    layer: surface
+    stage: understand
+    statement: Docs site — mirrors the README command reference
+    status: active
+    facets: [docs]
+
+  - id: onboarding
+    layer: surface
+    stage: try
+    statement: One-command setup (npx notekeeper --init)
+    status: active
+    facets: [product]
+
+  - id: cli-engine
+    layer: implementation
+    statement: src/cli.js — the command implementations
+    status: active
+    facets: [engineering]
+
+edges:
+  - { from: cli-engine, to: readme,     type: realizes }                  # code realizes the README's promises
+  - { from: readme,     to: docs-site,  type: must-stay-consistent-with } # docs mirror the README
+  - { from: readme,     to: onboarding, type: should-align-with }
+  - { from: npm,        to: readme,     type: should-align-with }

@@ -368,7 +368,7 @@ CREATE INDEX IF NOT EXISTS idx_injlog_session ON injection_log(session_id, occur
 -- them. Full-rebuild import: the importer wipes a project's rows and re-inserts.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS map_nodes (
-  id              TEXT PRIMARY KEY,                  -- stable slug from map.yaml (e.g. 'readme')
+  id              TEXT NOT NULL,                     -- stable slug from map.yaml (e.g. 'readme'); unique PER PROJECT
   project         TEXT NOT NULL,
   layer           TEXT NOT NULL,                     -- surface | implementation
   stage           TEXT,                              -- journey stage id (NULL for implementation layer)
@@ -389,7 +389,8 @@ CREATE TABLE IF NOT EXISTS map_nodes (
   verdict_evidence TEXT NOT NULL DEFAULT '{}',       -- JSON: file/line/term that decided the verdict
   reconciled_at   INTEGER,                           -- when the reconciler last ran for this node
   extra           TEXT NOT NULL DEFAULT '{}',        -- JSON catch-all (forward-compat fields)
-  updated_at      INTEGER NOT NULL DEFAULT (unixepoch())
+  updated_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (project, id)                          -- a node id is unique PER PROJECT, not globally
 );
 CREATE INDEX IF NOT EXISTS idx_map_nodes_project ON map_nodes(project);
 CREATE INDEX IF NOT EXISTS idx_map_nodes_stage   ON map_nodes(stage);
@@ -408,7 +409,7 @@ CREATE TABLE IF NOT EXISTS map_edges (
   type      TEXT NOT NULL,                           -- realizes|supports|must-stay-consistent-with|should-align-with|mentions|reflux
   strength  TEXT,                                    -- hard|soft|watch (controls AFFECTS noise); NULL → derived from type
   note      TEXT,
-  UNIQUE(from_id, to_id, type)
+  UNIQUE(project, from_id, to_id, type)              -- an edge is unique PER PROJECT
 );
 CREATE INDEX IF NOT EXISTS idx_map_edges_from ON map_edges(from_id);
 CREATE INDEX IF NOT EXISTS idx_map_edges_to   ON map_edges(to_id);
@@ -436,6 +437,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '13');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '14');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '13' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12');
+UPDATE meta SET value = '14' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13');

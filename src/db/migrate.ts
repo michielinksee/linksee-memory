@@ -157,6 +157,14 @@ export function runMigrations(db: Database.Database): void {
     }
   }
 
+  // v13 → v14: per-project uniqueness. map_nodes PK was the global `id`, and map_edges
+  // UNIQUE was global (from_id,to_id,type) — so two projects couldn't both have a `readme`
+  // node or a `readme→docs-site` edge. SQLite can't alter a PK/UNIQUE, so drop + recreate;
+  // safe because importMap rebuilds both from map.yaml on every run.
+  if (currentVersion > 0 && currentVersion < 14) {
+    db.exec('DROP TABLE IF EXISTS map_nodes; DROP TABLE IF EXISTS map_edges;');
+  }
+
   db.exec(sql);
 
   if (currentVersion > 0 && currentVersion < 4) {
