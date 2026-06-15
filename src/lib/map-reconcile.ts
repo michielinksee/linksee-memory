@@ -17,14 +17,15 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.next', 'coverage', 
 const COMMENT_PREFIXES = ['//', '*', '/*', '#', '<!--', '--'];
 const MAX_FILES = 4000;
 
-type CheckKind = 'signal_present' | 'signal_absent' | 'regex_present' | 'regex_absent' | 'file_present' | 'file_absent';
+type CheckKind = 'signal_present' | 'signal_absent' | 'regex_present' | 'regex_absent' | 'file_present' | 'file_absent' | 'section_contains';
 interface Check {
   claim: string;           // human-readable claim this check verifies (shown in `explain`)
   kind: CheckKind;
   dir?: string;            // subtree to scan (code; comments skipped)
   path?: string;           // single file to scan or test for existence (any type; e.g. README.md)
-  signal?: string[];       // terms to look for (signal_*)
+  signal?: string[];       // terms to look for (signal_* / section_contains)
   pattern?: string;        // JS regex source (regex_*) — for "string present but meaning differs"
+  section?: string;        // (section_contains) markdown header to scope the search to (e.g. "Tools")
 }
 interface Reality {
   kind?: CheckKind | 'external';   // single-check shorthand (back-compat)
@@ -126,6 +127,29 @@ function scanDir(root: string, perFile: (file: string) => Hit | null): Hit | nul
 const scanForSignal = (root: string, signals: string[]) => scanDir(root, (f) => scanFileForSignal(f, signals, true));
 const scanForRegex = (root: string, re: RegExp) => scanDir(root, (f) => scanFileForRegex(f, re, true));
 
+// Scan ONLY within a named markdown section (header containing `section`, until the next
+// same-or-higher header). Beats a bare substring: "where_am_i" must be IN the Tools section,
+// not merely somewhere in the file (e.g. next to "未対応です").
+function scanSection(file: string, section: string, signals: string[]): Hit | null {
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch { return null; }
+  const lines = text.split('\n');
+  const want = section.toLowerCase();
+  let start = -1, level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(#{1,6})\s+(.*)$/.exec(lines[i].trim());
+    if (m && m[2].toLowerCase().includes(want)) { start = i; level = m[1].length; break; }
+  }
+  if (start < 0) return null; // section not found at all
+  for (let i = start + 1; i < lines.length; i++) {
+    const h = /^(#{1,6})\s+/.exec(lines[i].trim());
+    if (h && h[1].length <= level) break; // reached the end of this section
+    const hit = signalHit(lines[i], signals, false);
+    if (hit) return { file, line_no: i + 1, line_text: lines[i].trim().slice(0, 200), hit };
+  }
+  return null;
+}
+
 // Run ONE check → ✓/✗ with evidence. path-targeted scans don't skip comments (docs).
 function runCheck(check: Check, repoRoot: string): CheckResult {
   if (check.kind === 'file_present' || check.kind === 'file_absent') {
@@ -145,8 +169,16 @@ function runCheck(check: Check, repoRoot: string): CheckResult {
       detail: found ? `matched /${check.pattern}/` : `/${check.pattern}/ not matched`,
     };
   }
-  // signal scan: a single path (doc, no comment-skip) or a code subtree (comment-skip)
   const signals = (check.signal ?? []).filter(Boolean);
+  // section_contains — the signal must appear inside a named markdown section
+  if (check.kind === 'section_contains') {
+    const hit = check.path ? scanSection(join(repoRoot, check.path), check.section ?? '', signals) : null;
+    return {
+      claim: check.claim, ok: hit != null, file: hit ? hit.file : (check.path ?? null), line: hit ? hit.line_no : null,
+      detail: hit ? `found "${hit.hit}" in section "${check.section}"` : `"${signals.join(', ')}" not in section "${check.section}"`,
+    };
+  }
+  // signal scan: a single path (doc, no comment-skip) or a code subtree (comment-skip)
   const hit = check.path
     ? scanFileForSignal(join(repoRoot, check.path), signals, false)
     : scanForSignal(join(repoRoot, check.dir ?? '.'), signals);

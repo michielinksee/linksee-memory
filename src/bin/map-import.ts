@@ -7,6 +7,7 @@
 //   linksee-memory-map status                # health % + what needs attention now (the triage)
 //   linksee-memory-map explain <node>        # WHY this status + ✓/✗ evidence + FIX + AFFECTS (the hero)
 //   linksee-memory-map affects <node>        # what to change together if you touch this node
+//   linksee-memory-map where <file|topic>    # which Map node a file/work-target belongs to
 //   linksee-memory-map next                  # the prioritized next fix candidate(s)
 //   linksee-memory-map reconcile             # check the hand-written Map against real code/files
 //   linksee-memory-map inspect --json        # machine-readable dump (CI / tooling)
@@ -16,7 +17,7 @@
 import { join } from 'node:path';
 import { openDb, runMigrations } from '../db/migrate.js';
 import { parseMapFile, importMap } from '../lib/map-import.js';
-import { blastRadius, getSuspects, getBlueprint, getNode, getProjectMeta } from '../lib/map-view.js';
+import { blastRadius, getSuspects, getBlueprint, getNode, getProjectMeta, whereAmI } from '../lib/map-view.js';
 import { reconcile } from '../lib/map-reconcile.js';
 
 function flagValue(argv: string[], name: string, dflt: string): string {
@@ -39,7 +40,7 @@ const COLOR_DOT: Record<string, string> = { green: '🟢', red: '🔴', gray: '�
 const repoRoot = flagValue(argv, 'root', process.cwd());
 
 // Triage/diagnosis commands reflect REALITY, so reconcile first (scans repoRoot).
-const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect']);
+const DIAG_SUBS = new Set(['status', 'explain', 'next', 'inspect', 'where']);
 if (DIAG_SUBS.has(sub)) reconcile(db, map.project, repoRoot);
 
 interface VerdictEvidence { reason?: string; why?: string; fix?: string[]; expected?: string; check?: string; checks?: Array<{ claim: string; ok: boolean; file: string | null; line: number | null; detail: string }> }
@@ -252,6 +253,40 @@ if (sub === 'import') {
   const blast = blastRadius(db, map.project, id);
   console.log(`${id} を変えたら一緒に直す先 (${blast.length}) — 強度順:`);
   printAffects(id);
+} else if (sub === 'where') {
+  // "I'm about to touch this file — where is it on the Map, and what does it touch?"
+  const target = argv[1];
+  if (!target) { console.error('usage: linksee-memory-map where <file-or-topic>'); process.exit(1); }
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '');
+  const t = norm(target);
+  const meta = getProjectMeta(db, map.project);
+  const stageLabel = (s: string | null) => (s ? meta?.stages.find((x: any) => x.id === s)?.label ?? s : null);
+  // Ownership = a node whose reality names this FILE explicitly (check.path / reality.path).
+  // `dir:` is a scan SCOPE (e.g. all of src), not ownership — so it does NOT match here.
+  const matched = allNodes().filter((n) => {
+    const r = parseJson(n.reality, {});
+    const paths: string[] = [];
+    if (r.path) paths.push(norm(r.path));
+    for (const c of (r.checks ?? [])) if (c.path) paths.push(norm(c.path));
+    return paths.some((p) => t === p);
+  });
+  if (matched.length) {
+    console.log(`"${target}" は Map 上のこのノードに属します:`);
+    for (const n of matched) {
+      console.log(`\n  ${n.id}${n.stage ? `  [${stageLabel(n.stage)}]` : ''}  ${n.live_verdict ?? n.status}`);
+      console.log(`    ${n.statement}`);
+      console.log('    変えたら一緒に直す先:');
+      printAffects(n.id, '      ');
+    }
+  } else {
+    // no file match → treat the arg as a topic (lexical locate, like where_am_i)
+    const res = whereAmI(db, { project: map.project, query: target });
+    if (!res.matched.length) { console.log(`Map上で "${target}" に該当するファイル/トピックは見つかりませんでした。`); }
+    else {
+      console.log(`ファイル一致なし → トピックとして近いノード:`);
+      for (const m of res.matched) console.log(`  ${m.node.id}${m.stage_label ? `  [${m.stage_label}]` : ''}  (${m.match_reason})`);
+    }
+  }
 } else if (sub === 'next') {
   // local-first: what you can fix in code now, then what to verify externally.
   const attention = allNodes().filter(needsAttention);
