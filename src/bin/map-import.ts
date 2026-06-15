@@ -26,7 +26,15 @@ function flagValue(argv: string[], name: string, dflt: string): string {
 }
 
 const argv = process.argv.slice(2);
-const sub = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'import';
+// positional args, skipping flags and their values (so `where --file x` doesn't read "--file" as the target)
+const VALUE_FLAGS = new Set(['--file', '--root', '--limit']);
+const positionals: string[] = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i].startsWith('--')) { if (VALUE_FLAGS.has(argv[i])) i++; continue; }
+  positionals.push(argv[i]);
+}
+const sub = positionals[0] ?? 'import';
+const arg1 = positionals[1]; // the node-id / file / topic for explain|blast|affects|where
 const mapPath = flagValue(argv, 'file', join(process.cwd(), 'map.yaml'));
 
 const db = openDb();
@@ -134,7 +142,7 @@ if (sub === 'import') {
   }
   console.log(`\nVerdicts: ${res.verdicts.filter(v => v.verdict === 'convergence').length} convergence · ${res.verdicts.filter(v => v.verdict === 'divergence').length} divergence · ${res.verdicts.filter(v => v.verdict === 'absence').length} absence · ${res.external} external`);
 } else if (sub === 'blast') {
-  const id = argv[1];
+  const id = arg1;
   if (!id) { console.error('usage: linksee-memory-map blast <node-id>'); process.exit(1); }
   const blast = blastRadius(db, map.project, id);
   console.log(`blast radius for ${id} (${blast.length}):`);
@@ -201,7 +209,7 @@ if (sub === 'import') {
   for (const n of verified) console.log(`  ${n.id.padEnd(20)} ${n.status === 'suspect' ? 'refuted suspect → convergence' : 'verified'}`);
   console.log(`\nNo action: ${nodes.length - attention.length - verified.length}`);
 } else if (sub === 'explain') {
-  const id = argv[1];
+  const id = arg1;
   if (!id) { console.error('usage: linksee-memory-map explain <node>'); process.exit(1); }
   const d = diagOf(id);
   if (!d) { console.error(`node not found: ${id}`); process.exit(1); }
@@ -248,15 +256,29 @@ if (sub === 'import') {
   printAffects(id);
   console.log(`\nNEXT\n  linksee-memory-map reconcile          # re-check after a fix\n  linksee-memory-map affects ${id}`);
 } else if (sub === 'affects') {
-  const id = argv[1];
+  const id = arg1;
   if (!id) { console.error('usage: linksee-memory-map affects <node>'); process.exit(1); }
   const blast = blastRadius(db, map.project, id);
   console.log(`${id} を変えたら一緒に直す先 (${blast.length}) — 強度順:`);
   printAffects(id);
 } else if (sub === 'where') {
   // "I'm about to touch this file — where is it on the Map, and what does it touch?"
-  const target = argv[1];
-  if (!target) { console.error('usage: linksee-memory-map where <file-or-topic>'); process.exit(1); }
+  const target = arg1;
+  if (!target) {
+    // no arg → auto-locate from what you just edited this session
+    const res = whereAmI(db, { project: map.project });
+    if (!res.matched.length) { console.log('直近の編集からMap上の位置を特定できませんでした。'); }
+    else {
+      console.log('直近の編集から推定した「今いる場所」:');
+      for (const m of res.matched) {
+        console.log(`\n  ${m.node.id}${m.stage_label ? `  [${m.stage_label}]` : ''}  ${m.node.live_verdict ?? m.node.status}  (${m.match_reason})`);
+        console.log('    変えたら一緒に直す先:');
+        printAffects(m.node.id, '      ');
+      }
+    }
+    db.close();
+    process.exit(0);
+  }
   const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '');
   const t = norm(target);
   const meta = getProjectMeta(db, map.project);
