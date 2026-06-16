@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, renameSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -13,12 +13,40 @@ export function getDbPath(): string {
   return DB_PATH;
 }
 
+function openAt(path: string): Database.Database {
+  const db = new Database(path);
+  try {
+    db.pragma('journal_mode = WAL'); // first real read of the file header — throws if it isn't a DB
+    db.pragma('foreign_keys = ON');
+    return db;
+  } catch (e) {
+    try { db.close(); } catch { /* ignore */ } // release the handle so a corrupt file can be renamed (Windows locks it otherwise)
+    throw e;
+  }
+}
+
 export function openDb(): Database.Database {
   mkdirSync(DEFAULT_DB_DIR, { recursive: true });
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  return db;
+  try {
+    return openAt(DB_PATH);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // A corrupt / non-database file throws on the first pragma. Don't crash with a raw
+    // stack trace: preserve the bad file (so it can be recovered) and start a fresh DB.
+    if (/not a database|file is encrypted|malformed|disk image/i.test(msg) && existsSync(DB_PATH)) {
+      const backup = `${DB_PATH}.corrupt-${Date.now()}`;
+      try { renameSync(DB_PATH, backup); } catch { /* best effort */ }
+      for (const ext of ['-wal', '-shm']) {
+        try { if (existsSync(DB_PATH + ext)) renameSync(DB_PATH + ext, backup + ext); } catch { /* ignore */ }
+      }
+      process.stderr.write(
+        `[linksee-memory] the memory database was unreadable (${msg}). ` +
+        `Moved it to ${backup} and started a fresh one — your old memories are preserved there for recovery.\n`,
+      );
+      return openAt(DB_PATH);
+    }
+    throw err; // not a corruption we recognize — surface it
+  }
 }
 
 export function runMigrations(db: Database.Database): void {

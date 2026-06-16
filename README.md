@@ -838,6 +838,11 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 
 ## Changelog
 
+### v0.11.3 — Robustness + MCP hygiene (2026-06-16)
+
+- **Corrupt-database recovery:** if `~/.linksee-memory/memory.db` is unreadable, linksee preserves it as `memory.db.corrupt-<timestamp>` and starts a fresh one (with a clear message) instead of crashing with a raw SQLite error. Old memories stay recoverable in the backup.
+- **`recall` tool description** no longer suggests editing your system prompt — cleaner MCP citizenship.
+
 ### v0.11.2 — More cold-start hardening (2026-06-16)
 
 - **`stats` works on a fresh database** instead of crashing with `no such table` — it ensures the schema exists first (it may be the first command a new user runs).
