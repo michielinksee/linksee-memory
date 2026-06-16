@@ -419,6 +419,26 @@ Add to `~/.gemini/settings.json`:
 
 </details>
 
+<details>
+<summary><strong>Claude Desktop</strong></summary>
+
+Add the same stdio command to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory"]
+    }
+  }
+}
+```
+
+Config file: macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`. Restart Claude Desktop.
+
+</details>
+
 All editors share the same `~/.linksee-memory/memory.db`. A decision made in Claude Code is recalled in Cursor. A caveat recorded in Windsurf prevents the same mistake in Codex.
 
 ### Database location
@@ -592,6 +612,20 @@ Claude Code ships a built-in memory feature at `~/.claude/projects/<path>/memory
 - linksee-memory = structured cross-agent brain with file diff cache and per-edit WHY
 
 Use both.
+
+## Security & privacy
+
+linksee-memory runs locally and is built to read — and send — as little as possible.
+
+- **Local-first.** Memory is one SQLite file at `~/.linksee-memory/memory.db`. No account, no cloud, no API key.
+- **Telemetry is opt-in and OFF by default.** Nothing is sent unless you set `LINKSEE_TELEMETRY=basic`. Even then it never sends your source code, file contents, prompts, conversation, entity/project names, or the memory DB — only anonymous counters ([details](#telemetry-opt-in-off-by-default)).
+- **No automatic repo crawling.** linksee reads: memory you explicitly save, your `map.yaml`, the specific files a map reality-check points at, the local SQLite DB, and — when the Stop hook fires — your Claude Code session transcript (locally, to capture what happened). It does **not** crawl your repo, read `.env`/secrets/`node_modules`, or touch your home directory on its own.
+- **Clean MCP transport.** The server writes only JSON-RPC to stdout; all logs go to stderr.
+- **Hooks are documented and removable.** `setup` adds a Stop hook (session capture) and an optional guard hook. They make no network calls by default, are time-bounded, fail-open (a hook error never breaks your session), and are listed under [Uninstall](#uninstall).
+- **No shell-injection surface.** Subcommands run via `spawn` with array args and `shell: false`, from a fixed allowlist; `map.yaml` is parsed with the safe `yaml` parser (no arbitrary tag execution).
+- **Supply chain.** MIT, published from a single owner. `npx -y linksee-memory` runs the published package — pin a version in CI if you need reproducibility.
+
+Found a security issue? See [SECURITY.md](SECURITY.md).
 
 ## Telemetry (opt-in, off by default)
 
