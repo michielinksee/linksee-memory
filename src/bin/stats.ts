@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // linksee-memory-stats — summary of the local memory DB.
 // Usage:
-//   npx linksee-memory-stats
-//   npx linksee-memory-stats --json
-//   npx linksee-memory-stats --per-entity 10
+//   npx -y linksee-memory stats
+//   npx -y linksee-memory stats --json
+//   npx -y linksee-memory stats --per-entity 10
 //
 // Safe to run anytime (read-only).
 
 import { statSync } from 'node:fs';
-import { openDb, getDbPath } from '../db/migrate.js';
+import { openDb, runMigrations, getDbPath } from '../db/migrate.js';
 
 interface Args {
   json: boolean;
@@ -67,6 +67,7 @@ function main() {
   try { sizeBytes = statSync(dbPath).size; } catch { /* no db yet */ }
 
   const db = openDb();
+  runMigrations(db); // ensure schema exists — `stats` may be the first command a fresh user runs
 
   const counts = {
     entities: (db.prepare('SELECT COUNT(*) as c FROM entities').get() as any).c as number,

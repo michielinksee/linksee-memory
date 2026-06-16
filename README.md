@@ -425,6 +425,23 @@ All editors share the same `~/.linksee-memory/memory.db`. A decision made in Cla
 
 Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env var.
 
+### Uninstall
+
+```bash
+# 1. Remove the MCP server registration
+claude mcp remove linksee
+
+# 2. Remove the hooks from settings.json (edit the file, delete the linksee entries):
+#    ~/.claude/settings.json          → the Stop hook running "npx -y linksee-memory sync"
+#    <project>/.claude/settings.json  → the SessionStart/PreToolUse hooks running "npx -y linksee-memory guard"
+
+# 3. Remove the installed skill and all local memory (optional)
+rm -rf ~/.claude/skills/linksee-memory
+rm -rf ~/.linksee-memory   # deletes all stored memory — nothing is kept anywhere else
+```
+
+Nothing ever leaves your machine, so step 3 fully erases everything Linksee stored.
+
 ## What's new in v0.9
 
 | Feature | Detail |
@@ -786,6 +803,11 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 - **Company**: Synapse Arrows PTE. LTD. (Singapore)
 
 ## Changelog
+
+### v0.11.2 — More cold-start hardening (2026-06-16)
+
+- **`stats` works on a fresh database** instead of crashing with `no such table` — it ensures the schema exists first (it may be the first command a new user runs).
+- **`map --help`** prints usage instead of trying to import a map.
 
 ### v0.11.1 — Cold-start fixes (2026-06-16)
 

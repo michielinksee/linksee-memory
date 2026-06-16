@@ -39,6 +39,23 @@ const sub = positionals[0] ?? 'import';
 const arg1 = positionals[1]; // the node-id / file / topic for explain|blast|affects|where
 const mapPath = flagValue(argv, 'file', join(process.cwd(), 'map.yaml'));
 
+if (argv.includes('--help') || argv.includes('-h') || sub === 'help') {
+  process.stdout.write(
+    `linksee-memory map — navigate your product map (map.yaml) and catch drift\n\n` +
+    `Usage: npx -y linksee-memory map <command> [args]\n\n` +
+    `  where [<file>]    where am I? (no arg = infer from recent edits) → node + what it affects\n` +
+    `  explain <node>    why this status? — declared vs reality + file:line evidence + fix\n` +
+    `  affects <node>    what to change together if you touch this node\n` +
+    `  status            whole-project health % + what needs attention\n` +
+    `  next              the prioritized next fix candidate(s)\n` +
+    `  reconcile         re-check the map against the real code/files\n` +
+    `  inspect --json    machine-readable dump (CI / tooling)\n` +
+    `  blueprint         stage x node board (colors = live verdict)\n\n` +
+    `Flags: --file <map.yaml>  --root <repo>  --lang ja\n`,
+  );
+  process.exit(0);
+}
+
 const db = openDb();
 runMigrations(db);
 
