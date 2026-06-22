@@ -618,7 +618,7 @@ Use both.
 linksee-memory runs locally and is built to read — and send — as little as possible.
 
 - **Local-first.** Memory is one SQLite file at `~/.linksee-memory/memory.db`. No account, no cloud, no API key.
-- **Telemetry is opt-in and OFF by default.** Nothing is sent unless you set `LINKSEE_TELEMETRY=basic`. Even then it never sends your source code, file contents, prompts, conversation, entity/project names, or the memory DB — only anonymous counters ([details](#telemetry-opt-in-off-by-default)).
+- **Telemetry is opt-in and OFF by default.** `setup` asks once; nothing is sent unless you agree there (or set `LINKSEE_TELEMETRY=basic`). Even then it never sends your source code, file contents, prompts, conversation, entity/project names, or the memory DB — only anonymous counters ([details](#telemetry-opt-in-off-by-default)).
 - **No automatic repo crawling.** linksee reads: memory you explicitly save, your `map.yaml`, the specific files a map reality-check points at, the local SQLite DB, and — when the Stop hook fires — your Claude Code session transcript (locally, to capture what happened). It does **not** crawl your repo, read `.env`/secrets/`node_modules`, or touch your home directory on its own.
 - **Clean MCP transport.** The server writes only JSON-RPC to stdout; all logs go to stderr.
 - **Hooks are documented and removable.** `setup` adds a Stop hook (session capture) and an optional guard hook. They make no network calls by default, are time-bounded, fail-open (a hook error never breaks your session), and are listed under [Uninstall](#uninstall).
@@ -636,6 +636,8 @@ linksee-memory ships with **opt-in** anonymous telemetry that helps us understan
 ```bash
 export LINKSEE_TELEMETRY=basic     # opt in
 export LINKSEE_TELEMETRY=off       # opt out (or just unset the variable)
+# `linksee-memory setup` also asks once and records your choice in
+# ~/.linksee-memory/telemetry-consent (delete that file to be asked again).
 ```
 
 ### Exactly what gets sent (Level 1 contract)

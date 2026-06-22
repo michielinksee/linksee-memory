@@ -35,6 +35,16 @@ export type TelemetryMode = 'off' | 'basic';
 export function getTelemetryMode(): TelemetryMode {
   const v = (process.env.LINKSEE_TELEMETRY || '').toLowerCase().trim();
   if (v === 'basic' || v === 'on' || v === '1' || v === 'true') return 'basic';
+  if (v) return 'off'; // any explicit env value (off/0/false/no/…) always wins
+  // No env override → use the consent recorded at setup time. Stays off if absent,
+  // so "off by default" holds: nothing is sent unless the user agreed at setup.
+  try {
+    const consentFile = join(TELEMETRY_DIR, 'telemetry-consent');
+    if (existsSync(consentFile)) {
+      const c = readFileSync(consentFile, 'utf8').trim().toLowerCase();
+      if (c === 'basic' || c === 'on') return 'basic';
+    }
+  } catch { /* ignore */ }
   return 'off';
 }
 

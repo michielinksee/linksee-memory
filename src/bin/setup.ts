@@ -77,6 +77,10 @@ const PROJECT_DIR = process.cwd();
 const PROJECT_CLAUDE_DIR = join(PROJECT_DIR, '.claude');
 const PROJECT_SETTINGS_PATH = join(PROJECT_CLAUDE_DIR, 'settings.json');
 
+// Opt-in telemetry consent recorded at setup time (read by telemetry.ts getTelemetryMode).
+const TELEMETRY_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(HOME, '.linksee-memory');
+const TELEMETRY_CONSENT_FILE = join(TELEMETRY_DIR, 'telemetry-consent');
+
 const CHECK = '\x1b[32m✓\x1b[0m';
 const SKIP = '\x1b[33m○\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -266,13 +270,14 @@ function guardWiredFor(s: ProjectSettings, ev: string): boolean {
   );
 }
 
-function askYesNo(question: string): Promise<boolean> {
+function askYesNo(question: string, defaultYes = true): Promise<boolean> {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`${question} [Y/n] `, (ans) => {
+    rl.question(`${question} ${defaultYes ? '[Y/n]' : '[y/N]'} `, (ans) => {
       rl.close();
       const a = ans.trim().toLowerCase();
-      resolve(a === '' || a === 'y' || a === 'yes'); // default = yes
+      if (a === '') return resolve(defaultYes);
+      resolve(a === 'y' || a === 'yes');
     });
   });
 }
@@ -335,6 +340,47 @@ async function configureGuard(): Promise<boolean> {
 const guardConfigured = await configureGuard();
 console.log('');
 
+// ── Telemetry consent (opt-in, anonymous, off unless you agree) ──────────
+async function configureTelemetryConsent(): Promise<void> {
+  console.log(`${BOLD}Anonymous usage stats${RESET} ${DIM}(optional)${RESET}`);
+
+  const env = (process.env.LINKSEE_TELEMETRY || '').toLowerCase().trim();
+  if (env) {
+    console.log(`  ${SKIP} Controlled by LINKSEE_TELEMETRY=${env} ${DIM}(env overrides)${RESET}`);
+    return;
+  }
+  if (existsSync(TELEMETRY_CONSENT_FILE)) {
+    let cur = 'off';
+    try { cur = (readFileSync(TELEMETRY_CONSENT_FILE, 'utf8').trim().toLowerCase()) || 'off'; } catch { /* ignore */ }
+    console.log(`  ${SKIP} Already chosen: ${cur === 'basic' ? 'on' : 'off'} ${DIM}(edit ${TELEMETRY_CONSENT_FILE} to change)${RESET}`);
+    return;
+  }
+  if (dryRun) {
+    console.log(`  ${DIM}[dry-run] Would ask whether to share anonymous usage stats${RESET}`);
+    return;
+  }
+  const dnt = process.env.DO_NOT_TRACK === '1' || process.env.DO_NOT_TRACK === 'true';
+  if (dnt || autoYes || !process.stdin.isTTY) {
+    try { mkdirSync(TELEMETRY_DIR, { recursive: true }); writeFileSync(TELEMETRY_CONSENT_FILE, 'off'); } catch { /* best-effort */ }
+    const why = dnt ? 'DO_NOT_TRACK' : autoYes ? '--yes → off' : 'non-interactive';
+    console.log(`  ${SKIP} Left off ${DIM}(${why})${RESET}`);
+    return;
+  }
+
+  console.log(`  ${DIM}Helps us see which workflows actually work. Anonymous counts only —`);
+  console.log(`  never your memory, code, prompts, file contents, entity names, or paths.`);
+  console.log(`  Off unless you say yes; change anytime with LINKSEE_TELEMETRY=off.${RESET}`);
+  const ok = await askYesNo('  Share anonymous usage stats?', false);
+  try {
+    mkdirSync(TELEMETRY_DIR, { recursive: true });
+    writeFileSync(TELEMETRY_CONSENT_FILE, ok ? 'basic' : 'off');
+  } catch { /* best-effort */ }
+  console.log(`  ${ok ? CHECK : SKIP} Telemetry ${ok ? 'enabled — thank you!' : 'left off'}`);
+}
+
+await configureTelemetryConsent();
+console.log('');
+
 // ── Summary ──────────────────────────────────────────────
 
 console.log(`${BOLD}Setup complete!${RESET}`);
@@ -342,7 +388,7 @@ console.log('');
 console.log('How it works:');
 console.log(`  ${DIM}• Every session is auto-captured (decisions, caveats, learnings)${RESET}`);
 console.log(`  ${DIM}• Agent auto-recalls past context when starting a task${RESET}`);
-console.log(`  ${DIM}• Memory is local-first (nothing leaves your machine)${RESET}`);
+console.log(`  ${DIM}• Memory is local-first (your memory never leaves your machine)${RESET}`);
 console.log(`  ${DIM}• Works across Claude Code, Cursor, Windsurf, Codex, Gemini (cross-agent)${RESET}`);
 if (guardConfigured) {
   console.log(`  ${DIM}• Re-injection guard re-surfaces this project's accepted decisions before edits${RESET}`);
