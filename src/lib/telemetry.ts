@@ -6,6 +6,9 @@
 //   - NEVER sends conversation content, user messages, file content,
 //     entity names, project paths, or any layer text (goal/context/emotion/
 //     impl/caveat/learning content is not included).
+//   - anchor_creates / anchor_returns are COUNTS only (decisions recorded /
+//     revisited this session, for the D7 retention metric) — never any
+//     statement text or anchor content.
 //   - Anonymous UUID generated locally on first opt-in; stored at
 //     ~/.linksee-memory/telemetry-id. User can delete it any time.
 //   - Disable any time: LINKSEE_TELEMETRY=off (or unset the variable).
@@ -16,10 +19,11 @@ import { join, extname, join as pathJoin, dirname as pathDirname } from 'node:pa
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
+import { getSessionAnchorCounts } from './anchor-touch.js';
 
-// Production endpoint hosted on Railway. (kansei-link.com is a GitHub Pages site;
-// the dynamic API lives on the Railway deployment.)
-const DEFAULT_ENDPOINT = 'https://kansei-link-mcp-production.up.railway.app/api/telemetry/linksee';
+// Production endpoint: opt-in telemetry collector on linksee-site (Vercel).
+// Migrated 2026-06 off the retired Railway deployment (which had gone 404).
+const DEFAULT_ENDPOINT = 'https://linksee-site.vercel.app/api/telemetry/linksee';
 // Allow override for testing or self-hosting
 const ENDPOINT = process.env.LINKSEE_TELEMETRY_URL || DEFAULT_ENDPOINT;
 
@@ -79,6 +83,8 @@ interface TelemetryPayload {
   read_smart_calls: number;
   recall_calls: number;
   recall_file_calls: number;
+  anchor_creates: number;   // decisions recorded this session (D7 metric — count only)
+  anchor_returns: number;   // interactions with a decision this session (inspect/review/resolve/guard re-surface)
 }
 
 // Build a payload from a single just-imported session.
@@ -121,6 +127,8 @@ export function buildPayload(
   const tsRow = db.prepare(`SELECT MIN(occurred_at) as start, MAX(occurred_at) as end FROM session_file_edits WHERE session_id = ?`).get(sessionId) as { start: number; end: number };
   if (tsRow && tsRow.start && tsRow.end) durationSec = Math.max(0, tsRow.end - tsRow.start);
 
+  const anchorCounts = getSessionAnchorCounts(db, tsRow?.start ?? 0, tsRow?.end ?? 0);
+
   return {
     anon_id: getOrCreateAnonId(),
     linksee_version: getLinkseeVersion(),
@@ -136,6 +144,8 @@ export function buildPayload(
     read_smart_calls: 0,
     recall_calls: 0,
     recall_file_calls: 0,
+    anchor_creates: anchorCounts.anchor_creates,
+    anchor_returns: anchorCounts.anchor_returns,
   };
 }
 
