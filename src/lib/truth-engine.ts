@@ -175,6 +175,37 @@ function buildResolutionLookup(db: Database.Database): (id: number) => Resolutio
 
 // ── Core: getTruthView ───────────────────────────────────────────────────────
 
+/**
+ * Anchors that have been explicitly superseded ("intent evolved, this is the new direction").
+ *
+ * Resolutions live in meta.t3_resolutions keyed `A<anchor_id>`, one record per anchor
+ * (a later resolve_drift overwrites the earlier one), so the current resolution for
+ * anchor N is simply t3_resolutions["A"+N].
+ *
+ * NOTE the asymmetry: a supersede record names BOTH sides (superseded_node = the old
+ * anchor, superseded_by = the new one). Only the OLD one is retired — the new anchor must
+ * keep enforcing, so we match on `superseded_node` and never on `superseded_by`.
+ *
+ * Used by the gate (guard.ts) so that the enforcement layer honours the same
+ * make-or-break rule as the reporting layer: a divergence accounted for by a recorded
+ * resolution is NOT drift.
+ */
+export function supersededAnchorIds(db: Database.Database): Set<number> {
+  const out = new Set<number>();
+  for (const key of ['t3_resolutions', 't2_resolutions'] as const) {
+    const res = safeJsonParse(
+      (db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as any)?.value,
+      {} as Record<string, any>,
+    );
+    for (const r of Object.values(res)) {
+      if (r && r.action === 'supersede' && typeof r.superseded_node === 'number') {
+        out.add(r.superseded_node);
+      }
+    }
+  }
+  return out;
+}
+
 export function getTruthView(
   db: Database.Database,
   opts: { domain?: string; decision_mode?: string } = {},

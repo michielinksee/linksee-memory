@@ -14,6 +14,7 @@
 
 import type Database from 'better-sqlite3';
 import { normPath, compileGlob, parseArray, matchViolation, SCRAPE_ANCHOR } from './lexical-match.js';
+import { supersededAnchorIds } from './truth-engine.js';
 
 // "accepted = the only thing the gate compares against": declared (status active), still live
 // (lifecycle active|experiment — NOT at_risk/superseded/deprecated), and not explicitly card-disabled.
@@ -88,12 +89,18 @@ function bestEffort(fn: () => void): void {
 }
 
 export function acceptedAnchors(db: Database.Database): AcceptedAnchor[] {
-  return db
+  const rows = db
     .prepare(
       `SELECT id, kind, statement, rationale, affects, detect_terms, violation_signal, card_policy
          FROM drift_anchors WHERE ${ACCEPTED_SQL}`
     )
     .all() as AcceptedAnchor[];
+  // A superseded anchor must stop gating. The block/warn text tells the user to run
+  // resolve_drift(action:'supersede') — if the gate ignored that resolution, following the
+  // instruction would not lift the block (dead end). status/lifecycle are not touched by
+  // supersede, so the resolution record is the only place that knows.
+  const retired = supersededAnchorIds(db);
+  return retired.size === 0 ? rows : rows.filter((a) => !retired.has(a.id));
 }
 
 function buildActionCtx(input: ActionInput): ActionCtx {
@@ -264,13 +271,16 @@ export function buildBootDigest(
   const maxAnchors = opts.maxAnchors ?? 8;
   const maxForks = opts.maxForks ?? 5;
 
-  const anchors = db
+  // Same rule as the gate: never re-surface a decision the user has already superseded.
+  const retiredIds = supersededAnchorIds(db);
+  const anchorRows = db
     .prepare(
       `SELECT id, statement, rationale FROM drift_anchors
          WHERE ${ACCEPTED_SQL} AND kind IN ('prohibition', 'decision', 'constraint')
          ORDER BY confidence DESC, updated_at DESC LIMIT ?`
     )
-    .all(maxAnchors) as Array<{ id: number; statement: string; rationale: string | null }>;
+    .all(maxAnchors + retiredIds.size) as Array<{ id: number; statement: string; rationale: string | null }>;
+  const anchors = anchorRows.filter((a) => !retiredIds.has(a.id)).slice(0, maxAnchors);
 
   const forks = db
     .prepare(
