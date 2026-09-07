@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.12.0 — 2026-09-05 (Trust)
+
+Found by using the server as the agent for a day. The theme is one sentence:
+**aligned no longer claims convergence it did not check.**
+
+### Fixed — two layers that were not talking to each other
+
+- **Gate honours supersede.** `resolve_drift(action:'supersede')` recorded the resolution
+  but the PreToolUse gate selected anchors by status/lifecycle only, so a superseded
+  decision kept blocking — while the block text told you to supersede it.
+- **Truth view reads `drift_edges`.** The detector had been writing `contradicts` edges since
+  June; `drift_status` / `check_decision` never read them and reported 🔵 "Committed reality
+  matches intent (convergent)" over open contradictions (one of them the PII constraint).
+  Now: open `contradicts` → 🔴 drift, open `absent` → 🟡 review, `dismiss` → 🔵 accounted.
+  `reality` names the evidence (file, hit term, date, what to do) or says
+  *No signal observed (not verified against reality)*.
+- **A supersede record retires the old anchor only.** The replacement inherited the
+  "supersede" resolution and could never be shown drifting.
+
+### Changed — less noise for the agent
+
+- `drift_status` is compact by default: attention items in full, aligned as
+  id + statement + reality per domain, candidates as counts. `verbose: true` restores the
+  previous shape.
+- `recall` omits ranking internals (heat / band / composite / momentum / match_reasons /
+  score_breakdown) unless `explain: true`. Roughly halves the cost per memory.
+- `dream` distill queue skips memories younger than 30 minutes — the Stop hook extracts
+  every turn, so it was asking the agent to distill the conversation it was still in.
+- `where_am_i` infers the map from files edited in the last 24h when the host sends no
+  roots, before declaring the project ambiguous.
+
+### Housekeeping
+
+- Git now contains the tree 0.11.5 was actually published from (schema v15,
+  `anchor_touch_log`, `src/lib/anchor-touch.ts`, `src/bin/export-report.ts`, the `export`
+  subcommand). Entries for 0.4–0.11 were not kept in this file.
+- Regression tests: `test/supersede-gate.mjs`, `test/edges-state.mjs` (throwaway DB).
+
+
 ## v0.3.0 — 2026-05-07 (Five Blocks)
 
 Linksee Memory now implements **5 of the 5 MCP capability blocks**, plus the
