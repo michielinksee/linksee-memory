@@ -1,12 +1,12 @@
 # linksee-memory
 
-> **Your agent forgets everything when a session ends. Worse — it silently drifts from what you decided last week.**
+> **Claude Code forgets everything when you start a new session. Your successor knows even less.**
 >
-> **Linksee Memory catches when your project drifts from its own decisions** — the option abandoned at a fork, the pipeline that quietly stalled, the code that contradicts what you agreed — and a re-injection guard re-surfaces the locked decision **before** the agent acts. Rules you've explicitly hardened get blocked.
+> **Linksee Memory lets you hand a project over — to your next session, to Cursor or Codex, to the person after you — with the reasons attached.** Record a decision once (`remember({ content, anchor: {} })`) and it comes back *before* the agent acts on it: re-injected on session start and ahead of every Edit / Write / Bash that touches it. Change your mind on the record and it stops nagging; leave it and it keeps the next agent from repeating last week's mistake.
 >
-> Underneath sits a local-first cross-LLM memory MCP — one SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex, and Gemini CLI** all read from. Not just "what happened" but **WHY**: 6-layer structured memory with precision recall and an AST-aware diff cache (50–99% token savings on re-reads).
+> Underneath: **drift detection** across every project you run in parallel — which ones quietly left their goal (🔴), which were checked and hold (🔵), which nobody has looked at yet (⚫). One local SQLite file that **Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI** all read. Nothing leaves your machine.
 >
-> `npx -y linksee-memory setup` — one command, done.
+> `npx -y linksee-memory setup` — one command, on in every repo.
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)
@@ -18,6 +18,46 @@
 
 <!-- releases: tag-driven, published from CI via npm trusted publishing (OIDC).
      See .github/workflows/publish.yml — no token, no OTP, provenance attached automatically. -->
+
+## Questions this answers
+
+These are the questions people actually type — measured, verbatim (2026-09-04). If yours is here, this is the answer.
+
+**Claude Code forgets everything when I start a new session. How do I make it remember decisions across sessions?**  
+Run `npx -y linksee-memory setup`. Every new session opens with `recall()` — a brief of what needs attention, where you are, what's unresolved — and your locked decisions are re-injected before the agent acts. Nothing to re-explain.
+
+**Claude Codeがセッションをまたぐと過去の経緯を忘れてしまいます。記憶を持たせる方法を教えてください。**  
+`npx -y linksee-memory setup` の一回で入ります。新しいセッションは `recall()` の brief（注意すべきこと・いまどこか・未解決）から始まり、固定した決定は行動の直前に再注入されます。説明し直す必要はありません。
+
+**What is the best MCP server for persistent memory across AI coding agents?**  
+Honest answer: if "remember across sessions" is all you need, a `CLAUDE.md` is enough — we measured it. Linksee is for the three moments it isn't: right before a mistake, when you change your mind, and when you run many projects and need to see which one drifted.
+
+**AIコーディングエージェント用の記憶MCPサーバーでおすすめはありますか？**  
+正直に言うと、「セッションを跨いで覚える」だけなら `CLAUDE.md` で足ります（実測しました）。Linksee が要るのは、間違いかけたとき・方針を変えたとき・並行案件のどれが外れたかを知りたいとき、の3場面です。
+
+**I want one shared memory between Claude Code, Cursor, and OpenAI Codex. What tools exist for that?**  
+One SQLite file. Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write the same memory — a decision made in one shows up in the others.
+
+**Claude CodeとCursorとCodexで同じ記憶を共有したいのですが、どうすればいいですか？**  
+SQLite ファイル1つを全員で読みます。Claude Code / Cursor / Windsurf / Codex / Gemini CLI のどこで決めた決定も、他のエージェントの行動の直前に出てきます。
+
+**My AI agent keeps re-implementing things we already decided against. How can I detect that a codebase has drifted from past decisions?**  
+Declare the decision (`remember({ content, anchor: { violation_signal: [...] } })`). The guard then warns — or blocks, if you hardened it — the moment an edit contradicts it, and `drift_status` shows every decision that reality has quietly left.
+
+**過去に決めた設計方針とコードがずれていないかを検出できるツールはありますか？**  
+決定を宣言しておくと（`remember({ content, anchor: {...} })`）、それに反する編集の直前に警告（hardened なら拒否）が出ます。`drift_status` は「宣言と現実がずれた決定」を証拠つきで一覧します。
+
+**Is there a local-first, self-hosted alternative to Mem0 for agent memory?**  
+Yes. No account, no API key, no cloud — one local file, MIT licensed. `npx -y linksee-memory setup` and it's on.
+
+**Mem0 vs Zep vs Letta for a coding agent's long-term memory — which should I pick?**  
+We installed them and ran one scenario across all of them. Storing and recalling a decision: everyone passes. The difference appears *before a mistake* and *when you change your mind* — Linksee is built for those two moments; the others leave them to you.
+
+**How do I stop Claude Code from repeating the same mistake it made last week?**  
+Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are protected from forgetting and come back when the same ground is touched again — and if you anchor it, the guard stops the repeat before it lands.
+
+**開発の意思決定履歴をMCPサーバーで残しておく定番のやり方はありますか？**  
+`remember({ content, anchor: {} })` の1回で、記録と強制が同時に入ります。`drift_status` がその台帳で、各決定が いま守られているか（🔵）・ずれているか（🔴）・誰も確かめていないか（⚫）を示します。
 
 ## 🪄 Three spells to remember
 

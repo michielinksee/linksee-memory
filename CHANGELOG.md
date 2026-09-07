@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.15.2 — 2026-09-07 (Say what it's for)
+
+No code. The product changed a great deal between 0.12 and 0.15; the sentence describing it
+had not. This release puts the positioning decided on 2026-09-05 — **hand a project over, with
+the reasons attached**; drift detection as the second pillar, not the headline — into every
+place an agent or a person reads first: the npm description and keywords, the MCP registry
+manifest, and the README hero.
+
+It also adds a **"Questions this answers"** section to the README: the twelve questions people
+actually type, verbatim, each with its answer. In the AI-recommendation measurement that
+started all this (2 of 36 unprompted answers named us), the only two hits were the queries
+whose phrasing matched this README. Wording is the mechanism.
+
 ## v0.15.1 — 2026-09-07
 
 ### Added
