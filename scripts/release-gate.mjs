@@ -40,6 +40,14 @@ catch { fail(`tag ${tag} does not exist. Run: git tag ${tag}`); }
 const head = sh('git rev-parse HEAD');
 if (tagRef !== head) fail(`tag ${tag} points at ${tagRef.slice(0, 7)} but HEAD is ${head.slice(0, 7)}. Publish from the tagged commit.`);
 
+// 3b. the MCP registry rejects a manifest description over 100 characters (learned the hard
+//     way on 0.15.2: publish failed with "expected length <= 100"). Check it here, where it
+//     is cheap, not at the registry, where it costs a round-trip and someone's evening.
+for (const f of ['server.json', '.well-known/mcp/server.json']) {
+  const d = String(JSON.parse(readFileSync(f, 'utf8')).description ?? '');
+  if (d.length > 100) fail(`${f} description is ${d.length} chars; the MCP registry allows 100.`);
+}
+
 // 3. versions agree
 const readVersion = (path) => JSON.parse(readFileSync(path, 'utf8')).version;
 for (const f of ['server.json', '.well-known/mcp/server.json']) {
