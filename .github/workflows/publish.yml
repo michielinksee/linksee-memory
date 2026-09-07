@@ -116,14 +116,27 @@ jobs:
         # A manual run sits on a branch tip, not on a tag, so the gate's "v<version> at HEAD"
         # check cannot pass here by construction — it fired correctly on the first rehearsal
         # (tag v0.12.0 at 10e1081, HEAD at 06cce40) and would block every dry run forever.
-        # Skip it for the rehearsal only; a real publish is triggered by a tag push, where the
-        # gate runs and must pass.
+        # Skip it for the rehearsal only; a real publish is tag-triggered, where it must pass.
         #
-        # Note: --dry-run does not contact the registry, so this rehearses packing, not OIDC.
-        # Trusted publishing is proven by the first real tag publish.
+        # `--dry-run` DOES reach the registry (it authenticates, then refuses to overwrite an
+        # existing version). So when the current version is already published, "cannot publish
+        # over" is the success signal for a rehearsal: packing worked AND OIDC authenticated.
+        # An auth failure looks different — ENEEDAUTH / EOTP / E401 — and still fails the step.
         env:
           LINKSEE_RELEASE_GATE: skip
-        run: npm publish --dry-run
+        run: |
+          set -o pipefail
+          if npm publish --dry-run 2>&1 | tee /tmp/publish.log; then
+            echo "✓ dry run clean — this version is not on the registry yet"
+            exit 0
+          fi
+          if grep -q "cannot publish over the previously published versions" /tmp/publish.log; then
+            echo "✓ rehearsal passed: authenticated via OIDC and packed successfully."
+            echo "  Refused only because $(node -p "require('./package.json').version") is already published — expected for a rehearsal."
+            exit 0
+          fi
+          echo "::error::dry run failed for a reason other than an existing version"
+          exit 1
 
       - name: Publish to npm
         if: github.event_name == 'push' || !inputs.dry_run
