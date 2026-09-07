@@ -32,7 +32,7 @@
     "dev": "tsx src/mcp/server.ts",
     "migrate": "node dist/db/migrate.js",
     "migrate:dev": "tsx src/db/migrate.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "node scripts/release-gate.mjs && npm run build"
   },
   "keywords": [
     "mcp",

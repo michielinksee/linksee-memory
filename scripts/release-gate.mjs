@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+// release-gate — refuse to publish anything git does not describe.
+//
+// Runs from `prepublishOnly` (npm publish). Three checks, all cheap:
+//   1. the working tree has no modified tracked files (untracked is fine)
+//   2. a tag v<version> exists and points at HEAD
+//   3. package.json / server.json / .well-known/mcp/server.json agree on the version
+//
+// Why: 0.11.5 was published from a dirty tree — schema v15, anchor-touch.ts, export-report.ts
+// and several server.ts hunks shipped to users but never reached git. A gate is a mechanism;
+// "remember to commit first" is not.
+//
+// Escape hatch (loud, for emergencies only): LINKSEE_RELEASE_GATE=skip
+
+import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+const sh = (cmd) => execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const fail = (msg) => { console.error(`\n✖ release-gate: ${msg}\n`); process.exit(1); };
+
+if (process.env.LINKSEE_RELEASE_GATE === 'skip') {
+  console.error('⚠ release-gate SKIPPED via LINKSEE_RELEASE_GATE=skip — this publish is not backed by git.');
+  process.exit(0);
+}
+
+const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+
+// 1. clean tree (modified / staged tracked files only — untracked files are not shipped)
+const dirty = sh('git status --porcelain --untracked-files=no');
+if (dirty) fail(`working tree has uncommitted changes:\n${dirty}\nCommit them first — what you publish must be what git has.`);
+
+// 2. tag at HEAD
+const tag = `v${version}`;
+let tagRef = '';
+try { tagRef = sh(`git rev-parse ${tag}^{commit}`); } catch { fail(`tag ${tag} does not exist. Run: git tag ${tag}`); }
+const head = sh('git rev-parse HEAD');
+if (tagRef !== head) fail(`tag ${tag} points at ${tagRef.slice(0, 7)} but HEAD is ${head.slice(0, 7)}. Publish from the tagged commit.`);
+
+// 3. versions agree
+const readVersion = (path) => JSON.parse(readFileSync(path, 'utf8')).version;
+for (const f of ['server.json', '.well-known/mcp/server.json']) {
+  const v = readVersion(f);
+  if (v !== version) fail(`${f} says ${v}, package.json says ${version}.`);
+}
+
+console.log(`✔ release-gate: clean tree, ${tag} at HEAD (${head.slice(0, 7)}), versions agree.`);
