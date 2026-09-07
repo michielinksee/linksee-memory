@@ -26,13 +26,14 @@ import { normalizeEntityName } from '../lib/normalize.js';
 import { handleReadSmart as handleReadSmartImpl } from './read-smart.js';
 import { STATIC_RESOURCES, RESOURCE_TEMPLATES, readResource } from './resources.js';
 import { PROMPTS, getPrompt } from './prompts.js';
-import { fetchRoots, isInsideRoots } from './roots.js';
+import { fetchRoots, isInsideRoots, rootPathFromUri } from './roots.js';
 import { sampleConsolidation } from './sampling.js';
 import { confirmForget } from './elicitation.js';
 import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engine.js';
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
 import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
-import { whereAmI } from '../lib/map-view.js';
+import { logAnchorTouch } from '../lib/anchor-touch.js';
+import { whereAmI, listMapProjects } from '../lib/map-view.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -70,6 +71,7 @@ const SUBCOMMANDS: Record<string, string> = {
   'install-skill': 'install-skill.js',
   declare: 'declare-anchor.js',
   detect: 'detect-drift.js',
+  export: 'export-report.js',
 };
 const subcommand = process.argv[2];
 if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand)) {
@@ -1316,6 +1318,7 @@ function handleDriftStatus(args: any): string {
     domain: args?.domain,
     decision_mode: args?.decision_mode,
   });
+  logAnchorTouch(db, { tool: 'drift_status', interaction: 'review' });
 
   // Build a concise triage line
   const { by_state, nodes } = view.counts;
@@ -1337,10 +1340,36 @@ function handleDriftStatus(args: any): string {
   });
 }
 
-function handleWhereAmI(args: any): string {
-  const res = whereAmI(db, {
-    query: args?.query, node_id: args?.node_id, project: args?.project, limit: args?.limit,
+// Fix ① (2026-06-17): infer the Map project from the client's workspace roots when the
+// caller didn't name one — pick the project whose slug matches the repo you're working in,
+// so the no-arg "per-turn re-anchor" lands on the right map (not a stale/demo one).
+// map_projects has no path column, so we match the slug as a path segment of a root.
+async function resolveProjectFromRoots(): Promise<string | undefined> {
+  const projects = listMapProjects(db);
+  if (projects.length <= 1) return projects[0]; // 0 → undefined ("no map"); 1 → use it
+  const roots = await fetchRoots(server);
+  if (roots.length === 0) return undefined; // client gave no roots → let ② disambiguate
+  const segs = roots.map((r) => rootPathFromUri(r.uri).toLowerCase().replace(/\\/g, '/').replace(/\/+$/, ''));
+  const matches = projects.filter((p) => {
+    const slug = p.toLowerCase();
+    return segs.some((path) => path === slug || path.endsWith('/' + slug) || path.split('/').includes(slug));
   });
+  return matches.length === 1 ? matches[0] : undefined; // unique repo match only; else ② handles it
+}
+
+async function handleWhereAmI(args: any): Promise<string> {
+  // ① resolve project from cwd/roots when not explicitly passed; ② (inside whereAmI) is the fallback.
+  const project = args?.project ?? (await resolveProjectFromRoots());
+  const res = whereAmI(db, {
+    query: args?.query, node_id: args?.node_id, project, limit: args?.limit,
+  });
+  if (res.ambiguous) {
+    return JSON.stringify({
+      ok: true, located: false, reason: 'ambiguous_project',
+      available_projects: res.ambiguous.available,
+      hint: `Multiple maps imported — pass project: one of [${res.ambiguous.available.join(', ')}]. (No-arg can't yet tell which repo you mean; cwd/roots match is coming.)`,
+    });
+  }
   if (res.matched.length === 0) {
     return JSON.stringify({
       ok: true, project: res.project, located: false,
@@ -1372,6 +1401,7 @@ function handleCheckDecision(args: any): string {
   if (!detail) {
     return JSON.stringify({ ok: false, error: `Anchor ${args.anchor_id} not found or not active` });
   }
+  logAnchorTouch(db, { anchorId: args.anchor_id, tool: 'check_decision', interaction: 'inspect' });
   return JSON.stringify({ ok: true, decision: detail });
 }
 
@@ -1406,6 +1436,8 @@ function handleDeclareAnchor(args: any): string {
     setNodeFields(db, anchor.id, nodeFields);
   }
 
+  logAnchorTouch(db, { anchorId: anchor.id, tool: 'declare_anchor', interaction: 'create' });
+
   return JSON.stringify({
     ok: true,
     anchor_id: anchor.id,
@@ -1419,6 +1451,7 @@ function handleResolveDrift(args: any): string {
   if (!args?.anchor_id || !args?.action) {
     throw new Error('anchor_id and action are required');
   }
+  logAnchorTouch(db, { anchorId: args.anchor_id, tool: 'resolve_drift', interaction: 'resolve' });
   // Enforcement-policy actions — apply the dream "escalate_to_hard" recommendation in ONE call.
   // Folded into resolve_drift (not a new tool) to honor anchor #1. Intercepted here so the WIP
   // truth-engine.ts resolveDrift() stays untouched.
@@ -1803,7 +1836,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'read_smart': text = handleReadSmart(args); break;
       // Drift tools (v0.8.0)
       case 'drift_status': text = handleDriftStatus(args); break;
-      case 'where_am_i': text = handleWhereAmI(args); break;
+      case 'where_am_i': text = await handleWhereAmI(args); break;
       case 'check_decision': text = handleCheckDecision(args); break;
       case 'declare_anchor': text = handleDeclareAnchor(args); break;
       case 'resolve_drift': text = handleResolveDrift(args); break;

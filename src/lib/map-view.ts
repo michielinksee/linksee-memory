@@ -134,6 +134,9 @@ export interface WhereAmIResult {
   project: string;
   job: string | null;
   matched: WhereAmIMatch[];
+  // Fix ② (2026-06-17): set when the caller passed no project AND multiple maps exist —
+  // the caller must pick rather than us silently grabbing the most-recently-touched one.
+  ambiguous?: { available: string[] };
 }
 
 function queryTerms(q: string): string[] {
@@ -144,9 +147,18 @@ export function whereAmI(
   db: Database.Database,
   opts: { project?: string; query?: string; node_id?: string; limit?: number }
 ): WhereAmIResult {
-  const project = opts.project
-    ?? (db.prepare('SELECT project FROM map_projects ORDER BY updated_at DESC LIMIT 1').get() as { project?: string } | undefined)?.project
-    ?? '';
+  // Fix ② (2026-06-17): never silently grab the most-recently-touched map. When the
+  // caller didn't name a project, only auto-pick if exactly ONE map exists; with
+  // multiple maps, surface the ambiguity so the caller picks (the no-arg "per-turn
+  // re-anchor" was returning a stale/demo map — e.g. the notekeeper sample).
+  // ① (cwd/roots match → infer the project you're actually in) lands next.
+  let project = opts.project ?? '';
+  if (!project) {
+    const available = listMapProjects(db);
+    if (available.length === 1) project = available[0];
+    else if (available.length > 1) return { project: '', job: null, matched: [], ambiguous: { available } };
+    // available.length === 0 → project stays '' → caller emits "no map imported yet"
+  }
   const meta = project ? getProjectMeta(db, project) : undefined;
   const stageLabel = (stageId: string | null): string | null =>
     stageId ? meta?.stages.find((s) => s.id === stageId)?.label ?? stageId : null;

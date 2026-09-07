@@ -359,6 +359,25 @@ CREATE INDEX IF NOT EXISTS idx_injlog_anchor  ON injection_log(anchor_id, occurr
 CREATE INDEX IF NOT EXISTS idx_injlog_session ON injection_log(session_id, occurred_at);
 
 -- ============================================================
+-- v15: anchor_touch_log — the D7 retention metric for decision-writers.
+-- Bridge metric: of installs that record a decision, what fraction COME BACK and
+-- interact with a PRIOR decision within 7 days. Captures the READ/inspect signals
+-- (check_decision, drift_status) that nothing else logs, plus create/resolve. Guard
+-- re-surfaces already live in injection_log and are UNIONed in queries. anchor_id is
+-- NULL for whole-set reviews (drift_status). No content, ever — only ids + a verb + a ts.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS anchor_touch_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  anchor_id   INTEGER REFERENCES drift_anchors(id) ON DELETE CASCADE,
+  session_id  TEXT,
+  tool        TEXT NOT NULL,                              -- declare_anchor | check_decision | drift_status | resolve_drift
+  interaction TEXT NOT NULL CHECK (interaction IN ('create','inspect','review','resolve','resurface')),
+  occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_anchor_touch_time   ON anchor_touch_log(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_anchor_touch_anchor ON anchor_touch_log(anchor_id, occurred_at);
+
+-- ============================================================
 -- v11: Current Truth Map — journey-spine topology (Product Drift OS spec v3).
 -- map.yaml (git) is the desired-state SOURCE OF TRUTH (anchor #58); these tables
 -- are the runtime index the importer reconciles INTO. A map_node is product
@@ -437,6 +456,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '14');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '15');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '14' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13');
+UPDATE meta SET value = '15' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14');

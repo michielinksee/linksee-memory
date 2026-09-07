@@ -9,6 +9,7 @@
 
 import { statSync } from 'node:fs';
 import { openDb, runMigrations, getDbPath } from '../db/migrate.js';
+import { getAnchorRetention } from '../lib/anchor-touch.js';
 
 interface Args {
   json: boolean;
@@ -114,6 +115,8 @@ function main() {
     LIMIT 5
   `).all() as any[];
 
+  const anchorRetention = getAnchorRetention(db);
+
   const result = {
     db_path: dbPath,
     db_size: sizeBytes,
@@ -139,6 +142,7 @@ function main() {
       edits: f.edits,
       in_sessions: f.in_sessions,
     })),
+    anchor_retention: anchorRetention,
   };
 
   if (args.json) {
@@ -163,6 +167,26 @@ function main() {
   console.log(`    sessions seen:  ${counts.sessions_seen}`);
   console.log(`    consolidations: ${counts.consolidations}`);
   console.log('');
+
+  // Decision trajectory — the D7 bridge metric (this install). Founder-sales read-out
+  // + the seed of the "your decision trajectory" digest.
+  console.log('  Decision trajectory  (D7 bridge metric — this install)');
+  if (anchorRetention.totalAnchors === 0) {
+    console.log('    no decisions recorded yet — declare one or ask "what\'s drifting?" to start.');
+  } else {
+    const ar = anchorRetention;
+    const pct = Math.round(ar.retentionRate * 100);
+    console.log(`    decisions recorded:   ${ar.totalAnchors}  across ${ar.activeDays} active day(s)`);
+    console.log(`    revisited within 7d:  ${ar.retainedAnchors} of ${ar.totalAnchors}  (${pct}%)`);
+    console.log(`    first decision:       ${humanAge(ar.firstAnchorAt)}   ·   last: ${humanAge(ar.lastAnchorAt)}`);
+    console.log(`    return interactions:  ${ar.returnInteractions}  (inspect / drift-status / resolve / guard re-surface)`);
+    if (ar.mostRevisited) {
+      const s = ar.mostRevisited.statement.length > 48 ? ar.mostRevisited.statement.slice(0, 47) + '…' : ar.mostRevisited.statement;
+      console.log(`    most revisited:       #${ar.mostRevisited.anchor_id} "${s}" (x${ar.mostRevisited.touches})`);
+    }
+  }
+  console.log('');
+
   if (layerBreakdown.length > 0) {
     console.log('  Memories by layer');
     for (const r of layerBreakdown) {
