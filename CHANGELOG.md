@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.13.0 — 2026-09-07 (On by default)
+
+The guard was the one layer no competing memory tool has, and it was switched off almost
+everywhere — including on the author's own machine, which had 42 active anchors and the hook
+installed in zero repos. This release is about the gap between "the product can do it" and
+"the product does it".
+
+### Changed — the guard is on for every repo
+
+- `setup` wires the re-injection guard into `~/.claude/settings.json`, the scope the MCP
+  server is already registered at and the scope the memory itself lives at. One SQLite file
+  holds the anchors for all your projects; enforcing them per-repo meant declaring a decision
+  once and having it enforced nowhere. `--project-guard` keeps the old behaviour,
+  `--no-guard` skips it.
+- A non-interactive `setup` now wires it and says so, instead of skipping in silence.
+
+### Fixed
+
+- **A forbidden string now reaches the gate even on a path-scoped anchor.** `affects` says
+  where a decision applies, `violation_signal` says what is forbidden — but the gate demanded
+  a path match from any anchor that had `affects`, and a Bash command carries no path. 21 of
+  42 anchors on a real machine could never fire on Bash, including the one that exists to stop
+  destructive migrations: `sqlite3 … "ALTER TABLE memories DROP COLUMN layer"` passed clean.
+- **Setup no longer duplicates the Stop hook.** Its probe looked for `linksee-memory-sync` and
+  missed `sync-session.js`, so a second copy was appended and sessions were captured twice.
+  Both the guard and sync probes now recognise every shape either has been wired in — npx
+  subcommand, global bin, dist path, and exec form with the path in `args`.
+
+### Added
+
+- `test/guard-wiring.mjs`, `test/guard-scope.mjs`. Writing to a user's global settings makes
+  "merge, don't replace" load-bearing; the wiring tests found the duplicate-guard hole before
+  it shipped.
+
 ## v0.12.0 — 2026-09-05 (Trust)
 
 Found by using the server as the agent for a day. The theme is one sentence:
