@@ -169,6 +169,10 @@ function buildResolutionLookup(db: Database.Database): (id: number) => Resolutio
   return function resolutionFor(id: number): ResolutionRecord | null {
     const matches: Array<{ action: string; resolved_at?: string; [k: string]: unknown }> = [];
     for (const r of Object.values(t3res)) {
+      // A supersede record names both sides. Only the OLD anchor is accounted for by it;
+      // the replacement must stay checkable (otherwise a new North Star could never drift,
+      // because the supersede branch wins over the contradicts branch).
+      if (r && r.action === 'supersede' && r.superseded_by === id && r.superseded_node !== id) continue;
       if (r && (r.superseded_node === id || r.superseded_by === id ||
                 r.node === id || r.direction_node === id || r.constraint_node === id)) {
         matches.push(r);

@@ -75,6 +75,15 @@ resolveDrift(db, { anchor_id: contradicted2, action: 'fix', rationale: 'switched
 n = node(contradicted2);
 check('fix closes the edges → aligned', n.state === 'aligned', `state=${n.state}`);
 
+const oldNs = declare('North Star v1');
+const newNs = declare('North Star v2');
+resolveDrift(db, { anchor_id: oldNs, action: 'supersede', superseded_by: newNs, rationale: 'v2' });
+edge(newNs, 'contradicts', 'C:/repo/README.md');
+n = node(newNs);
+check('the superseding anchor can still drift', n.state === 'drift', `state=${n.state} by=${n.accountedBy}`);
+n = node(oldNs);
+check('the superseded anchor stays accounted', n.state === 'aligned' && /supersede/.test(n.accountedBy ?? ''), `state=${n.state} by=${n.accountedBy}`);
+
 db.close();
 rmSync(dir, { recursive: true, force: true });
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
