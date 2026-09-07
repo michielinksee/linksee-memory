@@ -7,7 +7,7 @@
 // (lazily on first use) and on roots/list_changed notification.
 
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ListRootsRequestSchema, ListRootsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 
 interface Root {
   uri: string; // typically "file:///abs/path"
@@ -22,7 +22,11 @@ export async function fetchRoots(server: Server): Promise<Root[]> {
   const now = Date.now();
   if (cachedRoots && now - lastFetched < STALE_MS) return cachedRoots;
   try {
-    const res: any = await (server as any).request({ method: 'roots/list', params: {} }, ListRootsRequestSchema);
+    // Protocol.request(request, RESULT schema). This passed the REQUEST schema, so every client's
+    // reply — `{ roots: [...] }` — failed validation against a shape expecting `{ method: 'roots/list' }`,
+    // was swallowed by the catch below, and cached as "no roots" for a minute. Roots had been empty
+    // for every client since this was written; where_am_i's root inference never once fired.
+    const res: any = await (server as any).request({ method: 'roots/list', params: {} }, ListRootsResultSchema);
     cachedRoots = Array.isArray(res?.roots) ? res.roots : [];
     lastFetched = now;
   } catch {

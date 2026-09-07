@@ -153,15 +153,32 @@ const TOOLS = [
   {
     name: 'remember',
     description:
-      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → layer: "learning"\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• After completing a task or receiving user approval\n\nREQUIRED PARAMS BY MODE:\n• Create (default): entity_name + entity_kind + layer + content\n• Update: memory_id (+ optional content, layer, importance)\n• Delete: memory_id + forget: true\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
+      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → content + anchor: {} (remembered AND enforced in one call)\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• After completing a task or receiving user approval\n\nMODES:\n• Create (default): content is the only required field. entity defaults to the project you are in; layer defaults to "context" (or "learning" when anchor is set).\n• Create + enforce: add anchor: {} — the memory also becomes a decision the guard re-injects before Edit/Write/Bash and on session start. Give anchor.violation_signal (forbidden strings) to make contradictions detectable; anchor.affects (path globs) to scope it.\n• Update: memory_id (+ optional content, layer, importance)\n• Delete: memory_id + forget: true\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
     inputSchema: {
       type: 'object',
       properties: {
-        entity_name: { type: 'string', description: 'Name of the entity this memory is about (required for create)' },
-        entity_kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'Required for create' },
+        entity_name: { type: 'string', description: 'What this memory is about. Optional — defaults to the project you are working in (from workspace roots, else the files edited recently).' },
+        entity_kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'Optional — defaults to "project".' },
+        anchor: {
+          description: 'Also declare this as an enforceable decision. Pass {} for defaults, or an object: { kind?: "decision"|"prohibition"|"constraint", violation_signal?: string[] (forbidden strings — needed for the gate to detect a contradiction), affects?: string[] (path globs that scope it), detect_terms?: string[], domain?: string, rationale?: string }. Without violation_signal the anchor is a constraint: re-injected on session start and when its scope is touched, but no contradiction can be detected.',
+          anyOf: [
+            { type: 'boolean' },
+            {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', enum: ['decision', 'prohibition', 'constraint'] },
+                violation_signal: { type: 'array', items: { type: 'string' } },
+                affects: { type: 'array', items: { type: 'string' } },
+                detect_terms: { type: 'array', items: { type: 'string' } },
+                domain: { type: 'string' },
+                rationale: { type: 'string' },
+              },
+            },
+          ],
+        },
         entity_key: { type: 'string', description: 'Optional canonical key (email, domain, file path)' },
-        layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Aliases accepted (why→goal, warnings→caveat, decisions→learning, how→implementation).' },
-        content: { type: 'string', description: 'The memory content (plain text or structured JSON with altitude/type/state/what/why)' },
+        layer: { type: 'string', description: 'One of: goal / context / emotion / implementation / caveat / learning. Aliases accepted (why→goal, warnings→caveat, decisions→learning, how→implementation). Optional — defaults to "context", or "learning" when anchor is set.' },
+        content: { type: 'string', description: 'The memory content (plain text or structured JSON with altitude/type/state/what/why). The only required field for create.' },
         importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set ≥0.9 to pin (protects from forgetting).' },
         thread_id: { type: 'string', description: 'Optional thread ID to group related memories (decision chains, session groups).' },
         force: { type: 'boolean', default: false, description: 'Bypass paste-back quality check.' },
@@ -479,15 +496,71 @@ function handleRemember(args: any): string {
   );
 
   const mom = refreshMomentumForEntity(db, entityId);
+  const memoryId = Number(result.lastInsertRowid);
 
-  return JSON.stringify({
+  const out: Record<string, unknown> = {
     ok: true,
-    memory_id: Number(result.lastInsertRowid),
+    memory_id: memoryId,
     entity_id: entityId,
     layer,
     pinned: importance >= 0.9,
     momentum: { score: mom.score, band: mom.band },
-  });
+  };
+
+  // "Remember" and "enforce" used to be two tools with two schemas, and an agent had to pick.
+  // Picking remember meant the decision was stored but never re-injected — the exact failure
+  // the product exists to prevent. One call now does both when the caller asks for it.
+  if (args.anchor) {
+    const spec = typeof args.anchor === 'object' && args.anchor !== null ? args.anchor : {};
+    let what = rawContent, why: string | undefined = spec.rationale;
+    try {
+      const c = JSON.parse(rawContent);
+      if (c && typeof c === 'object') {
+        what = String(c.what ?? c.title ?? rawContent);
+        why = why ?? (c.why ? String(c.why) : undefined);
+      }
+    } catch { /* plain text */ }
+    const signals: string[] = Array.isArray(spec.violation_signal) ? spec.violation_signal : [];
+    // A decision/prohibition needs forbidden strings for a contradiction to be detectable; without
+    // them the honest shape is a constraint (still re-injected on boot and when its scope is touched).
+    const kind = spec.kind ?? (signals.length > 0 ? 'decision' : 'constraint');
+    try {
+      const anchor = declareAnchor(db, {
+        kind,
+        statement: what.length >= 8 ? what : `${what} (decision)`,
+        rationale: why,
+        affects: Array.isArray(spec.affects) ? spec.affects : undefined,
+        detect_terms: Array.isArray(spec.detect_terms) ? spec.detect_terms : undefined,
+        violation_signal: signals.length > 0 ? signals : undefined,
+        tier: 'human',
+        source_memory_id: memoryId,
+      });
+      const nodeFields: Record<string, unknown> = {};
+      if (spec.domain) nodeFields.domain = spec.domain;
+      if (spec.confidence !== undefined) nodeFields.confidence = spec.confidence;
+      if (Object.keys(nodeFields).length > 0) setNodeFields(db, anchor.id, nodeFields);
+      // Link both ways so recall can show "this memory is enforced as #N" and the anchor can
+      // point back at the moment it was decided.
+      try {
+        const c = JSON.parse(rawContent);
+        if (c && typeof c === 'object') {
+          c.anchor_id = anchor.id;
+          db.prepare('UPDATE memories SET content = ? WHERE id = ?').run(JSON.stringify(c), memoryId);
+        }
+      } catch { /* leave content as-is */ }
+      logAnchorTouch(db, { anchorId: anchor.id, tool: 'remember', interaction: 'create' });
+      out.anchor_id = anchor.id;
+      out.anchor_kind = kind;
+      out.enforced = signals.length > 0
+        ? 'contradictions are detected at the gate; re-injected on boot and in scope'
+        : 'no violation_signal given — re-injected on boot and when its scope is touched, but contradictions cannot be detected';
+    } catch (e: any) {
+      out.anchor_error = String(e?.message ?? e);
+      out.hint = 'The memory was saved. Fix the anchor spec and call declare_anchor, or remember again with a corrected anchor.';
+    }
+  }
+
+  return JSON.stringify(out);
 }
 
 // Sanitize query for FTS5 MATCH (strip chars that break the grammar, quote it).
@@ -1270,14 +1343,65 @@ async function handleRememberUnified(args: any): Promise<string> {
   if (args.memory_id) {
     return handleUpdateMemory(args);
   }
-  // Create mode (default) — validate required fields
-  if (!args.entity_name || !args.entity_kind || !args.layer || !args.content) {
+  // Create mode (default). Only content is required; everything an agent used to have to
+  // invent is defaulted. Inventing an entity name and picking a layer were the two places a
+  // "remember this" call stalled — the taxonomy is for the dashboard, not for the agent.
+  if (!args.content || !String(args.content).trim()) {
     return JSON.stringify({
       ok: false,
-      error: 'Create mode requires: entity_name, entity_kind, layer, content. To update, provide memory_id. To delete, set forget: true + memory_id.',
+      error: 'content is required. (entity/layer are optional now.) To update, provide memory_id. To delete, set forget: true + memory_id.',
     });
   }
-  return handleRemember(args);
+  const a = { ...args };
+  let entityInferred: string | undefined;
+  if (!a.entity_name) {
+    const inferred = await inferDefaultEntity();
+    a.entity_name = inferred.name;
+    a.entity_kind = a.entity_kind ?? inferred.kind;
+    entityInferred = inferred.from;
+  }
+  if (!a.entity_kind) a.entity_kind = 'project';
+  if (!a.layer) a.layer = a.anchor ? 'learning' : 'context';
+  const out = handleRemember(a);
+  if (!entityInferred) return out;
+  try {
+    const parsed = JSON.parse(out);
+    if (parsed.ok) parsed.entity_inferred_from = entityInferred;
+    return JSON.stringify(parsed);
+  } catch { return out; }
+}
+
+/**
+ * The entity a memory is about when the caller did not say: the project they are in.
+ * Same evidence chain as where_am_i — workspace roots first, then the files edited recently.
+ */
+async function inferDefaultEntity(): Promise<{ name: string; kind: string; from: string }> {
+  try {
+    const roots = await fetchRoots(server);
+    if (roots.length === 1) {
+      const base = rootPathFromUri(roots[0].uri).replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop();
+      if (base) return { name: base, kind: 'project', from: 'workspace_root' };
+    }
+  } catch { /* roots unsupported by this host */ }
+  try {
+    const rows = db
+      .prepare(`SELECT file_path FROM session_file_edits WHERE occurred_at > unixepoch() - 86400 ORDER BY occurred_at DESC LIMIT 40`)
+      .all() as Array<{ file_path: string }>;
+    const paths = rows.map((r) => r.file_path.replace(/\\/g, '/').split('/').filter(Boolean));
+    if (paths.length > 0) {
+      // longest common directory prefix of what was touched → its basename is the project
+      let prefix = paths[0].slice(0, -1);
+      for (const p of paths.slice(1)) {
+        let i = 0;
+        while (i < prefix.length && i < p.length - 1 && prefix[i].toLowerCase() === p[i].toLowerCase()) i++;
+        prefix = prefix.slice(0, i);
+        if (prefix.length === 0) break;
+      }
+      const base = prefix[prefix.length - 1];
+      if (base && !/^(c:|users|home|[a-z])$/i.test(base)) return { name: base, kind: 'project', from: 'recent_edits' };
+    }
+  } catch { /* fall through */ }
+  return { name: 'workspace', kind: 'project', from: 'fallback' };
 }
 
 async function handleRecallUnified(args: any): Promise<string> {
@@ -1334,7 +1458,8 @@ function handleDriftStatus(args: any): string {
     by_state.drift > 0 ? `🔴 ${by_state.drift} drifting` : null,
     by_state.review > 0 ? `🟡 ${by_state.review} needs review` : null,
     by_state.held > 0 ? `⚪ ${by_state.held} held` : null,
-    `🔵 ${by_state.aligned} aligned`,
+    `🔵 ${by_state.aligned} verified`,
+    by_state.unverified > 0 ? `⚫ ${by_state.unverified} unverified` : null,
   ].filter(Boolean).join(' · ');
 
   if (args?.verbose) {
@@ -1356,6 +1481,13 @@ function handleDriftStatus(args: any): string {
     count: g.nodes.length,
     nodes: g.nodes.map((n) => ({ id: n.id, statement: n.statement, reality: n.reality })),
   }));
+  // Unverified is the quiet majority on most machines. One line each, grouped by domain —
+  // enough to see where the detector has no eyes, not enough to bury the six that matter.
+  const unverified = view.unverifiedByDomain.map((g) => ({
+    domain: g.domain,
+    count: g.nodes.length,
+    nodes: g.nodes.map((n) => ({ id: n.id, statement: n.statement })),
+  }));
   const cand = view.candidates as any;
   return JSON.stringify({
     ok: true,
@@ -1363,9 +1495,10 @@ function handleDriftStatus(args: any): string {
     nextReopen: view.nextReopen,
     attention: view.attention,
     aligned,
+    unverified,
     candidates: { auto: cand?.auto?.length ?? 0, suppressed: cand?.suppressed?.length ?? 0 },
     counts: view.counts,
-    hint: 'verbose:true for full aligned nodes and candidate details; check_decision(anchor_id) for one node.',
+    hint: 'verbose:true for full nodes and candidate details; check_decision(anchor_id) for one node. ⚫ unverified = declared, never checked against reality: give it affects/violation_signal so the detector can see it, or leave it as a note.',
   });
 }
 

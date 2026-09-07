@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.14.0 — 2026-09-07 (Remember and enforce; verified and unverified)
+
+Two roadmap items about the same thing: the product should not make the agent do the product's
+job. Picking a taxonomy before you can say "remember this", and choosing between two tools to
+record one decision, were both that. So was painting "nobody checked" the same colour as
+"checked and fine".
+
+### Changed — `remember`
+
+- **`content` is the only required field.** `entity_name` / `entity_kind` default to the project
+  you are in (workspace roots, else the files edited recently); `layer` defaults to `context`.
+  The taxonomy is for the dashboard, not for the agent.
+- **`anchor: {}` records and enforces in one call.** The memory is stored as before, and a
+  drift anchor is declared from it — re-injected on session start and before Edit/Write/Bash.
+  Give `anchor.violation_signal` (forbidden strings) for contradictions to be detectable, and
+  `anchor.affects` (path globs) to scope it. Without signals the anchor is a constraint, and the
+  response says so rather than pretending it can catch anything. Memory and anchor link both
+  ways (`content.anchor_id`, `source_memory_id`). An invalid anchor spec never loses the memory.
+
+  Before, "remember" and "declare_anchor" were two tools with two schemas and the agent had to
+  choose. Choosing remember stored the decision and never re-injected it — the exact failure
+  this product exists to prevent.
+
+### Changed — a fifth state: ⚫ unverified
+
+- An active anchor with no evidence either way — no drift edges, no resolution — is now
+  **`unverified`**, not `aligned`. On the author's machine that is 35 of 45 anchors; 3 are
+  actually verified. They were all the same colour. Different colour, different meaning: the
+  detector has no eyes here. Give the anchor `affects` / `violation_signal` so it can look, or
+  leave it as a note — but do not read it as "fine".
+- `aligned` now requires evidence: a recorded resolution, or an `implements` edge (the detector
+  saw reality match). `reality` names where it was observed.
+- `drift_status` triage reads `🔵 N verified · ⚫ N unverified`; the compact form lists
+  unverified anchors one line each, grouped by domain.
+- `check_decision` had its own copy of the state machine and had drifted from `drift_status`
+  — it never looked at drift edges, so it could say "aligned" on the anchor the other tool
+  flagged 🔴. It now mirrors the view exactly, including dismiss and unverified.
+
+### Fixed
+
+- **Workspace roots were never read.** `fetchRoots` validated the client's reply against the
+  *request* schema instead of the *result* schema, so every reply failed, was swallowed, and was
+  cached as "no roots" for a minute — since the day it was written. `where_am_i`'s root-based
+  project inference (June's "Fix ①") had never once fired; that is why a no-arg call returned
+  `ambiguous_project`. Found because the new remember test drives a real roots round-trip.
+
+### Added
+
+- `test/remember-anchor.mjs` — drives the real MCP server over stdio, including the roots
+  round-trip that infers the entity. `test/edges-state.mjs` now covers implements → aligned,
+  no evidence → unverified, and check_decision agreeing with drift_status.
+
 ## v0.13.1 — 2026-09-07 (Fewer false alarms)
 
 Day one of running the guard everywhere produced the noise it was always going to produce, and

@@ -17,7 +17,10 @@ import type Database from 'better-sqlite3';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type DriftState = 'drift' | 'review' | 'held' | 'aligned';
+// unverified (2026-09-07): an active anchor with no evidence either way — no edges, no
+// resolution. It used to render as 🔵 aligned "reality matches intent"; on a real machine
+// that was 35 of 45 anchors. Different colour, different meaning: the detector has no eyes here.
+export type DriftState = 'drift' | 'review' | 'held' | 'aligned' | 'unverified';
 export type Species = 'hypothesis' | 'constraint' | 'commitment' | 'source_of_truth';
 
 export interface TruthNode {
@@ -62,6 +65,8 @@ export interface TruthCounts {
 
 export interface TruthView {
   attention: TruthNode[];
+  /** Active anchors the detector has no evidence about — neither aligned nor drifting. */
+  unverifiedByDomain: Array<{ domain: string; nodes: TruthNode[] }>;
   alignedByDomain: Array<{ domain: string; nodes: TruthNode[] }>;
   candidates: { auto: TruthCandidate[]; suppressed: TruthCandidate[] };
   counts: TruthCounts;
@@ -93,7 +98,7 @@ const DOMAIN_ORDER = [
 ];
 
 const STATE_RANK: Record<DriftState, number> = {
-  drift: 0, review: 1, held: 2, aligned: 3,
+  drift: 0, review: 1, held: 2, aligned: 3, unverified: 4,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -132,7 +137,7 @@ function classifySpecies(decision_mode: string | null): Species {
 // ── Edge summary (one line the agent can act on) ─────────────────────────────
 
 function summarizeEdges(
-  verdict: 'contradicts' | 'absent',
+  verdict: 'contradicts' | 'absent' | 'implements',
   edges: Array<{ confidence: number; evidence: string; detected_at: number }>,
 ): string {
   const latest = edges[0];
@@ -141,6 +146,9 @@ function summarizeEdges(
   const file = ev.file_path ? String(ev.file_path).replace(/\\/g, '/').split('/').slice(-2).join('/') : null;
   const hit = ev.hit_term ? ` hit "${ev.hit_term}"` : '';
   const when = new Date(latest.detected_at * 1000).toISOString().slice(0, 10);
+  if (verdict === 'implements') {
+    return `Observed in reality${file ? ` — ${file}` : ''} (${when}).`;
+  }
   const head = verdict === 'contradicts'
     ? `${edges.length} open contradiction${edges.length > 1 ? 's' : ''}`
     : `declared but not found in reality (${edges.length} absent signal${edges.length > 1 ? 's' : ''})`;
@@ -296,6 +304,7 @@ export function getTruthView(
     const edges = openEdges.get(r.id) ?? [];
     const contradicts = edges.filter((e) => e.verdict === 'contradicts');
     const absent = edges.filter((e) => e.verdict === 'absent');
+    const implemented = edges.filter((e) => e.verdict === 'implements');
 
     // ── State derivation (the make-or-break logic) ──
     let state: DriftState;
@@ -339,10 +348,15 @@ export function getTruthView(
       state = 'drift';
       accounted = false;
       accountedBy = null;
-    } else {
-      // 🔵 convergent — reality matches intent (or no signal)
+    } else if (implemented.length > 0) {
+      // 🔵 the detector saw reality match — this is the only way to be aligned without a verdict
       state = 'aligned';
       accounted = true;
+      accountedBy = 'observed (implements)';
+    } else {
+      // ⚫ nothing checked, nothing decided. Not a problem — but not "fine" either.
+      state = 'unverified';
+      accounted = false;
       accountedBy = null;
     }
 
@@ -352,9 +366,9 @@ export function getTruthView(
       ?? pending?.rationale
       ?? (contradicts.length > 0 ? summarizeEdges('contradicts', contradicts) : null)
       ?? (absent.length > 0 ? summarizeEdges('absent', absent) : null)
-      ?? (state === 'aligned'
-            ? (accountedBy ? 'Accounted for by recorded resolution' : 'No signal observed (not verified against reality)')
-            : null);
+      ?? (state === 'aligned' && implemented.length > 0 ? summarizeEdges('implements', implemented) : null)
+      ?? (state === 'aligned' ? 'Accounted for by recorded resolution' : null)
+      ?? (state === 'unverified' ? 'No signal observed (not verified against reality)' : null);
 
     return {
       id: r.id,
@@ -379,8 +393,18 @@ export function getTruthView(
 
   // ── Partition: attention (loud) vs aligned (quiet) ──
   const attention = nodes
-    .filter((n) => n.state !== 'aligned')
+    .filter((n) => n.state !== 'aligned' && n.state !== 'unverified')
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || b.confidence - a.confidence);
+
+  const unverifiedGroups = new Map<string, TruthNode[]>();
+  for (const n of nodes.filter((n) => n.state === 'unverified')) {
+    const d = n.domain ?? 'other';
+    if (!unverifiedGroups.has(d)) unverifiedGroups.set(d, []);
+    unverifiedGroups.get(d)!.push(n);
+  }
+  const unverifiedByDomain = [...unverifiedGroups.entries()]
+    .sort((a, b) => DOMAIN_ORDER.indexOf(a[0]) - DOMAIN_ORDER.indexOf(b[0]))
+    .map(([domain, ns]) => ({ domain, nodes: ns }));
 
   const alignedGroups = new Map<string, TruthNode[]>();
   for (const n of nodes.filter((n) => n.state === 'aligned')) {
@@ -404,7 +428,7 @@ export function getTruthView(
   };
   for (const n of nodes) by_species[n.species]++;
 
-  const by_state: Record<DriftState, number> = { drift: 0, review: 0, held: 0, aligned: 0 };
+  const by_state: Record<DriftState, number> = { drift: 0, review: 0, held: 0, aligned: 0, unverified: 0 };
   for (const n of nodes) by_state[n.state]++;
 
   const reopenDates = nodes
@@ -430,6 +454,7 @@ export function getTruthView(
   return {
     attention,
     alignedByDomain,
+    unverifiedByDomain,
     candidates: { auto, suppressed },
     counts: {
       nodes: nodes.length,
@@ -468,7 +493,14 @@ export function getDecisionDetail(
   const res = resolutionFor(row.id);
   const overdue = row.review_after != null && row.review_after * 1000 < now;
 
-  // State derivation (same logic)
+  // State derivation — MUST mirror getTruthView. It had drifted: this branch never looked at
+  // drift_edges, so check_decision could say "aligned" on the anchor drift_status flagged 🔴.
+  const openEdgesHere = db
+    .prepare(`SELECT verdict, confidence, evidence, detected_at FROM drift_edges WHERE anchor_id = ? AND status = 'open' ORDER BY detected_at DESC`)
+    .all(anchorId) as Array<{ verdict: string; confidence: number; evidence: string; detected_at: number }>;
+  const contradictsHere = openEdgesHere.filter((e) => e.verdict === 'contradicts');
+  const absentHere = openEdgesHere.filter((e) => e.verdict === 'absent');
+  const implementedHere = openEdgesHere.filter((e) => e.verdict === 'implements');
   let state: DriftState, accounted: boolean, accountedBy: string | null;
   const pendingCand = db
     .prepare(
@@ -497,16 +529,26 @@ export function getDecisionDetail(
     state = 'aligned'; accounted = true; accountedBy = 'fix (resolved)';
   } else if (res?.action === 'supersede') {
     state = 'aligned'; accounted = true; accountedBy = 'supersede (intentional evolution)';
-  } else if (hasPending) {
+  } else if (res?.action === 'dismiss') {
+    state = 'aligned'; accounted = true; accountedBy = 'dismiss (false positive)';
+  } else if (contradictsHere.length > 0) {
+    state = 'drift'; accounted = false; accountedBy = null;
+  } else if (hasPending || absentHere.length > 0) {
     state = 'review'; accounted = false; accountedBy = null;
   } else if (row.lifecycle === 'at_risk') {
     state = 'drift'; accounted = false; accountedBy = null;
+  } else if (implementedHere.length > 0) {
+    state = 'aligned'; accounted = true; accountedBy = 'observed (implements)';
   } else {
-    state = 'aligned'; accounted = true; accountedBy = null;
+    state = 'unverified'; accounted = false; accountedBy = null;
   }
 
   const reality = cardCand?.rationale ?? (hasPending ? pendingCand[0].rationale : null)
-    ?? (state === 'aligned' ? 'Committed reality matches intent (convergent)' : null);
+    ?? (contradictsHere.length > 0 ? summarizeEdges('contradicts', contradictsHere) : null)
+    ?? (absentHere.length > 0 ? summarizeEdges('absent', absentHere) : null)
+    ?? (state === 'aligned' && implementedHere.length > 0 ? summarizeEdges('implements', implementedHere) : null)
+    ?? (state === 'aligned' ? 'Accounted for by recorded resolution' : null)
+    ?? (state === 'unverified' ? 'No signal observed (not verified against reality)' : null);
 
   // Drift edges for this anchor
   const edges = db

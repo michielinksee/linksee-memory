@@ -42,7 +42,7 @@ const edge = (anchor, verdict, file) =>
 
 const node = (id) => {
   const v = getTruthView(db, {});
-  return [...v.attention, ...v.alignedByDomain.flatMap((g) => g.nodes)].find((n) => n.id === id);
+  return [...v.attention, ...v.alignedByDomain.flatMap((g) => g.nodes), ...v.unverifiedByDomain.flatMap((g) => g.nodes)].find((n) => n.id === id);
 };
 
 console.log('edges-state regression');
@@ -61,8 +61,25 @@ check('open absent edge → 🟡 review (asks, does not alarm)', n.state === 're
 
 const unchecked = declare('本番はVercel');
 n = node(unchecked);
-check('no edges, no resolution → aligned', n.state === 'aligned', `state=${n.state}`);
-check('…but reality says nothing was verified', /No signal observed/.test(n.reality), n.reality);
+check('no edges, no resolution → ⚫ unverified (not aligned)', n.state === 'unverified', `state=${n.state}`);
+check('…and reality says nothing was verified', /No signal observed/.test(n.reality), n.reality);
+
+const observed = declare('CIはGitHub Actions');
+edge(observed, 'implements', 'C:/repo/.github/workflows/ci.yml');
+n = node(observed);
+check('an implements edge → 🔵 aligned (verified)', n.state === 'aligned', `state=${n.state}`);
+check('…and reality names where it was observed', /Observed in reality/.test(n.reality) && /ci\.yml/.test(n.reality), n.reality);
+
+// check_decision must agree with drift_status — it had its own copy of the state machine.
+{
+  const { getDecisionDetail } = await import('../dist/lib/truth-engine.js');
+  const d1 = getDecisionDetail(db, contradicted);
+  const d2 = getDecisionDetail(db, unchecked);
+  const d3 = getDecisionDetail(db, observed);
+  check('check_decision mirrors 🔴 on an open contradiction', d1.state === 'drift', `state=${d1.state}`);
+  check('check_decision mirrors ⚫ unverified', d2.state === 'unverified', `state=${d2.state}`);
+  check('check_decision mirrors 🔵 on implements', d3.state === 'aligned', `state=${d3.state}`);
+}
 
 resolveDrift(db, { anchor_id: contradicted, action: 'dismiss', rationale: 'column named email is not user PII' });
 n = node(contradicted);
