@@ -30,9 +30,13 @@ const dirty = sh('git status --porcelain --untracked-files=no');
 if (dirty) fail(`working tree has uncommitted changes:\n${dirty}\nCommit them first — what you publish must be what git has.`);
 
 // 2. tag at HEAD
+// (no `^{commit}` here: execSync goes through cmd.exe on Windows, where `^` is an escape
+// character and the peel syntax silently turns into `v0.12.0{commit}`. rev-list -n 1 peels
+// annotated and lightweight tags alike.)
 const tag = `v${version}`;
 let tagRef = '';
-try { tagRef = sh(`git rev-parse ${tag}^{commit}`); } catch { fail(`tag ${tag} does not exist. Run: git tag ${tag}`); }
+try { sh(`git rev-parse --verify --quiet refs/tags/${tag}`); tagRef = sh(`git rev-list -n 1 refs/tags/${tag}`); }
+catch { fail(`tag ${tag} does not exist. Run: git tag ${tag}`); }
 const head = sh('git rev-parse HEAD');
 if (tagRef !== head) fail(`tag ${tag} points at ${tagRef.slice(0, 7)} but HEAD is ${head.slice(0, 7)}. Publish from the tagged commit.`);
 
