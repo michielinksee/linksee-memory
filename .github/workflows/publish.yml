@@ -15,6 +15,7 @@ name: Publish
 # The release gate still runs inside `npm publish` (prepublishOnly): clean tree, v<version> tag
 # at HEAD, and package.json / server.json / .well-known agreeing. It protects CI exactly as it
 # protects a laptop — that's the point of putting it in the package rather than in a runbook.
+# (Verified: the first rehearsal was refused because HEAD was a branch tip, not the tag.)
 #
 # One-time setup on npmjs.com (Package settings → Trusted publisher):
 #     Organization or user: michielinksee
@@ -112,6 +113,16 @@ jobs:
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        # A manual run sits on a branch tip, not on a tag, so the gate's "v<version> at HEAD"
+        # check cannot pass here by construction — it fired correctly on the first rehearsal
+        # (tag v0.12.0 at 10e1081, HEAD at 06cce40) and would block every dry run forever.
+        # Skip it for the rehearsal only; a real publish is triggered by a tag push, where the
+        # gate runs and must pass.
+        #
+        # Note: --dry-run does not contact the registry, so this rehearses packing, not OIDC.
+        # Trusted publishing is proven by the first real tag publish.
+        env:
+          LINKSEE_RELEASE_GATE: skip
         run: npm publish --dry-run
 
       - name: Publish to npm
