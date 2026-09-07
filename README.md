@@ -16,6 +16,9 @@
 🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
 📖 **Docs**: [docs.linksee.app](https://docs.linksee.app) — full reference: the product map & drift, install, and all 11 tools
 
+<!-- releases: tag-driven, published from CI via npm trusted publishing (OIDC).
+     See .github/workflows/publish.yml — no token, no OTP, provenance attached automatically. -->
+
 ## 🪄 Three spells to remember
 
 | Say this | What happens |

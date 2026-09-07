@@ -1,0 +1,132 @@
+name: Publish
+
+# Trusted publishing (OIDC) — no npm token, no OTP, no recovery code.
+#
+# Why this exists: 0.12.0 took an hour to publish by hand. The account's only 2FA factor is a
+# passkey, npm offers no authenticator-app option for it, and `npm publish` demands an OTP
+# regardless of the auth-only setting — so the only route left was burning a paper recovery
+# code. OIDC removes the whole class of problem: GitHub proves the workflow's identity to npm
+# directly, and npm mints provenance from it.
+#
+# Trigger: push a version tag.
+#     npm version <patch|minor|major>   # bumps package.json (also update server.json + .well-known)
+#     git push origin main --follow-tags
+#
+# The release gate still runs inside `npm publish` (prepublishOnly): clean tree, v<version> tag
+# at HEAD, and package.json / server.json / .well-known agreeing. It protects CI exactly as it
+# protects a laptop — that's the point of putting it in the package rather than in a runbook.
+#
+# One-time setup on npmjs.com (Package settings → Trusted publisher):
+#     Organization or user: michielinksee
+#     Repository:           linksee-memory
+#     Workflow filename:    publish.yml
+#     Environment:          (leave empty)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and run every check, but do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # the OIDC token npm verifies — without this the publish falls back to tokens
+
+jobs:
+  publish:
+    name: Verify + publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the release gate resolves refs/tags/v<version>; a shallow clone has none
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm CLI
+        # Trusted publishing needs npm >= 11.5.1; the npm bundled with Node 24 can be older.
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm --version)  ·  node $(node --version)"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches package.json
+        # Fail here with a readable message rather than deep inside prepublishOnly.
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').version")
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" != "$PKG" ]; then
+              echo "::error::tag v$TAG does not match package.json $PKG"
+              exit 1
+            fi
+            echo "tag v$TAG == package.json $PKG"
+          else
+            echo "manual run · package.json $PKG"
+          fi
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Regression tests
+        # The two defects that shipped in 0.11.5 are covered here. A release must not
+        # reintroduce them silently.
+        run: |
+          node test/supersede-gate.mjs
+          node test/edges-state.mjs
+
+      - name: MCP initialize + tools/list handshake
+        run: |
+          set -euo pipefail
+          OUTPUT=$(printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1.0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | timeout 15 node dist/mcp/server.js)
+          for TOOL in recall remember drift_status; do
+            if ! echo "$OUTPUT" | grep -q "\"name\":\"$TOOL\""; then
+              echo "::error::tools/list missing '$TOOL'"
+              exit 1
+            fi
+          done
+          echo "✓ MCP handshake passed"
+
+      - name: Publish (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: npm publish --dry-run
+
+      - name: Publish to npm
+        if: github.event_name == 'push' || !inputs.dry_run
+        # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for short-lived
+        # credentials. Provenance is attached automatically for public repos.
+        run: npm publish
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### linksee-memory"
+            echo ""
+            echo "- version: \`$(node -p "require('./package.json').version")\`"
+            echo "- npm: \`$(npm --version)\` · node: \`$(node --version)\`"
+            echo "- auth: trusted publishing (OIDC) — no token, no OTP"
+          } >> "$GITHUB_STEP_SUMMARY"
