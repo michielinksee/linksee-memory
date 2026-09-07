@@ -96,6 +96,7 @@ jobs:
           node test/supersede-gate.mjs
           node test/edges-state.mjs
           node test/guard-wiring.mjs
+          node test/guard-scope.mjs
 
       - name: MCP initialize + tools/list handshake
         run: |

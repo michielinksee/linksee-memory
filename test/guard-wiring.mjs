@@ -9,7 +9,7 @@
 //
 // Run: node test/guard-wiring.mjs   (pure functions, no filesystem, no DB)
 
-const { wireGuard, guardWiredFor, guardFullyWired, GUARD_EVENTS } = await import('../dist/lib/guard-wiring.js');
+const { wireGuard, guardWiredFor, guardFullyWired, syncWiredFor, GUARD_EVENTS } = await import('../dist/lib/guard-wiring.js');
 
 let failures = 0;
 const check = (name, cond, extra = '') => {
@@ -89,6 +89,28 @@ console.log('guard-wiring regression');
   const { added, settings } = wireGuard(partial);
   check('adds only the missing event', added.length === 1 && added[0] === 'SessionStart', JSON.stringify(added));
   check('existing event not duplicated', settings.hooks.PreToolUse.length === 1);
+}
+
+// 6. the sync (Stop) hook shares the probe — a narrow one duplicated it on a real machine
+{
+  const forms = [
+    ['npx subcommand', 'npx -y linksee-memory sync'],
+    ['global bin', 'linksee-memory-sync'],
+    ['dist path', 'node "C:/Users/HP/linksee-memory/dist/bin/sync-session.js"'],
+  ];
+  for (const [label, command] of forms) {
+    const s = { hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command }] }] } };
+    check(`sync recognised: ${label}`, syncWiredFor(s), command);
+  }
+  const exec = { hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command: 'node', args: ['/x/dist/bin/sync-session.js'] }] }] } };
+  check('sync recognised: exec form (path in args)', syncWiredFor(exec));
+
+  const foreign = { hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command: 'node kansei-link-mcp/dist/bin/usage-hook.js' }] }] } };
+  check('a foreign Stop hook is not mistaken for sync', !syncWiredFor(foreign));
+
+  // the two kinds must not be confused with each other
+  const guardOnly = { hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard' }] }] } };
+  check('the guard hook does not read as the sync hook', !syncWiredFor(guardOnly));
 }
 
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);

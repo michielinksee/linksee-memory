@@ -158,9 +158,16 @@ export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] 
       }
     }
 
-    // Scope (mirrors the detector): a path-scoped anchor requires the action to touch an in-scope
-    // file; a global anchor (no affects) fires on topical-term OR forbidden-signal relevance.
-    const inScope = hasScope ? pathHit : termHit || sigHit != null;
+    // Scope. `affects` says WHERE a decision applies; `violation_signal` says WHAT is forbidden.
+    // An explicit signal hit is the stronger evidence, so it brings the anchor into scope on its
+    // own — otherwise a path-scoped anchor is blind to `Bash`, which carries no file path at all.
+    // That blindness was measured on a real machine: 21 of 42 active anchors declared forbidden
+    // strings and could never fire on a Bash command — including "ALTER TABLE memories DROP" on
+    // the anchor that exists to prevent exactly that. Bash is where the destructive things run.
+    //
+    // (matchViolation already guards the obvious false positives: word boundaries, a negation
+    // window, and citation-without-call — a naive substring test produced ~90% noise.)
+    const inScope = sigHit != null || (hasScope ? pathHit : termHit);
     if (!inScope) continue;
 
     out.push({

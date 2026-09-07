@@ -41,7 +41,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { GUARD_COMMAND, guardFullyWired, wireGuard, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { GUARD_COMMAND, guardFullyWired, wireGuard, syncWiredFor, type ClaudeSettings } from '../lib/guard-wiring.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -229,9 +229,9 @@ if (existsSync(SETTINGS_PATH)) {
 
 // Check if hook already exists
 const stopHooks = settings?.hooks?.Stop ?? [];
-const alreadyHooked = stopHooks.some((entry) =>
-  entry.hooks?.some((h) => h.command?.includes('linksee-memory-sync'))
-);
+// Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
+// path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
+const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
 
 if (alreadyHooked) {
   console.log(`  ${SKIP} Stop hook already configured`);

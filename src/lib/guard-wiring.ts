@@ -31,6 +31,36 @@ export const GUARD_HOOKS: Record<GuardEvent, HookEntry> = {
   },
 };
 
+/** Everything a hook entry could carry an identifier in: `command`, or `args` for the exec form. */
+function hookHaystack(h: HookCommand | undefined): string {
+  return [h?.command, ...(h?.args ?? [])].filter((x) => typeof x === 'string').join(' ');
+}
+
+/**
+ * Is one of OUR hooks of `kind` already wired for this event?
+ *
+ * Shared by the guard and the session-sync hook because they hit the same trap: each has been
+ * wired as an npx subcommand, as a global bin, as a dist path, and in exec form with the path
+ * in `args`. A probe that knows only one shape appends a duplicate — which is exactly what
+ * happened to the Stop hook on 2026-09-07 (`sync-session.js` did not match `linksee-memory-sync`,
+ * so setup added a second one and sessions were captured twice).
+ */
+export function linkseeHookWired(settings: ClaudeSettings, event: string, kind: 'guard' | 'sync'): boolean {
+  const bare = kind === 'guard' ? 'guard-hook' : 'sync-session';
+  return (settings.hooks?.[event] ?? []).some((entry) =>
+    entry?.hooks?.some((h) => {
+      const hay = hookHaystack(h);
+      if (!hay) return false;
+      return hay.includes(bare) || (hay.includes('linksee-memory') && hay.includes(kind));
+    }),
+  );
+}
+
+/** Is the session-sync (Stop) hook already wired? */
+export function syncWiredFor(settings: ClaudeSettings, event = 'Stop'): boolean {
+  return linkseeHookWired(settings, event, 'sync');
+}
+
 /**
  * Is OUR guard already wired for this event?
  *
@@ -44,13 +74,7 @@ export const GUARD_HOOKS: Record<GuardEvent, HookEntry> = {
  * joined together. `guard-hook` alone is accepted because the exec form carries no package name.
  */
 export function guardWiredFor(settings: ClaudeSettings, event: string): boolean {
-  return (settings.hooks?.[event] ?? []).some((entry) =>
-    entry?.hooks?.some((h) => {
-      const hay = [h?.command, ...(h?.args ?? [])].filter((x) => typeof x === 'string').join(' ');
-      if (!hay) return false;
-      return hay.includes('guard-hook') || (hay.includes('linksee-memory') && hay.includes('guard'));
-    }),
-  );
+  return linkseeHookWired(settings, event, 'guard');
 }
 
 export function guardFullyWired(settings: ClaudeSettings): boolean {
