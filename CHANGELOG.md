@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.13.1 — 2026-09-07 (Fewer false alarms)
+
+Day one of running the guard everywhere produced the noise it was always going to produce, and
+two of the three causes were ours.
+
+### Fixed
+
+- **A dismissal now changes the next detection.** `resolve_drift(action:'dismiss')` closed the
+  drift edges, but the gate never read the verdict — so the same wrong match fired on the very
+  next command. Anchor #13 ("don't favour our own products in rankings", signals = the bare
+  product names) fired six times in two minutes because a temp file path contained "Sake-Navi".
+  A verdict that does not change what happens next is not a feedback loop. Dismissals are now
+  durable (`gate_dismissals`, schema v16) and honoured by the gate. Pass `hit_term` to silence
+  one match term and keep the anchor's real detections; omit it to silence the anchor entirely.
+- **Scope decides again when the action names files.** 0.13.0 made a signal hit scope-free to
+  cure the Bash blind spot, and traded one failure for another: an anchor scoped to one repo
+  started firing in every repo containing its term — `insert or ignore` is ordinary SQLite
+  everywhere. A signal now stands in for scope only when there is no path to check (Bash); when
+  the action names files, the anchor's own `affects` decides. The Bash blind spot stays fixed.
+
+### Changed
+
+- The gate message offers both exits, and names the matched term: supersede if the decision
+  changed, dismiss if the match was wrong. Escaping one bad match should not cost you the anchor.
+
+### Added
+
+- `test/guard-dismiss.mjs` — dismissal is honoured, is durable, is scoped to the term, and does
+  not disable the rest of the anchor.
+
 ## v0.13.0 — 2026-09-07 (On by default)
 
 The guard was the one layer no competing memory tool has, and it was switched off almost

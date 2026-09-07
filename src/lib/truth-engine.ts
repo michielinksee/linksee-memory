@@ -558,6 +558,8 @@ export function getDecisionDetail(
 export type ResolutionAction = 'fix' | 'supersede' | 'acknowledge' | 'dismiss';
 
 export interface ResolveInput {
+  /** For dismiss: silence only this match term. Omitted → silence the anchor at the gate. */
+  hit_term?: string;
   anchor_id: number;
   action: ResolutionAction;
   rationale?: string;
@@ -611,11 +613,21 @@ export function resolveDrift(db: Database.Database, input: ResolveInput): { ok: 
   db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?")
     .run(key, JSON.stringify(existing), JSON.stringify(existing));
 
-  // If action is 'dismiss', also mark all open drift_edges for this anchor as dismissed
+  // 'dismiss' must change what happens NEXT time, not just tidy the current edges — otherwise
+  // the same wrong match fires on the next command and the verdict was theatre. Record it where
+  // the gate reads (gate_dismissals), keyed to the exact term when one was given so the anchor's
+  // real detections survive.
   if (input.action === 'dismiss') {
     db.prepare(
       "UPDATE drift_edges SET status = 'dismissed' WHERE anchor_id = ? AND status = 'open'",
     ).run(input.anchor_id);
+    try {
+      db.prepare(
+        `INSERT INTO gate_dismissals (anchor_id, hit_term, rationale) VALUES (?, ?, ?)
+         ON CONFLICT(anchor_id, COALESCE(hit_term, '')) DO UPDATE SET rationale = excluded.rationale`,
+      ).run(input.anchor_id, input.hit_term ? input.hit_term.toLowerCase() : null, input.rationale ?? null);
+      resolution.gate_dismissed = input.hit_term ? input.hit_term.toLowerCase() : 'all matches';
+    } catch { /* pre-v16 DB → edges-only dismiss, as before */ }
   }
 
   // If action is 'fix', mark open edges as resolved

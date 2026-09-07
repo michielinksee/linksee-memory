@@ -44,6 +44,8 @@ export interface GateMatch {
   verdict: 'contradicts' | 'in_scope';
   why: string;
   gate_mode: GateMode;
+  /** The exact term that matched, so the reader can dismiss precisely this match. */
+  hit_term?: string | null;
 }
 
 export interface GateResult {
@@ -124,10 +126,34 @@ function buildActionCtx(input: ActionInput): ActionCtx {
   return { tool: input.tool ?? 'unknown', files, lines, haystack };
 }
 
+/**
+ * What the human has already called a false positive.
+ *
+ * Keyed by anchor and (optionally) the exact term that matched, so dismissing "this anchor
+ * matched my file path" does not throw away the anchor's real detections.
+ */
+function dismissedFor(db: Database.Database): Map<number, Set<string>> {
+  const out = new Map<number, Set<string>>();
+  let rows: Array<{ anchor_id: number; hit_term: string | null }> = [];
+  try {
+    rows = db.prepare('SELECT anchor_id, hit_term FROM gate_dismissals').all() as typeof rows;
+  } catch {
+    return out; // table not migrated yet → nothing dismissed
+  }
+  for (const r of rows) {
+    if (!out.has(r.anchor_id)) out.set(r.anchor_id, new Set());
+    out.get(r.anchor_id)!.add((r.hit_term ?? '*').toLowerCase());
+  }
+  return out;
+}
+
 export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] {
   const out: GateMatch[] = [];
+  const dismissed = dismissedFor(db);
 
   for (const a of acceptedAnchors(db)) {
+    const dis = dismissed.get(a.id);
+    if (dis?.has('*')) continue; // whole anchor silenced at the gate
     const gate_mode = jsonGet<GateMode>(a.card_policy, 'gate_mode', 'soft');
     if (gate_mode === 'off') continue;
 
@@ -159,16 +185,29 @@ export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] 
     }
 
     // Scope. `affects` says WHERE a decision applies; `violation_signal` says WHAT is forbidden.
-    // An explicit signal hit is the stronger evidence, so it brings the anchor into scope on its
-    // own — otherwise a path-scoped anchor is blind to `Bash`, which carries no file path at all.
-    // That blindness was measured on a real machine: 21 of 42 active anchors declared forbidden
-    // strings and could never fire on a Bash command — including "ALTER TABLE memories DROP" on
-    // the anchor that exists to prevent exactly that. Bash is where the destructive things run.
+    //
+    // A path-scoped anchor is blind to `Bash`, which carries no file path — measured on a real
+    // machine, 21 of 42 active anchors could never fire on a Bash command, including "ALTER
+    // TABLE memories DROP" on the anchor that exists to prevent exactly that. So a signal hit
+    // counts on its own WHEN THERE IS NO PATH TO CHECK.
+    //
+    // But only then. Making signal hits scope-free outright (0.13.0) traded one failure for
+    // another: an anchor scoped to one repo started firing in every repo that happened to
+    // contain its term — "insert or ignore" is ordinary SQLite everywhere, and a temp file path
+    // containing "Sake-Navi" is not favouritism in a ranking. When the action names files, the
+    // anchor's own scope is the better evidence and it decides.
     //
     // (matchViolation already guards the obvious false positives: word boundaries, a negation
     // window, and citation-without-call — a naive substring test produced ~90% noise.)
-    const inScope = sigHit != null || (hasScope ? pathHit : termHit);
+    const actionNamesFiles = act.files.length > 0;
+    const inScope = hasScope
+      ? pathHit || (!actionNamesFiles && sigHit != null)
+      : termHit || sigHit != null;
     if (!inScope) continue;
+
+    // A dismissed term stops firing; the anchor's other terms keep working.
+    if (sigHit && dis?.has(sigHit.toLowerCase())) continue;
+    if (!sigHit && dis?.has('*')) continue;
 
     out.push({
       anchor_id: a.id,
@@ -181,6 +220,7 @@ export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] 
           ? `touches a file under this decision's scope`
           : `matches this decision's topic`,
       gate_mode,
+      hit_term: sigHit ?? null,
     });
   }
 
@@ -261,9 +301,21 @@ export function formatReinject(matches: GateMatch[], gate: GateLevel): string {
     return `• [#${m.anchor_id}] "${m.statement}"${rationale}\n  ↳ ${tail}`;
   });
 
+  // Offer both exits, because the reader is in one of two situations and only they know which:
+  // the decision changed (supersede), or the match was wrong (dismiss). Naming the exact term
+  // matters — dismissing a whole anchor to escape one bad match throws away its real work.
   const firstContra = matches.find((m) => m.verdict === 'contradicts');
   const foot = firstContra
-    ? `\nIf you are intentionally changing this decision, supersede it on the record:\n  resolve_drift(anchor_id: ${firstContra.anchor_id}, action: 'supersede', superseded_by: <new anchor>).`
+    ? `
+If you are intentionally changing this decision, supersede it on the record:
+` +
+      `  resolve_drift(anchor_id: ${firstContra.anchor_id}, action: 'supersede', superseded_by: <new anchor>).
+` +
+      `If this match is simply wrong, say so and it stops firing:
+` +
+      `  resolve_drift(anchor_id: ${firstContra.anchor_id}, action: 'dismiss'` +
+      (firstContra.hit_term ? `, hit_term: '${firstContra.hit_term}'` : '') +
+      `, rationale: '<why>').`
     : '';
 
   return [head, ...body, foot].filter(Boolean).join('\n');

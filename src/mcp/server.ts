@@ -280,7 +280,7 @@ const TOOLS = [
   {
     name: 'resolve_drift',
     description:
-      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
+      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed AND the gate stops firing on it (pass hit_term to silence just that word)\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
     inputSchema: {
       type: 'object',
       properties: {
@@ -289,6 +289,7 @@ const TOOLS = [
         rationale: { type: 'string', description: 'Why this resolution (recorded for audit trail)' },
         review_after: { type: 'string', description: 'For acknowledge: ISO date to re-check (e.g. "2026-07-04")' },
         superseded_by: { type: 'number', description: 'For supersede: the new anchor ID that replaces this one' },
+        hit_term: { type: 'string', description: "For dismiss: silence only this match term (the word the gate quoted back at you). Omit to silence the whole anchor at the gate — prefer the term, so the anchor's real detections keep working." },
       },
       required: ['anchor_id', 'action'],
     },
@@ -1524,6 +1525,7 @@ function handleResolveDrift(args: any): string {
     rationale: args.rationale,
     review_after: args.review_after,
     superseded_by: args.superseded_by,
+    hit_term: args.hit_term,
   });
   return JSON.stringify(result);
 }

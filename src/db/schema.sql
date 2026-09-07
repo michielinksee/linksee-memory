@@ -378,6 +378,25 @@ CREATE INDEX IF NOT EXISTS idx_anchor_touch_time   ON anchor_touch_log(occurred_
 CREATE INDEX IF NOT EXISTS idx_anchor_touch_anchor ON anchor_touch_log(anchor_id, occurred_at);
 
 -- ============================================================
+-- v16: gate_dismissals — the human's "that was a false positive", made durable.
+-- resolve_drift(action:'dismiss') closed drift_edges but the GATE never read the verdict, so
+-- the same wrong match fired again on the next command. Observed: anchor #13 ("don't favour
+-- our own products in rankings", signals = the bare product names) fired 6× in two minutes
+-- because a temp file path contained "Sake-Navi". A verdict that does not change the next
+-- detection is not a feedback loop.
+-- hit_term NULL = silence this anchor at the gate entirely; otherwise only that match term.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gate_dismissals (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  anchor_id   INTEGER NOT NULL REFERENCES drift_anchors(id) ON DELETE CASCADE,
+  hit_term    TEXT,                                  -- lowercased match term; NULL = whole anchor
+  rationale   TEXT,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_dismissal_uniq
+  ON gate_dismissals(anchor_id, COALESCE(hit_term, ''));
+
+-- ============================================================
 -- v11: Current Truth Map — journey-spine topology (Product Drift OS spec v3).
 -- map.yaml (git) is the desired-state SOURCE OF TRUTH (anchor #58); these tables
 -- are the runtime index the importer reconciles INTO. A map_node is product
@@ -456,6 +475,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value         TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '15');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '16');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(unixepoch() AS TEXT));
-UPDATE meta SET value = '15' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14');
+UPDATE meta SET value = '16' WHERE key = 'schema_version' AND value IN ('1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15');
