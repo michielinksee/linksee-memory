@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.15.1 — 2026-09-07
+
+### Added
+
+- `resolve_drift({ action: 'dismiss', gate: false })` — close the drift edges as false positives
+  but **keep the gate watching**. Two verdicts had been hiding behind "dismiss": *this detection
+  was wrong* and *stop detecting this*. Anchor #2 ("no destructive migrations") had a lexical
+  false positive from `migrate.ts`; dismissing it the old way would have silenced the one string
+  the anchor exists to catch — `ALTER TABLE memories DROP`. Now the edge closes and the gate
+  keeps its eyes.
+
 ## v0.15.0 — 2026-09-07 (Six tools)
 
 Roadmap 5, and the end of the trust arc that started at 0.12.0: the surface an agent has to

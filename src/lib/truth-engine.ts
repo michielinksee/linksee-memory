@@ -602,6 +602,14 @@ export type ResolutionAction = 'fix' | 'supersede' | 'acknowledge' | 'dismiss';
 export interface ResolveInput {
   /** For dismiss: silence only this match term. Omitted → silence the anchor at the gate. */
   hit_term?: string;
+  /**
+   * For dismiss: false = close these drift edges as false positives but leave the gate
+   * watching. The default (true) also stops the gate. Two different verdicts hide behind
+   * "dismiss": "this detection was wrong" and "stop detecting this". Anchor #2 ("no destructive
+   * migrations") had a false positive from migrate.ts — the right answer was to close the edge
+   * and keep the gate, since "ALTER TABLE memories DROP" is exactly what it exists to catch.
+   */
+  gate?: boolean;
   anchor_id: number;
   action: ResolutionAction;
   rationale?: string;
@@ -663,7 +671,10 @@ export function resolveDrift(db: Database.Database, input: ResolveInput): { ok: 
     db.prepare(
       "UPDATE drift_edges SET status = 'dismissed' WHERE anchor_id = ? AND status = 'open'",
     ).run(input.anchor_id);
-    try {
+    if (input.gate === false) {
+      resolution.gate_dismissed = 'none (edges closed; gate still watching)';
+      resolution.gate = false;
+    } else try {
       db.prepare(
         `INSERT INTO gate_dismissals (anchor_id, hit_term, rationale) VALUES (?, ?, ?)
          ON CONFLICT(anchor_id, COALESCE(hit_term, '')) DO UPDATE SET rationale = excluded.rationale`,

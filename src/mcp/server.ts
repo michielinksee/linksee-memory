@@ -305,13 +305,14 @@ const TOOLS = [
   {
     name: 'resolve_drift',
     description:
-      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed AND the gate stops firing on it (pass hit_term to silence just that word)\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
+      'Record a resolution for a drifting anchor — the human feedback loop.\n\n6 actions:\n• fix — "we fixed the code/reality to match intent" → state becomes aligned\n• supersede — "intent evolved, this is the new direction" → state becomes aligned\n• acknowledge — "we know, parking it for now" → state becomes held (with optional review date)\n• dismiss — "false positive, not actually drifting" → edges dismissed AND the gate stops firing on it (hit_term: just that word; gate:false: close the edges but keep the gate watching)\n• harden — "re-injected but still violated, enforce it" → card_policy.gate_mode=hard (PreToolUse will BLOCK)\n• soften — "back off to a warning" → gate_mode=soft\n\nWHEN TO CALL:\n• After drift_status shows 🔴 drift or 🟡 review items\n• When the user says "that\'s fixed" / "ignore that" / "we changed direction"\n• When acknowledging a known gap with a review date',
     inputSchema: {
       type: 'object',
       properties: {
         anchor_id: { type: 'number', description: 'The drift_anchor ID to resolve' },
         action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss', 'harden', 'soften', 'surface'], description: "Resolution action. With candidate_id (an orphaned proposal): 'surface' keeps it visible for the human, 'dismiss' retires it." },
         candidate_id: { type: 'number', description: 'Resolve an orphaned proposal (from recall({ dream: true })) instead of an anchor: pass its candidate_id with action surface | dismiss and a rationale that references the North Star. (Absorbs resolve_proposal.)' },
+        gate: { type: 'boolean', default: true, description: "For dismiss: false = these detections were false positives, close them, but KEEP the gate watching this anchor (its signals still fire). Use when the anchor's rule is right and only this evidence was wrong — e.g. a lexical hit in a file that is not what the rule is about. Default true also silences the gate (whole anchor, or just hit_term)." },
         rationale: { type: 'string', description: 'Why this resolution (recorded for audit trail)' },
         review_after: { type: 'string', description: 'For acknowledge: ISO date to re-check (e.g. "2026-07-04")' },
         superseded_by: { type: 'number', description: 'For supersede: the new anchor ID that replaces this one' },
@@ -1775,6 +1776,7 @@ function handleResolveDrift(args: any): string {
     review_after: args.review_after,
     superseded_by: args.superseded_by,
     hit_term: args.hit_term,
+    gate: args.gate,
   });
   return JSON.stringify(result);
 }

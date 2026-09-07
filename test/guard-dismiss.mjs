@@ -84,6 +84,20 @@ check('the noisy anchor fires first', hit(bash('cd repo && node build-map.js'), 
 resolveDrift(db, { anchor_id: noisy, action: 'dismiss', rationale: 'terms are too generic' });
 check('dismissing with no term silences the whole anchor', !hit(bash('cd repo && node build-map.js'), noisy));
 
+// ── gate:false — the detection was wrong, the rule is right ────────────────
+{
+  const migrations = declare({ affects: ['src/db/migrate.ts'], terms: ['migration'], signals: ['ALTER TABLE memories DROP'] });
+  db.prepare(`INSERT INTO drift_edges (anchor_id, verdict, confidence, evidence, status, detected_at) VALUES (?, 'contradicts', 0.8, '{}', 'open', unixepoch())`).run(migrations);
+  const r2 = resolveDrift(db, { anchor_id: migrations, action: 'dismiss', gate: false, rationale: 'the hit was a comment' });
+  check('dismiss(gate:false) says the gate still watches', /gate still watching/.test(String(r2.resolution.gate_dismissed)), JSON.stringify(r2.resolution));
+  const closed = db.prepare(`SELECT COUNT(*) c FROM drift_edges WHERE anchor_id = ? AND status = 'open'`).get(migrations).c;
+  check('…the edges are closed', closed === 0, `open=${closed}`);
+  const stillFires = bash('sqlite3 memory.db "ALTER TABLE memories DROP COLUMN layer"');
+  check('…and the gate still fires on the real thing', hit(stillFires, migrations), `gate=${stillFires.gate}`);
+  const rowsNow = db.prepare('SELECT COUNT(*) c FROM gate_dismissals WHERE anchor_id = ?').get(migrations).c;
+  check('…with no gate dismissal recorded', rowsNow === 0, `rows=${rowsNow}`);
+}
+
 // ── dismissal must be durable, not per-session ──────────────────────────────
 const rows = db.prepare('SELECT anchor_id, hit_term FROM gate_dismissals ORDER BY id').all();
 check('dismissals are persisted', rows.length === 2 && rows[0].hit_term === 'sake-navi' && rows[1].hit_term === null, JSON.stringify(rows));
