@@ -129,6 +129,24 @@ function classifySpecies(decision_mode: string | null): Species {
   }
 }
 
+// ── Edge summary (one line the agent can act on) ─────────────────────────────
+
+function summarizeEdges(
+  verdict: 'contradicts' | 'absent',
+  edges: Array<{ confidence: number; evidence: string; detected_at: number }>,
+): string {
+  const latest = edges[0];
+  let ev: any = {};
+  try { ev = JSON.parse(latest.evidence || '{}'); } catch { /* ignore */ }
+  const file = ev.file_path ? String(ev.file_path).replace(/\\/g, '/').split('/').slice(-2).join('/') : null;
+  const hit = ev.hit_term ? ` hit "${ev.hit_term}"` : '';
+  const when = new Date(latest.detected_at * 1000).toISOString().slice(0, 10);
+  const head = verdict === 'contradicts'
+    ? `${edges.length} open contradiction${edges.length > 1 ? 's' : ''}`
+    : `declared but not found in reality (${edges.length} absent signal${edges.length > 1 ? 's' : ''})`;
+  return `${head}${file ? ` — ${file}` : ''}${hit} (${when}). resolve_drift: fix if reality is wrong, dismiss if false positive.`;
+}
+
 // ── Resolution lookup ────────────────────────────────────────────────────────
 
 interface ResolutionRecord {
@@ -234,6 +252,23 @@ export function getTruthView(
     }
   }
 
+  // ── Open drift edges (what the detector actually observed) ──
+  // The detector writes drift_edges; a truth view that never reads them will report 🔵 for
+  // anchors it has hard evidence against. (2026-09-05: 11 open `contradicts` edges across 4
+  // anchors — one of them the PII constraint — all rendered "reality matches intent".)
+  const edgeRows = db
+    .prepare(
+      `SELECT anchor_id, verdict, confidence, evidence, detected_at
+         FROM drift_edges WHERE status = 'open'
+        ORDER BY detected_at DESC`,
+    )
+    .all() as Array<{ anchor_id: number; verdict: string; confidence: number; evidence: string; detected_at: number }>;
+  const openEdges = new Map<number, typeof edgeRows>();
+  for (const e of edgeRows) {
+    if (!openEdges.has(e.anchor_id)) openEdges.set(e.anchor_id, []);
+    openEdges.get(e.anchor_id)!.push(e);
+  }
+
   // ── Active nodes + state derivation ──
   let sql =
     `SELECT id, node_type, domain, decision_mode, statement, rationale, confidence, lifecycle,
@@ -254,6 +289,9 @@ export function getTruthView(
     const pending = pendingByNode.get(r.id);
     const card = cardByNode.get(r.id);
     const overdue = r.review_after != null && r.review_after * 1000 < now;
+    const edges = openEdges.get(r.id) ?? [];
+    const contradicts = edges.filter((e) => e.verdict === 'contradicts');
+    const absent = edges.filter((e) => e.verdict === 'absent');
 
     // ── State derivation (the make-or-break logic) ──
     let state: DriftState;
@@ -275,8 +313,20 @@ export function getTruthView(
       state = 'aligned';
       accounted = true;
       accountedBy = 'supersede (intentional evolution)';
-    } else if (pending) {
-      // 🟡 Soft signal awaiting human decision
+    } else if (res?.action === 'dismiss') {
+      // 🔵 a human looked at the signal and called it a false positive — that IS an answer.
+      state = 'aligned';
+      accounted = true;
+      accountedBy = 'dismiss (false positive)';
+    } else if (contradicts.length > 0) {
+      // 🔴 the detector has hard evidence against this anchor and nobody has answered it.
+      // resolve_drift(fix|dismiss) closes the edges; supersede/acknowledge are handled above.
+      state = 'drift';
+      accounted = false;
+      accountedBy = null;
+    } else if (pending || absent.length > 0) {
+      // 🟡 Soft signal awaiting human decision (a pending candidate, or "declared but not
+      // found in reality" — absent is weaker than contradicts, so it asks rather than alarms)
       state = 'review';
       accounted = false;
       accountedBy = null;
@@ -292,9 +342,15 @@ export function getTruthView(
       accountedBy = null;
     }
 
+    // Say what was observed. Never claim convergence when nothing was checked — an agent
+    // reading "reality matches intent" will trust it; "no signal observed" it will verify.
     const reality = card?.rationale
       ?? pending?.rationale
-      ?? (state === 'aligned' ? 'Committed reality matches intent (convergent)' : null);
+      ?? (contradicts.length > 0 ? summarizeEdges('contradicts', contradicts) : null)
+      ?? (absent.length > 0 ? summarizeEdges('absent', absent) : null)
+      ?? (state === 'aligned'
+            ? (accountedBy ? 'Accounted for by recorded resolution' : 'No signal observed (not verified against reality)')
+            : null);
 
     return {
       id: r.id,

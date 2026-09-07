@@ -192,6 +192,7 @@ const TOOLS = [
         path: { type: 'string', description: 'File path or substring. When set, returns file edit history with per-edit user-intent context instead of memory search.' },
         max_intents: { type: 'number', description: 'For file mode: max user-intent snippets. Default 10.', default: 10 },
         scope_to_roots: { type: 'boolean', default: false, description: 'For file mode: filter to client-provided roots.' },
+        explain: { type: 'boolean', default: false, description: 'Include ranking internals (composite, heat, band, momentum, match_reasons, score_breakdown). Off by default so more memories fit the token budget.' },
         kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'For overview mode: filter by entity kind.' },
         min_memories: { type: 'number', description: 'For overview mode: minimum memory count. Default 1.', default: 1 },
       },
@@ -221,6 +222,7 @@ const TOOLS = [
       properties: {
         domain: { type: 'string', description: 'Filter by domain (strategy, product, engineering, growth, etc.)' },
         decision_mode: { type: 'string', description: 'Filter by decision_mode (hypothesis, constraint, commitment, source_of_truth)' },
+        verbose: { type: 'boolean', default: false, description: 'Return full aligned nodes and all candidates. Default is compact: attention items in full, aligned as id+statement per domain, candidates as counts.' },
       },
     },
   },
@@ -783,12 +785,17 @@ function handleRecall(args: any): string {
       content: parsedContent,
       importance: r.importance,
       pinned: r.importance >= 0.9,
-      heat: Number(r.heat_score.toFixed(1)),
-      band: r.heat_band,
-      composite: Number(r.composite_score.toFixed(3)),
-      match_reasons: r._reasons,
-      score_breakdown: r._breakdown,
+      // Ranking internals only on request — they roughly double the per-memory cost and an
+      // agent acting on the memory needs what/why/state, not the scorer's arithmetic.
+      ...(args?.explain ? {
+        heat: Number(r.heat_score.toFixed(1)),
+        band: r.heat_band,
+        composite: Number(r.composite_score.toFixed(3)),
+        match_reasons: r._reasons,
+        score_breakdown: r._breakdown,
+      } : {}),
     };
+    if (!args?.explain) delete (memObj as any).entity.momentum;
     const memTokens = estimateTokens(JSON.stringify(memObj));
     if (memoriesOut.length > 0 && accTokens + memTokens > maxTokens) { stoppedBy = 'tokens'; break; }
     accTokens += memTokens;
@@ -1329,14 +1336,35 @@ function handleDriftStatus(args: any): string {
     `🔵 ${by_state.aligned} aligned`,
   ].filter(Boolean).join(' · ');
 
+  if (args?.verbose) {
+    return JSON.stringify({
+      ok: true,
+      triage: `${nodes} anchors: ${triage}`,
+      nextReopen: view.nextReopen,
+      attention: view.attention,
+      alignedByDomain: view.alignedByDomain,
+      candidates: view.candidates,
+      counts: view.counts,
+    });
+  }
+  // Compact by default. The agent asked "what needs attention" — answer that in full and keep
+  // the rest to one line per node. (Full form was ~15k tokens for 43 anchors; the 2 drifting
+  // items were buried under 41 aligned ones with rationale.)
+  const aligned = view.alignedByDomain.map((g) => ({
+    domain: g.domain,
+    count: g.nodes.length,
+    nodes: g.nodes.map((n) => ({ id: n.id, statement: n.statement, reality: n.reality })),
+  }));
+  const cand = view.candidates as any;
   return JSON.stringify({
     ok: true,
     triage: `${nodes} anchors: ${triage}`,
     nextReopen: view.nextReopen,
     attention: view.attention,
-    alignedByDomain: view.alignedByDomain,
-    candidates: view.candidates,
+    aligned,
+    candidates: { auto: cand?.auto?.length ?? 0, suppressed: cand?.suppressed?.length ?? 0 },
     counts: view.counts,
+    hint: 'verbose:true for full aligned nodes and candidate details; check_decision(anchor_id) for one node.',
   });
 }
 
@@ -1357,9 +1385,35 @@ async function resolveProjectFromRoots(): Promise<string | undefined> {
   return matches.length === 1 ? matches[0] : undefined; // unique repo match only; else ② handles it
 }
 
+// ①b (2026-09-05): when the client sends no roots (common — not every MCP host implements
+// roots), infer the map from the files edited most recently. The DB already knows what you
+// touched; the map slug is a path segment of those files.
+function resolveProjectFromRecentEdits(): { project?: string; from?: string } {
+  const projects = listMapProjects(db);
+  if (projects.length <= 1) return { project: projects[0] };
+  const rows = db
+    .prepare(
+      `SELECT file_path FROM session_file_edits
+        WHERE occurred_at > unixepoch() - 86400
+        ORDER BY occurred_at DESC LIMIT 50`,
+    )
+    .all() as Array<{ file_path: string }>;
+  if (rows.length === 0) return {};
+  const hits = new Map<string, number>();
+  for (const r of rows) {
+    const segs = r.file_path.toLowerCase().replace(/\\/g, '/').split('/');
+    for (const p of projects) if (segs.includes(p.toLowerCase())) hits.set(p, (hits.get(p) ?? 0) + 1);
+  }
+  if (hits.size === 0) return {};
+  const [best, second] = [...hits.entries()].sort((a, b) => b[1] - a[1]);
+  if (second && second[1] === best[1]) return {}; // tie → still ambiguous
+  return { project: best[0], from: 'recent_edits' };
+}
+
 async function handleWhereAmI(args: any): Promise<string> {
-  // ① resolve project from cwd/roots when not explicitly passed; ② (inside whereAmI) is the fallback.
-  const project = args?.project ?? (await resolveProjectFromRoots());
+  // ① roots; ①b recent edits; ② (inside whereAmI) is the last fallback.
+  let project: string | undefined = args?.project ?? (await resolveProjectFromRoots());
+  if (!project) project = resolveProjectFromRecentEdits().project;
   const res = whereAmI(db, {
     query: args?.query, node_id: args?.node_id, project, limit: args?.limit,
   });
@@ -1367,7 +1421,7 @@ async function handleWhereAmI(args: any): Promise<string> {
     return JSON.stringify({
       ok: true, located: false, reason: 'ambiguous_project',
       available_projects: res.ambiguous.available,
-      hint: `Multiple maps imported — pass project: one of [${res.ambiguous.available.join(', ')}]. (No-arg can't yet tell which repo you mean; cwd/roots match is coming.)`,
+      hint: `Multiple maps imported and none matched your workspace roots or the files you edited in the last 24h — pass project: one of [${res.ambiguous.available.join(', ')}].`,
     });
   }
   if (res.matched.length === 0) {
@@ -1604,6 +1658,9 @@ function handleDream(args: any): string {
         FROM memories m JOIN entities e ON e.id = m.entity_id
        WHERE m.layer IN ('learning', 'caveat')
          AND json_valid(m.content)
+         -- settle window: the Stop hook extracts every turn, so the newest rows belong to a
+         -- session still in motion. Don't ask the agent to distill the conversation it is in.
+         AND m.created_at < unixepoch() - 1800
          AND (json_extract(m.content, '$.needs_distill') = 1
               OR json_extract(m.content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
               OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')
