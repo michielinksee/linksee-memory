@@ -1,6 +1,6 @@
 {
   "name": "linksee-memory",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "mcpName": "io.github.michielinksee/linksee-memory",
   "description": "Hand a project over — to your next session, to Cursor/Codex/Gemini, to your successor — with the reasons attached. Local-first memory MCP for coding agents: decisions re-injected before the agent acts, drift detection across every project you run. One SQLite file, nothing leaves your machine.",
   "type": "module",
