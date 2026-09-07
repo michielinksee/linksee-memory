@@ -99,6 +99,7 @@ jobs:
           node test/guard-scope.mjs
           node test/guard-dismiss.mjs
           node test/remember-anchor.mjs
+          node test/tool-surface.mjs
 
       - name: MCP initialize + tools/list handshake
         run: |

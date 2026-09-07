@@ -513,44 +513,34 @@ Nothing ever leaves your machine, so step 3 fully erases everything Linksee stor
 
 </details>
 
-## 11 Tools
+## 6 Tools
 
-### Memory tools
-
-| Tool | What it does |
-|---|---|
-| `remember` | **Save / update / delete** memories. Auto-classifies into 6 layers. Modes: create (default), update (`memory_id` + fields), delete (`forget: true` + `memory_id`). |
-| `recall` | **Search / file history / overview.** Modes: search (`query`), file history (`path`), entity overview (no params). FTS5 + heat × momentum ranking with `match_reasons`. |
-| `read_smart` | **Token-saving file reader** with AST diff caching. First read = full content. Re-read unchanged = ~50 tokens. Re-read modified = changed chunks only. |
-
-### Drift tools (v0.8.0)
+Two pillars, one surface. **Memory** and **drift** each get the minimum; nothing else is exposed.
+Eleven tools bled model-dependent behaviour across Claude / GPT / Cursor / Codex / Gemini — six
+is what an agent can hold without a manual.
 
 | Tool | What it does |
 |---|---|
-| `drift_status` | **"What's drifting right now?"** Returns the truth map with 4-species classification (hypothesis/constraint/commitment/source_of_truth) and per-node state (🔴 drift / 🟡 review / ⚪ held / 🔵 aligned). |
-| `check_decision` | **Deep-dive into a specific decision.** Returns the full context: what was decided, why, what reality says, pending candidates, and drift edges. |
-| `declare_anchor` | **Record a decision as a truth-map anchor.** The drift detector checks these against committed reality. Supports v9 fields (domain, confidence, lifecycle, review_after). |
-| `resolve_drift` | **Close the loop.** Record a resolution: `fix` (reality now matches), `supersede` (intent evolved), `acknowledge` (parking with review date), or `dismiss` (false positive). |
-| `where_am_i` | **"Where on the Map am I, and what else does this touch?"** Locates the current topic/file on the Current Truth Map and returns its journey stage + blast radius (the `must-stay-consistent-with` / `should-align-with` dependents) + the decision behind it. The per-turn re-anchor that stops you optimizing one node while silently breaking its neighbors. |
+| `recall` | **Start here.** No arguments → the **session brief**: what needs attention, where you are on the Map, open loops, top entities. `query` → search; `path` → a file's edit history with the user intent behind each edit; `where: "<topic>"` → your position on the Current Truth Map + blast radius; `dream: true` → the triage session (North Star, orphaned proposals, distill queue, friction). |
+| `remember` | **Save / update / delete.** `content` is the only required field — entity and layer default to the project you're in. Add `anchor: {}` to record a decision **and** enforce it in one call (re-injected before Edit/Write/Bash and on session start). |
+| `read_smart` | **Token-saving file reader** with AST diff caching. Re-read unchanged = ~50 tokens; modified = changed chunks only. |
+| `drift_status` | **"What's drifting right now?"** The truth map: 🔴 drift / 🟡 review / ⚪ held / 🔵 verified / ⚫ unverified, with the evidence for each. `anchor_id` → deep-dive into one decision. |
+| `declare_anchor` | **Record a normative claim** — `decision` / `prohibition` / `constraint` the detector checks against reality, or `proposal`: an option you presented that the user never addressed, parked as a review item. |
+| `resolve_drift` | **Close the loop.** `fix` · `supersede` · `acknowledge` · `dismiss` (with `hit_term`, and the gate stops firing on it) · `harden` / `soften`. With `candidate_id`: `surface` or `dismiss` an orphaned proposal. |
 
-### Fork-point tools (v0.10)
-
-| Tool | What it does |
-|---|---|
-| `flag_proposals` | **Record orphaned proposals** — options you presented that the user never addressed. Conversations are tree-shaped but experienced linearly; the branches nobody engaged with become unresolved fork points that both you and the user lose track of. |
-| `dream` | **Consolidate orphaned proposals against the North Star.** Returns the project's direction/goals/ICP alongside unresolved proposals; the evaluating agent decides per candidate: surface (genuinely important fork) or dismiss (outdated / irrelevant / implicitly resolved). |
-| `resolve_proposal` | **Record the verdict** for each dreamed proposal: `surface` (keep visible on the dashboard for human decision) or `dismiss` (remove from the dashboard). |
-
-Previous versions exposed 3 tools — v0.8.0 added 4 drift tools that let agents query and act on product-level intent ↔ reality divergence; v0.10 added the fork-point trio for orphaned-proposal triage; `where_am_i` adds the Current Truth Map's per-turn positional re-anchor. The memory tools are unchanged.
+The five earlier names — `where_am_i`, `check_decision`, `flag_proposals`, `dream`,
+`resolve_proposal` — are folded into the six above. They are hidden from `tools/list` but **still
+answer if called**, so a skill or agent written against an older version keeps working.
+`LINKSEE_LEGACY_TOOLS=1` lists them.
 
 ### CLI utilities
 
 | Command | Purpose |
 |---|---|
-| `npx -y linksee-memory setup` | One-command setup: MCP server + skill + Stop hook, then offers to wire the re-injection guard into this project. Idempotent — skips what's already done. |
+| `npx -y linksee-memory setup` | One-command setup: MCP server + skill + Stop hook + the re-injection guard for every repo (`--project-guard` for this repo only, `--no-guard` to skip). Idempotent — skips what's already done. |
 | `npx linksee-memory` | MCP server (stdio) |
 | `npx -y linksee-memory sync` | Claude Code Stop-hook entry point |
-| `npx -y linksee-memory guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired per-project (see [Re-injection Guard](#reinjection-guard)); fail-open. |
+| `npx -y linksee-memory guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired by `setup` for every repo (see [Re-injection Guard](#reinjection-guard)); fail-open. |
 | `npx -y linksee-memory import` | Batch-import Claude Code session JSONL history |
 | `npx -y linksee-memory install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
 | `npx -y linksee-memory stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |

@@ -175,6 +175,11 @@ open → decided → in_progress → done
 
 ### ① Task Start — Always recall before starting work
 
+**First call of a session: `recall()` with no arguments.** It returns the session brief — what
+needs attention (🔴/🟡 anchors), where you are on the Map, open loops (proposals to triage,
+raw memories to distill, friction at the gate), and the top entities. One call, small, complete.
+Then search with `recall({ query })` for the task at hand.
+
 Before starting any new task, inject past context.
 
 **At the very beginning of a conversation**, use `list_entities` first to understand what you know:
@@ -534,20 +539,18 @@ User: "That's it for today"
 
 ```
 1. Review the session: which proposals did you make that the user never addressed?
-2. flag_proposals({
-     session_context: "GTM channel strategy discussion",
-     proposals: [
-       {
-         statement: "[未解決] LinkedIn B2B: SaaS企業のCTO/VPE向けDMアウトリーチ",
-         rationale: "3つのGTMチャネルを提示したがX/Twitterのみ採用。LinkedIn経由の検討が未着手",
-         domain: "growth",
-         confidence: 0.5,
-         decided: "X/Twitter data-driven growth",
-         siblings: ["X/Twitter", "LinkedIn B2B", "Dev Community"]
-       },
-       ...
-     ]
+2. For each one:
+   declare_anchor({
+     kind: "proposal",
+     statement: "[未解決] LinkedIn B2B: SaaS企業のCTO/VPE向けDMアウトリーチ",
+     rationale: "3つのGTMチャネルを提示したがX/Twitterのみ採用。LinkedIn経由の検討が未着手",
+     domain: "growth",
+     confidence: 0.5,
+     decided: "X/Twitter data-driven growth",
+     siblings: ["X/Twitter", "LinkedIn B2B", "Dev Community"],
+     session_context: "GTM channel strategy discussion"
    })
+   → { anchor_id, candidate_id }
 3. Report: "Flagged N unresolved proposals for dashboard review."
 ```
 
@@ -555,27 +558,27 @@ Each proposal becomes a review-state anchor on the Linksee Dashboard — visible
 
 ### Case F3 — Dream: triage orphaned proposals against the North Star
 
-**Not all orphaned proposals are worth surfacing.** Many are outdated, already implicitly resolved, or irrelevant to the current direction. The `dream` tool returns the project's **North Star** (direction/goals/ICP/phase) alongside accumulated proposals so you can evaluate each one.
+**Not all orphaned proposals are worth surfacing.** Many are outdated, already implicitly resolved, or irrelevant to the current direction. `recall({ dream: true })` returns the project's **North Star** (direction/goals/ICP/phase) alongside accumulated proposals so you can evaluate each one.
 
 Think like a General Doctor doing triage: the North Star is the patient's chart, each proposal is a symptom. Not every symptom needs treatment.
 
-**When to dream:**
+**When to run the triage (`recall({ dream: true })`):**
 - At session start, if there are accumulated proposals
 - When the user asks "何か見落としてない？" or "what should we revisit?"
 - Periodically (weekly) to prevent proposal backlog from growing stale
 
 ```
-1. dream()
-   → Returns: north_star + candidates[]
+1. recall({ dream: true })
+   → Returns: north_star + candidates[] (each with candidate_id)
 
 2. For each candidate, evaluate against North Star:
    - Does this affect the current phase/goals? → surface
    - Is this for a different ICP or future phase? → dismiss
    - Already implicitly resolved by later decisions? → dismiss
 
-3. resolve_proposal({
+3. resolve_drift({
      candidate_id: <id>,
-     verdict: "surface" | "dismiss",
+     action: "surface" | "dismiss",
      rationale: "North Star says ICP = solo devs; this is enterprise-only → dismiss"
    })
 ```
@@ -596,14 +599,14 @@ Candidate C: "kintone enterprise integration"
 
 The North Star is declared via `declare_anchor(node_type: "north_star")` and should be updated when the project enters a new phase (e.g., post-HN → growth phase). This keeps the Doctor's judgment frame current.
 
-### Case F4 — Distill: rewrite raw auto-captured memories (every dream call)
+### Case F4 — Distill: rewrite raw auto-captured memories (every `recall({ dream: true })` call)
 
-The session hook captures decisions/caveats as **RAW user utterances** (no LLM runs in the hook path — heuristic extraction is the best it can do). `dream` returns them as `distill_queue`. **You are the distiller.**
+The session hook captures decisions/caveats as **RAW user utterances** (no LLM runs in the hook path — heuristic extraction is the best it can do). `recall({ dream: true })` returns them as `distill_queue`. **You are the distiller.**
 
-**When:** every `dream()` call — drain up to 8 items while triaging proposals. The SessionStart boot digest reminds you while the queue is non-empty.
+**When:** every `recall({ dream: true })` call — drain up to 8 items while triaging proposals. The SessionStart boot digest reminds you while the queue is non-empty.
 
 ```
-1. dream() → distill_queue: [{memory_id, layer, raw_what, context_hint, affects, created}]
+1. recall({ dream: true }) → distill_queue: [{memory_id, layer, raw_what, context_hint, affects, created}]
 
 2. For each item, rewrite into ONE clean record:
    - what = the actual decision/warning in one line — RESOLVE references

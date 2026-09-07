@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.15.0 — 2026-09-07 (Six tools)
+
+Roadmap 5, and the end of the trust arc that started at 0.12.0: the surface an agent has to
+hold is now six tools, one per thing it needs to do, and nothing it used to call is broken.
+
+### Changed — six tools on the surface
+
+`recall` · `remember` · `read_smart` · `drift_status` · `declare_anchor` · `resolve_drift`.
+
+Anchor #1 ("3 tools, never a 4th") had a real reason — eight tools bled model-dependent
+behaviour across Claude / GPT / Cursor / Codex / Gemini — and the surface had crept to eleven.
+Five are folded into the six:
+
+| Was | Now |
+|---|---|
+| `where_am_i` | `recall({ where: "<topic>" })` — or `recall()` for the session brief |
+| `check_decision` | `drift_status({ anchor_id })` |
+| `flag_proposals` | `declare_anchor({ kind: 'proposal', … })` — returns `candidate_id` |
+| `dream` | `recall({ dream: true })` — the brief already carries the counts |
+| `resolve_proposal` | `resolve_drift({ candidate_id, action: 'surface' \| 'dismiss', rationale })` |
+
+The five old names are hidden from `tools/list` but **still answer when called**, so a skill or
+agent written against 0.14 keeps working. `LINKSEE_LEGACY_TOOLS=1` lists them, each labelled
+with its replacement.
+
+### Added — the session brief
+
+`recall()` with no arguments now returns what an agent needs in the first call of a session:
+the triage line and 🔴/🟡 items in full, where you are on the Map, open loops as counts
+(proposals, distill queue, friction), the top entities, and the exact next calls. On
+2026-09-05 this took four calls, ~20k tokens, and one of them failed. `recall({ overview: true })`
+is the old entity list.
+
+### Added
+
+- `test/tool-surface.mjs` — the surface is exactly six, the hidden five still answer, and every
+  absorbed path round-trips against the real server.
+
 ## v0.14.0 — 2026-09-07 (Remember and enforce; verified and unverified)
 
 Two roadmap items about the same thing: the product should not make the agent do the product's

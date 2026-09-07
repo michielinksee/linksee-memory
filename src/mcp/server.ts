@@ -190,7 +190,7 @@ const TOOLS = [
   {
     name: 'recall',
     description:
-      'Your persistent memory across all AI tools. CALL THIS BEFORE STARTING ANY TASK to check for past caveats (pain records), decisions, and learnings — prevents repeating mistakes across sessions.\n\nTypical usage: recall({ query: "keywords" }) for search, recall({ path: "file.ts" }) for file history, recall() for overview.\n\nWHEN TO CALL:\n• Before starting any new task or touching a file\n• When the user mentions "before" / "前に" / "last time" / "remember when"\n• When an error occurs — check if you\'ve seen it before\n• When making a decision — check for prior decisions on the same topic\n\nTHREE MODES (auto-detected):\n• Search (default): provide query → returns memories ranked by relevance + heat\n• File history: provide path → returns complete edit history with user-intent context\n• Overview: omit all params → returns entity list sorted by momentum\n\nWorks across Claude, GPT, Cursor, Codex, Gemini — one local SQLite file, nothing leaves your machine.',
+      'Your persistent memory across all AI tools. CALL THIS BEFORE STARTING ANY TASK to check for past caveats (pain records), decisions, and learnings — prevents repeating mistakes across sessions.\n\nTypical usage: recall({ query: "keywords" }) for search, recall({ path: "file.ts" }) for file history, recall() for overview.\n\nWHEN TO CALL:\n• Before starting any new task or touching a file\n• When the user mentions "before" / "前に" / "last time" / "remember when"\n• When an error occurs — check if you\'ve seen it before\n• When making a decision — check for prior decisions on the same topic\n\nTHREE MODES (auto-detected):\n• Search (default): provide query → returns memories ranked by relevance + heat\n• File history: provide path → returns complete edit history with user-intent context\n• Session brief: omit all params → what needs attention (🔴/🟡), where you are on the Map, open loops (proposals / distill queue / friction), top entities. CALL THIS FIRST in a new session.\n• Locate: where: "<topic>" → your position on the Current Truth Map + blast radius (what else moves if you touch this). where: true → auto-locate from recent edits\n• Dream: dream: true → North Star + orphaned proposals to triage + distill_queue + friction (the full triage session; the brief carries only the counts)\n• Entity list: overview: true (the old no-arg behaviour)\n\nWorks across Claude, GPT, Cursor, Codex, Gemini — one local SQLite file, nothing leaves your machine.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,6 +210,10 @@ const TOOLS = [
         max_intents: { type: 'number', description: 'For file mode: max user-intent snippets. Default 10.', default: 10 },
         scope_to_roots: { type: 'boolean', default: false, description: 'For file mode: filter to client-provided roots.' },
         explain: { type: 'boolean', default: false, description: 'Include ranking internals (composite, heat, band, momentum, match_reasons, score_breakdown). Off by default so more memories fit the token budget.' },
+        where: { description: 'Locate on the Current Truth Map. A topic string, or true to auto-locate from the files you edited recently. Returns your node, journey stage, blast radius, and the decision behind it.', anyOf: [{ type: 'string' }, { type: 'boolean' }] },
+        project: { type: 'string', description: 'With where: the Map project slug, when several maps are imported.' },
+        dream: { type: 'boolean', default: false, description: 'Return the full triage set: North Star, orphaned proposals (each with candidate_id), distill_queue, friction. Resolve proposals with resolve_drift({ candidate_id, action }); rewrite distill items with remember({ memory_id, content }).' },
+        overview: { type: 'boolean', default: false, description: 'Return the entity list instead of the session brief when no query is given.' },
         kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'For overview mode: filter by entity kind.' },
         min_memories: { type: 'number', description: 'For overview mode: minimum memory count. Default 1.', default: 1 },
       },
@@ -240,6 +244,7 @@ const TOOLS = [
         domain: { type: 'string', description: 'Filter by domain (strategy, product, engineering, growth, etc.)' },
         decision_mode: { type: 'string', description: 'Filter by decision_mode (hypothesis, constraint, commitment, source_of_truth)' },
         verbose: { type: 'boolean', default: false, description: 'Return full aligned nodes and all candidates. Default is compact: attention items in full, aligned as id+statement per domain, candidates as counts.' },
+        anchor_id: { type: 'number', description: 'Deep-dive into ONE decision instead of the map: its state, premises, drift edges, pending candidates. (Absorbs check_decision.)' },
       },
     },
   },
@@ -276,7 +281,10 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', enum: ['prohibition', 'decision', 'constraint'], description: 'Anchor type' },
+        kind: { type: 'string', enum: ['prohibition', 'decision', 'constraint', 'proposal'], description: "Anchor type. 'proposal' = an option you presented that the user never addressed (an orphaned fork) — it lands as a review item and can be triaged later via recall({ dream: true }). (Absorbs flag_proposals.)" },
+        decided: { type: 'string', description: "For kind 'proposal': what the user chose or engaged with instead." },
+        siblings: { type: 'array', items: { type: 'string' }, description: "For kind 'proposal': the other options from the same set, for context." },
+        session_context: { type: 'string', description: "For kind 'proposal': one line on the conversation it came from." },
         statement: { type: 'string', description: 'The normative claim (>= 8 chars)' },
         rationale: { type: 'string', description: 'Why this was decided' },
         affects: { type: 'array', items: { type: 'string' }, description: 'Path globs that scope this anchor' },
@@ -302,7 +310,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         anchor_id: { type: 'number', description: 'The drift_anchor ID to resolve' },
-        action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss', 'harden', 'soften'], description: 'Resolution action' },
+        action: { type: 'string', enum: ['fix', 'supersede', 'acknowledge', 'dismiss', 'harden', 'soften', 'surface'], description: "Resolution action. With candidate_id (an orphaned proposal): 'surface' keeps it visible for the human, 'dismiss' retires it." },
+        candidate_id: { type: 'number', description: 'Resolve an orphaned proposal (from recall({ dream: true })) instead of an anchor: pass its candidate_id with action surface | dismiss and a rationale that references the North Star. (Absorbs resolve_proposal.)' },
         rationale: { type: 'string', description: 'Why this resolution (recorded for audit trail)' },
         review_after: { type: 'string', description: 'For acknowledge: ISO date to re-check (e.g. "2026-07-04")' },
         superseded_by: { type: 'number', description: 'For supersede: the new anchor ID that replaces this one' },
@@ -1404,7 +1413,79 @@ async function inferDefaultEntity(): Promise<{ name: string; kind: string; from:
   return { name: 'workspace', kind: 'project', from: 'fallback' };
 }
 
+/**
+ * The session brief: what an agent needs in the first call of a session, in one call.
+ *
+ * On 2026-09-05 this took four calls (recall / drift_status / dream / where_am_i), ~20k tokens,
+ * and one of them failed. The brief carries the attention items in full and everything else as
+ * counts plus a hint for the drill-down — small enough to call freely, complete enough that the
+ * agent does not have to know which of five tools holds which fact.
+ */
+async function handleSessionBrief(): Promise<string> {
+  const view = getTruthView(db, {});
+  const bs = view.counts.by_state;
+  const triage = `${view.counts.nodes} anchors: ` + [
+    bs.drift > 0 ? `🔴 ${bs.drift} drifting` : null,
+    bs.review > 0 ? `🟡 ${bs.review} needs review` : null,
+    bs.held > 0 ? `⚪ ${bs.held} held` : null,
+    `🔵 ${bs.aligned} verified`,
+    bs.unverified > 0 ? `⚫ ${bs.unverified} unverified` : null,
+  ].filter(Boolean).join(' · ');
+  const attention = view.attention.slice(0, 8).map((n) => ({
+    id: n.id, state: n.state, statement: n.statement.slice(0, 160), reality: (n.reality ?? '').slice(0, 160),
+  }));
+
+  let where: unknown = null;
+  try {
+    const w = JSON.parse(await handleWhereAmI({}));
+    where = w.located
+      ? { project: w.project, you_are_here: w.you_are_here }
+      : w.reason
+        ? { reason: w.reason, available_projects: w.available_projects }
+        : null;
+  } catch { /* no map, or roots unavailable — the brief still stands */ }
+
+  let open_loops: unknown = null;
+  try {
+    const d = JSON.parse(handleDream({}));
+    open_loops = {
+      north_star: d.north_star ? { id: d.north_star.id, statement: String(d.north_star.statement).slice(0, 160) } : null,
+      proposals: d.total ?? 0,
+      proposals_top: (d.candidates ?? []).slice(0, 3).map((c: any) => ({ candidate_id: c.candidate_id ?? c.id, statement: String(c.statement ?? c.target_statement ?? '').slice(0, 120) })),
+      distill_queue: d.distill_total ?? 0,
+      friction: d.friction_total ?? 0,
+    };
+  } catch { /* fine */ }
+
+  let entities: unknown = [];
+  try {
+    entities = (JSON.parse(handleListEntities({ limit: 8 })).entities ?? []).map((e: any) => ({ name: e.name, kind: e.kind, memories: e.memory_count }));
+  } catch { /* fine */ }
+
+  return JSON.stringify({
+    ok: true,
+    brief: true,
+    triage,
+    attention,
+    where,
+    open_loops,
+    entities,
+    next: [
+      'recall({ query }) to search; recall({ path }) for a file\'s history',
+      'drift_status() for the full truth map; drift_status({ anchor_id }) for one decision',
+      'recall({ dream: true }) to triage proposals and drain the distill queue',
+      'remember({ content, anchor: {} }) to record a decision and enforce it',
+    ],
+  });
+}
+
 async function handleRecallUnified(args: any): Promise<string> {
+  // Folded surfaces (roadmap 5): locating yourself and the triage session are ways of
+  // recalling, not separate tools.
+  if (args?.dream) return handleDream({ domain: args.domain });
+  if (args?.where !== undefined && args?.where !== false) {
+    return handleWhereAmI({ query: args.where === true ? undefined : String(args.where), project: args.project, limit: args.limit });
+  }
   // File history mode (path takes priority; if query also provided, include it as context)
   if (args.path) {
     const fileResult = await handleRecallFileWithRoots({
@@ -1425,17 +1506,15 @@ async function handleRecallUnified(args: any): Promise<string> {
     }
     return fileResult;
   }
-  // Detect overview request (no search criteria at all)
+  // No search criteria at all → the session brief (or the entity list on request).
   const hasQuery = args.query && String(args.query).trim().length > 0;
   const hasFilters = args.entity_name || args.layer || args.altitude ||
     args.mem_type || args.mem_state || args.thread_id || args.band;
   if (!hasQuery && !hasFilters) {
-    return handleListEntities({
-      kind: args.kind,
-      min_memories: args.min_memories,
-      limit: args.limit,
-      offset: args.offset,
-    });
+    if (args.overview || args.kind || args.min_memories !== undefined || args.offset) {
+      return handleListEntities({ kind: args.kind, min_memories: args.min_memories, limit: args.limit, offset: args.offset });
+    }
+    return handleSessionBrief();
   }
   // Search mode (default)
   return handleRecall(args);
@@ -1446,6 +1525,7 @@ async function handleRecallUnified(args: any): Promise<string> {
 // ============================================================
 
 function handleDriftStatus(args: any): string {
+  if (args?.anchor_id) return handleCheckDecision({ anchor_id: args.anchor_id });
   const view = getTruthView(db, {
     domain: args?.domain,
     decision_mode: args?.decision_mode,
@@ -1597,6 +1677,28 @@ function handleDeclareAnchor(args: any): string {
   if (!args?.kind || !args?.statement) {
     throw new Error('kind and statement are required');
   }
+  // An orphaned proposal is a fork the user never took. Same tool as any other declaration —
+  // the agent should not need a separate verb for "I noticed something went unaddressed".
+  if (args.kind === 'proposal') {
+    const r = JSON.parse(handleFlagProposals({
+      session_context: args.session_context,
+      proposals: [{
+        statement: args.statement, rationale: args.rationale, domain: args.domain ?? 'general',
+        confidence: args.confidence, decided: args.decided, siblings: args.siblings,
+      }],
+    }));
+    const anchorId = r.proposals?.[0]?.anchor_id;
+    if (!r.ok || !anchorId) {
+      return JSON.stringify({ ok: false, error: r.error ?? 'proposal was not recorded (statement must be >= 10 chars)' });
+    }
+    const cand = db.prepare(
+      `SELECT id FROM memory_write_candidates WHERE target_node_id = ? AND scope = 'orphaned_proposal' ORDER BY id DESC LIMIT 1`,
+    ).get(anchorId) as { id: number } | undefined;
+    return JSON.stringify({
+      ok: true, anchor_id: anchorId, candidate_id: cand?.id ?? null, kind: 'proposal', statement: args.statement,
+      message: `Proposal recorded as review item #${anchorId}. Triage later: recall({ dream: true }) → resolve_drift({ candidate_id: ${cand?.id ?? '<id>'}, action: 'surface' | 'dismiss', rationale }).`,
+    });
+  }
 
   // Create the base anchor
   const anchor = declareAnchor(db, {
@@ -1636,6 +1738,20 @@ function handleDeclareAnchor(args: any): string {
 }
 
 function handleResolveDrift(args: any): string {
+  // A proposal verdict is a resolution like any other; it just targets a candidate row.
+  if (args?.candidate_id) {
+    if (!['surface', 'dismiss'].includes(args.action)) {
+      return JSON.stringify({ ok: false, error: `candidate_id takes action 'surface' or 'dismiss' (got '${args.action}')` });
+    }
+    if (!args.rationale) {
+      return JSON.stringify({ ok: false, error: 'rationale is required for a proposal verdict — say what in the North Star decided it' });
+    }
+    try {
+      return handleResolveProposal({ candidate_id: args.candidate_id, verdict: args.action, rationale: args.rationale });
+    } catch (e: any) {
+      return JSON.stringify({ ok: false, error: String(e?.message ?? e) });
+    }
+  }
   if (!args?.anchor_id || !args?.action) {
     throw new Error('anchor_id and action are required');
   }
@@ -2016,7 +2132,27 @@ function handleResolveProposal(args: any): string {
 // MCP wiring
 // ============================================================
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+// Six tools on the surface (2026-09-07, roadmap 5). Anchor #1's reason for "3 tools, never a
+// 4th" was real — eight tools bled model-dependent behaviour across Claude/GPT/Cursor/Codex/
+// Gemini — and the surface had crept to eleven. The five below are folded into the six
+// (see LEGACY_TOOLS) and hidden from tools/list, but a call to any of them still works: an
+// agent or a SKILL.md written against 0.14 does not break. LINKSEE_LEGACY_TOOLS=1 lists them.
+const LEGACY_TOOLS: Record<string, string> = {
+  where_am_i: 'recall({ where: "<topic>" }) — or recall() with no arguments for the session brief',
+  check_decision: 'drift_status({ anchor_id })',
+  flag_proposals: "declare_anchor({ kind: 'proposal', statement, rationale, domain, decided?, siblings? })",
+  dream: 'recall({ dream: true }) — recall() with no arguments already includes the counts',
+  resolve_proposal: "resolve_drift({ candidate_id, action: 'surface' | 'dismiss', rationale })",
+};
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const showLegacy = process.env.LINKSEE_LEGACY_TOOLS === '1';
+  const tools = TOOLS
+    .filter((t) => showLegacy || !(t.name in LEGACY_TOOLS))
+    .map((t) => (t.name in LEGACY_TOOLS
+      ? { ...t, description: `(legacy — folded into ${LEGACY_TOOLS[t.name]}. Still works.)\n\n${t.description}` }
+      : t));
+  return { tools };
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
