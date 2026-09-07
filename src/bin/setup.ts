@@ -2,15 +2,17 @@
 // setup: One-command setup for Linksee Memory — the "Use Linksee" installer.
 //
 // Usage:
-//   npx linksee-memory setup          (interactive setup)
-//   npx linksee-memory setup --yes    (accept all defaults, no prompts)
+//   npx linksee-memory setup             (interactive setup)
+//   npx linksee-memory setup --yes       (accept all defaults, no prompts)
 //   npx linksee-memory setup --dry-run
+//   npx linksee-memory setup --no-guard  (skip the re-injection guard)
+//   npx linksee-memory setup --project-guard  (wire the guard to THIS repo only)
 //
 // Does four things:
 //   1. Registers the MCP server with Claude Code
 //   2. Installs the SKILL.md (agent trigger phrases)
 //   3. Configures the Stop hook (auto-capture sessions) — user-global
-//   4. Offers to wire the re-injection guard into THIS project's .claude/settings.json
+//   4. Wires the re-injection guard into ~/.claude/settings.json (every project)
 //
 // After setup, every Claude Code session:
 //   - Auto-captures decisions, learnings, caveats to local memory
@@ -21,6 +23,17 @@
 // Why: Competing memory tools (claude-mem, etc.) are one-install-and-done.
 // Our MCP approach gives more precision, but the setup was 3 manual steps.
 // This command eliminates that friction entirely.
+//
+// Why the guard is user-global (2026-09-07): memory is global — one SQLite file holding the
+// anchors for every repo — but the guard used to be wired per project, opt-in. So the anchors
+// existed everywhere and were enforced nowhere. The author's own machine had 42 active anchors
+// and no PreToolUse hook in any project; the one layer no competing tool has was switched off
+// where it was written. A founder running twenty repos should not run setup twenty times.
+//
+// Safe by construction: the hook is fail-open, and it can only DENY when an anchor was
+// explicitly hardened via resolve_drift(action:'harden'). Anything else re-injects text.
+// Anchors with `affects` globs only fire on matching paths; unscoped ones fire on their own
+// detect_terms / violation_signal, so cross-repo noise is bounded by what you declared.
 
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
@@ -28,10 +41,14 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { GUARD_COMMAND, guardFullyWired, wireGuard, type ClaudeSettings } from '../lib/guard-wiring.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const autoYes = args.includes('--yes') || args.includes('-y');
+const noGuard = args.includes('--no-guard');
+// Opt back into the old behaviour: wire the guard to this repo instead of every repo.
+const projectGuard = args.includes('--project-guard');
 const showHelp = args.includes('--help') || args.includes('-h');
 
 if (showHelp) {
@@ -68,11 +85,9 @@ const MCP_COMMAND = `claude mcp add -s user ${SERVER_NAME} -- npx -y linksee-mem
 // npx can resolve the package name, but not sibling bin names like linksee-memory-sync.
 const HOOK_COMMAND = 'npx -y linksee-memory sync';
 
-// Re-injection guard — wired into the PROJECT (not user-global) settings, because it enforces THIS
-// project's accepted decisions. Mirrors the dogfood wiring's ${CLAUDE_PROJECT_DIR}/dist/bin path, but
-// points at the globally-installed `linksee-memory-guard` bin so it ships without a build step. Shell
-// form (resolved at run time) survives npx-cache eviction; a baked dist path would not.
-const GUARD_COMMAND = 'npx -y linksee-memory guard';
+// Re-injection guard: command + merge rules live in lib/guard-wiring.ts (shared with the tests).
+// It points at the globally-installed bin rather than a dist path, so it ships without a build
+// step, and the shell form is resolved at run time so it survives npx-cache eviction.
 const PROJECT_DIR = process.cwd();
 const PROJECT_CLAUDE_DIR = join(PROJECT_DIR, '.claude');
 const PROJECT_SETTINGS_PATH = join(PROJECT_CLAUDE_DIR, 'settings.json');
@@ -238,37 +253,7 @@ if (alreadyHooked) {
 }
 console.log('');
 
-// ── Step 4: Wire the re-injection guard (project-scoped, opt-in) ──────────
-
-interface GuardHookCmd {
-  type: string;
-  command?: string;
-  timeout?: number;
-  args?: string[];
-}
-interface GuardHookEntry {
-  matcher?: string;
-  hooks?: GuardHookCmd[];
-}
-interface ProjectSettings {
-  hooks?: Record<string, GuardHookEntry[]>;
-  [k: string]: unknown;
-}
-
-const GUARD_EVENTS = ['SessionStart', 'PreToolUse'] as const;
-const GUARD_HOOKS: Record<(typeof GUARD_EVENTS)[number], GuardHookEntry> = {
-  // matchers + timeouts mirror the dogfood .claude/settings.json
-  SessionStart: { matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: GUARD_COMMAND, timeout: 15 }] },
-  PreToolUse: { matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: GUARD_COMMAND, timeout: 8 }] },
-};
-
-// Idempotency probe: is OUR guard already wired for this event? (Match by bin name so a manually-added
-// or previously-installed entry isn't duplicated, and other people's hooks are never touched.)
-function guardWiredFor(s: ProjectSettings, ev: string): boolean {
-  return (s.hooks?.[ev] ?? []).some((entry) =>
-    entry?.hooks?.some((h) => typeof h?.command === 'string' && h.command.includes('linksee-memory-guard'))
-  );
-}
+// ── Step 4: Wire the re-injection guard (user-global by default) ─────────
 
 function askYesNo(question: string, defaultYes = true): Promise<boolean> {
   return new Promise((resolve) => {
@@ -283,57 +268,67 @@ function askYesNo(question: string, defaultYes = true): Promise<boolean> {
 }
 
 async function configureGuard(): Promise<boolean> {
-  console.log(`${BOLD}[4/4]${RESET} Configuring re-injection guard (this project)...`);
+  // Default target is the user-global settings — the same scope the MCP server is registered
+  // at, and the same scope the memory itself lives at. --project-guard keeps the old per-repo
+  // behaviour for people who want the guard in one repo only.
+  const targetPath = projectGuard ? PROJECT_SETTINGS_PATH : SETTINGS_PATH;
+  const targetDir = projectGuard ? PROJECT_CLAUDE_DIR : CLAUDE_DIR;
+  const scopeLabel = projectGuard ? 'this project' : 'all projects';
 
-  let project: ProjectSettings = {};
-  if (existsSync(PROJECT_SETTINGS_PATH)) {
+  console.log(`${BOLD}[4/4]${RESET} Configuring re-injection guard (${scopeLabel})...`);
+
+  if (noGuard) {
+    console.log(`  ${SKIP} Skipped (--no-guard). Enable later: npx -y linksee-memory setup`);
+    return false;
+  }
+
+  let settings: ClaudeSettings = {};
+  if (existsSync(targetPath)) {
     try {
       // Strip a leading BOM (U+FEFF) — Windows editors (Notepad) emit UTF-8+BOM, which JSON.parse rejects.
-      const raw = readFileSync(PROJECT_SETTINGS_PATH, 'utf8');
-      project = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+      const raw = readFileSync(targetPath, 'utf8');
+      settings = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
     } catch {
       // Never clobber a file we can't parse — the user may have hand-authored it.
-      console.log(`  ${FAIL} Could not parse ${PROJECT_SETTINGS_PATH} — left untouched`);
+      console.log(`  ${FAIL} Could not parse ${targetPath} — left untouched`);
       console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
       return false;
     }
   }
 
-  if (GUARD_EVENTS.every((ev) => guardWiredFor(project, ev))) {
-    console.log(`  ${SKIP} Guard already wired in ${PROJECT_SETTINGS_PATH}`);
+  if (guardFullyWired(settings)) {
+    console.log(`  ${SKIP} Guard already wired in ${targetPath}`);
     return true;
   }
 
   if (dryRun) {
-    console.log(`  ${DIM}[dry-run] Would merge SessionStart + PreToolUse guard hooks into ${PROJECT_SETTINGS_PATH}${RESET}`);
+    console.log(`  ${DIM}[dry-run] Would merge SessionStart + PreToolUse guard hooks into ${targetPath}${RESET}`);
     return false;
   }
 
-  // "Offer" — opt-in, because the guard can deny tool calls on a 'hard' contradiction.
-  if (!autoYes) {
-    if (!process.stdin.isTTY) {
-      console.log(`  ${SKIP} Skipped (non-interactive shell). Re-run with --yes, or paste the README block.`);
-      return false;
-    }
+  // Ask when there is someone to ask. A non-interactive run used to skip silently, which is
+  // how the guard ended up installed nowhere — setup's job is to configure, so it configures
+  // and says so loudly instead.
+  if (!autoYes && process.stdin.isTTY) {
     console.log(`  ${DIM}Re-injects your accepted decisions before Edit/Write/Bash and on session start.`);
-    console.log(`  Fail-open — only an action that contradicts a 'hard' anchor is ever blocked.${RESET}`);
-    const ok = await askYesNo(`  Wire it into ${PROJECT_SETTINGS_PATH}?`);
+    console.log(`  Fail-open — only an action contradicting a 'hard' anchor is ever blocked.${RESET}`);
+    const ok = await askYesNo(`  Wire it into ${targetPath}?`);
     if (!ok) {
       console.log(`  ${SKIP} Skipped. Enable later via the README → Re-injection Guard.`);
       return false;
     }
   }
 
-  // Merge, don't replace: append only the events we don't already own; leave foreign hooks intact.
-  const hooks: Record<string, GuardHookEntry[]> = project.hooks ?? (project.hooks = {});
-  for (const ev of GUARD_EVENTS) {
-    if (!Array.isArray(hooks[ev])) hooks[ev] = [];
-    if (!guardWiredFor(project, ev)) hooks[ev].push(GUARD_HOOKS[ev]);
-  }
+  // Merge, don't replace (see lib/guard-wiring.ts for the rules it holds to).
+  wireGuard(settings);
 
-  mkdirSync(PROJECT_CLAUDE_DIR, { recursive: true });
-  writeFileSync(PROJECT_SETTINGS_PATH, JSON.stringify(project, null, 2), 'utf8');
-  console.log(`  ${CHECK} Guard wired → ${PROJECT_SETTINGS_PATH}`);
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(targetPath, JSON.stringify(settings, null, 2), 'utf8');
+  console.log(`  ${CHECK} Guard wired → ${targetPath} ${DIM}(${scopeLabel})${RESET}`);
+  if (!projectGuard) {
+    console.log(`  ${DIM}Active in every repo. Scope an anchor with \`affects\` globs to limit where it fires;`);
+    console.log(`  --no-guard to skip, --project-guard for this repo only.${RESET}`);
+  }
   return true;
 }
 

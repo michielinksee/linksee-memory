@@ -207,7 +207,14 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
 
 ### Enable it
 
-`npx -y linksee-memory setup` offers to wire this into your **project's** `.claude/settings.json` (Step 4). To do it by hand, drop this block into `.claude/settings.json` at your project root — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
+`npx -y linksee-memory setup` wires this into `~/.claude/settings.json` (Step 4), so it is on in **every** repo — the same scope your memory already lives at. One SQLite file holds the anchors for all your projects; enforcing them per-repo meant declaring a decision once and having it enforced nowhere.
+
+- `--project-guard` — this repo only, the old behaviour
+- `--no-guard` — skip it
+
+Anchors with `affects` globs fire only on matching paths; an unscoped anchor fires on its own `detect_terms` / `violation_signal`. Nothing is ever **blocked** unless you explicitly hardened it (`resolve_drift(action:'harden')`) — everything else re-injects the decision as context.
+
+To wire it by hand instead, drop this block into `.claude/settings.json` (project root, or `~/.claude/settings.json` for every repo) — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
 
 ```json
 {
