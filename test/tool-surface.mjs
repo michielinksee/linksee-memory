@@ -74,6 +74,22 @@ const LEGACY = ['where_am_i', 'check_decision', 'flag_proposals', 'dream', 'reso
 const dir = mkdtempSync(join(tmpdir(), 'linksee-surface-'));
 console.log('tool-surface regression');
 
+// Seed a raw-utterance backlog before the server starts, so the startup triage has work to do.
+{
+  process.env.LINKSEE_MEMORY_DIR = dir;
+  const { openDb, runMigrations } = await import('../dist/db/migrate.js');
+  const db = openDb();
+  runMigrations(db);
+  const entity = Number(db.prepare(`INSERT INTO entities (name, kind, normalized_name) VALUES ('seedproj', 'project', 'seedproj')`).run().lastInsertRowid);
+  const ins = db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, access_count, created_at) VALUES (?, 'learning', ?, 0.7, 0, 0, unixepoch() - 7200)`);
+  const raw = (what) => ins.run(entity, JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'decided', what, why: 'auto', needs_distill: true }));
+  for (let i = 0; i < 10; i++) raw(`決定${i}: この件は案Bを採用し、案Aは却下する。理由は運用コストが半分で済み、移行が段階的にできるため。`);
+  raw('OK. Aからいこう');
+  raw('はい。そうしましょう。');
+  db.close();
+  delete process.env.LINKSEE_MEMORY_DIR;
+}
+
 try {
   await withServer(dir, {}, async ({ rpc, call }) => {
     // ── the surface ──
@@ -113,6 +129,12 @@ try {
 
     const dream = await call('recall', { dream: true });
     check('recall({ dream: true }) is the full triage set', dream.ok === true && 'candidates' in dream && 'distill_queue' in dream, Object.keys(dream).join(','));
+
+    // The startup sweep must have run: 12 raw rows seeded, 2 were acknowledgements.
+    check('startup triage archived the acknowledgements (distill_total is the real remainder)', dream.distill_total === 10, `distill_total=${dream.distill_total}`);
+    check('distill_shown is the page, not the total', dream.distill_shown === 8, `shown=${dream.distill_shown}`);
+    const drain = await call('recall', { dream: true, distill: 3 });
+    check('recall({ dream: true, distill: 3 }) caps the page at 3', drain.distill_shown === 3 && drain.distill_queue.length === 3 && drain.distill_total === 10, `shown=${drain.distill_shown} total=${drain.distill_total}`);
     check('…and lists the new proposal', JSON.stringify(dream.candidates).includes(String(prop.candidate_id)), JSON.stringify(dream.candidates).slice(0, 160));
 
     const wrong = await call('resolve_drift', { candidate_id: prop.candidate_id, action: 'fix', rationale: 'x' });

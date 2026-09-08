@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.16.1 — 2026-09-07
+
+### Fixed
+
+- **The 0.16.0 triage never ran.** It was tucked inside the auto-consolidate block, which
+  runs at most once a week and only after a 3-second timer — so on the machine it was built
+  for, the queue was still 389 with no verdicts. Triage now runs on every start, before the
+  first request. One indexed scan; it cannot block startup.
+- `recall({ dream: true })` reported the page size as `distill_total` on the main path (the
+  0.16.0 change had landed on the no-North-Star branch only). `distill_total` is now the real
+  remainder everywhere, `distill_shown` is the page, and `distill: N` is actually passed through.
+- `test/tool-surface.mjs` now seeds a raw backlog before the server starts and asserts the
+  sweep ran, the page is capped, and the total is real — the test that would have caught this.
+
 ## v0.16.0 — 2026-09-07 (A queue you can actually drain)
 
 The Stop hook captures raw utterances for the agent to rewrite later (anchor #70). On the

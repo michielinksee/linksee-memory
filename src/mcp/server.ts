@@ -85,6 +85,16 @@ if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand))
 const db = openDb();
 runMigrations(db);
 
+// Distill triage runs on EVERY start, before the first request. It is one indexed scan and a
+// handful of JSON rewrites — cheap — and 0.16.0 had tucked it inside the auto-consolidate block
+// below, which runs at most once a week and only after a 3-second timer. So it never ran.
+try {
+  const t = triageDistillQueue(db);
+  if (t.noise + t.stale > 0) {
+    process.stderr.write(`[linksee-memory] distill triage: archived ${t.noise} noise + ${t.stale} stale, ${t.remaining} remain\n`);
+  }
+} catch { /* never block startup */ }
+
 // Auto-maintenance: consolidate stale memories on startup (non-blocking)
 setTimeout(() => {
   try {
@@ -100,11 +110,6 @@ setTimeout(() => {
     if (shouldRun) {
       runConsolidate(db, { scope: 'all', min_age_days: 7 });
       process.stderr.write('[linksee-memory] auto-consolidate complete\n');
-      // Triage the distill queue by rule before any agent is asked to think about it.
-      try {
-        const t = triageDistillQueue(db);
-        if (t.noise + t.stale > 0) process.stderr.write(`[linksee-memory] distill triage: archived ${t.noise} noise + ${t.stale} stale, ${t.remaining} remain\n`);
-      } catch { /* never block startup */ }
     }
   } catch { /* non-fatal */ }
 }, 3000);
@@ -1490,7 +1495,7 @@ async function handleSessionBrief(): Promise<string> {
 async function handleRecallUnified(args: any): Promise<string> {
   // Folded surfaces (roadmap 5): locating yourself and the triage session are ways of
   // recalling, not separate tools.
-  if (args?.dream) return handleDream({ domain: args.domain });
+  if (args?.dream) return handleDream({ domain: args.domain, distill: args.distill });
   if (args?.where !== undefined && args?.where !== false) {
     return handleWhereAmI({ query: args.where === true ? undefined : String(args.where), project: args.project, limit: args.limit });
   }
@@ -2059,7 +2064,9 @@ function handleDream(args: any): string {
     friction,
     friction_total: friction.length,
     distill_queue: distillQueue,
-    distill_total: distillQueue.length,
+    distill_total: distillPending(db),
+    distill_shown: distillQueue.length,
+    distill_hint: 'Ordered by value (caveats first, named entities, longer text). Pass distill: N (max 25) for a longer drain. Rules already set a distill_verdict on acknowledgements, bare paths and 90-day-old never-recalled items — you only see what needs judgement.',
     guide: guideParts.join(' '),
   });
 }
