@@ -33,6 +33,7 @@ import { getTruthView, getDecisionDetail, resolveDrift } from '../lib/truth-engi
 import { declareAnchor, setNodeFields } from '../lib/drift-anchors.js';
 import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/guard.js';
 import { logAnchorTouch } from '../lib/anchor-touch.js';
+import { triageDistillQueue, distillPending } from '../lib/distill-triage.js';
 import { whereAmI, listMapProjects } from '../lib/map-view.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +100,11 @@ setTimeout(() => {
     if (shouldRun) {
       runConsolidate(db, { scope: 'all', min_age_days: 7 });
       process.stderr.write('[linksee-memory] auto-consolidate complete\n');
+      // Triage the distill queue by rule before any agent is asked to think about it.
+      try {
+        const t = triageDistillQueue(db);
+        if (t.noise + t.stale > 0) process.stderr.write(`[linksee-memory] distill triage: archived ${t.noise} noise + ${t.stale} stale, ${t.remaining} remain\n`);
+      } catch { /* never block startup */ }
     }
   } catch { /* non-fatal */ }
 }, 3000);
@@ -213,6 +219,7 @@ const TOOLS = [
         where: { description: 'Locate on the Current Truth Map. A topic string, or true to auto-locate from the files you edited recently. Returns your node, journey stage, blast radius, and the decision behind it.', anyOf: [{ type: 'string' }, { type: 'boolean' }] },
         project: { type: 'string', description: 'With where: the Map project slug, when several maps are imported.' },
         dream: { type: 'boolean', default: false, description: 'Return the full triage set: North Star, orphaned proposals (each with candidate_id), distill_queue, friction. Resolve proposals with resolve_drift({ candidate_id, action }); rewrite distill items with remember({ memory_id, content }).' },
+        distill: { type: 'number', description: 'With dream: how many raw memories to return for rewriting (default 8, max 25). The queue is value-ordered; rule-verdicted items never appear.' },
         overview: { type: 'boolean', default: false, description: 'Return the entity list instead of the session brief when no query is given.' },
         kind: { type: 'string', enum: ['person', 'company', 'project', 'concept', 'file', 'other'], description: 'For overview mode: filter by entity kind.' },
         min_memories: { type: 'number', description: 'For overview mode: minimum memory count. Default 1.', default: 1 },
@@ -1453,7 +1460,7 @@ async function handleSessionBrief(): Promise<string> {
       north_star: d.north_star ? { id: d.north_star.id, statement: String(d.north_star.statement).slice(0, 160) } : null,
       proposals: d.total ?? 0,
       proposals_top: (d.candidates ?? []).slice(0, 3).map((c: any) => ({ candidate_id: c.candidate_id ?? c.id, statement: String(c.statement ?? c.target_statement ?? '').slice(0, 120) })),
-      distill_queue: d.distill_total ?? 0,
+      distill_queue: d.distill_total ?? 0, // rows still needing a rewrite; rule-verdicted rows are not counted
       friction: d.friction_total ?? 0,
     };
   } catch { /* fine */ }
@@ -1904,6 +1911,7 @@ function handleDream(args: any): string {
   // utterances (no LLM there); the agent rewrites them here into clean what/why via
   // remember(memory_id, content). Matches needs_distill (new) AND the legacy hardcoded
   // why-strings so the existing backlog is drainable without a backfill write.
+  const distillLimit = Math.max(1, Math.min(25, Number(args?.distill ?? 8) || 8));
   let distillQueue: any[] = [];
   try {
     const rows = db.prepare(`
@@ -1914,10 +1922,15 @@ function handleDream(args: any): string {
          -- settle window: the Stop hook extracts every turn, so the newest rows belong to a
          -- session still in motion. Don't ask the agent to distill the conversation it is in.
          AND m.created_at < unixepoch() - 1800
+         AND json_extract(m.content, '$.distill_verdict') IS NULL
          AND (json_extract(m.content, '$.needs_distill') = 1
               OR json_extract(m.content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
               OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')
-       ORDER BY m.created_at DESC LIMIT 8
+       ORDER BY (m.layer = 'caveat') DESC,
+                (e.name <> 'Local') DESC,
+                length(json_extract(m.content, '$.what')) DESC,
+                m.created_at DESC
+       LIMIT ${distillLimit}
     `).all() as any[];
     distillQueue = rows.map((r) => {
       let c: any = {};
@@ -1944,7 +1957,9 @@ function handleDream(args: any): string {
       friction,
       friction_total: friction.length,
       distill_queue: distillQueue,
-      distill_total: distillQueue.length,
+      distill_total: distillPending(db),
+      distill_shown: distillQueue.length,
+      distill_hint: 'Ordered by value (caveats first, named entities, longer text). Pass distill: N (max 25) for a longer drain. Rules already set a distill_verdict on acknowledgements, bare paths and 90-day-old never-recalled items — you only see what needs judgement.',
       message:
         friction.length > 0
           ? 'No North Star declared yet — but the re-injection layer surfaced friction below: anchors being violated despite being re-surfaced. Declare a North Star (declare_anchor node_type:"north_star"), and act on the friction items.'

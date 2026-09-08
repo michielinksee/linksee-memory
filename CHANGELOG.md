@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.16.0 — 2026-09-07 (A queue you can actually drain)
+
+The Stop hook captures raw utterances for the agent to rewrite later (anchor #70). On the
+author's machine that queue had reached 389 and nobody drained it — because most of it was
+never a decision. "OK. Aからいこう", a pasted file path, "はい。そうしましょう". Asking an agent
+to distill those is asking it to find meaning that is not there, and the honest response to a
+nag like that is to ignore it, which is how the queue reached 389.
+
+### Added — rule-based triage, before anyone is asked to think
+
+- On startup (with the consolidation sweep) every raw memory outside the 30-minute settle window
+  is classified. Two verdicts need no intelligence: **auto-noise** (under 40 chars, a bare
+  acknowledgement or imperative, a path/URL/attachment reference) and **auto-stale** (never
+  recalled and older than 90 days). Both are archived — `type: note`, `state: superseded`,
+  `distill_verdict` says why — never deleted, layer and protection untouched, and
+  `needs_distill` stays true because it is still true: no agent rewrote it. Reversible by
+  removing the verdict. Measured on the real backlog before shipping: 389 → 88 noise, 51 stale,
+  **250 left for judgement**; the noise sample was read by a human first.
+- The queue is **value-ordered**: caveats first, then memories on a named entity, then longer
+  text, then recency. `recall({ dream: true, distill: N })` returns up to 25 for a deliberate
+  drain. `distill_total` is the real remaining count, not the page size.
+- The session-start digest asks for three, not for everything, and says what the rules already
+  handled.
+
 ## v0.15.2 — 2026-09-07 (Say what it's for)
 
 No code. The product changed a great deal between 0.12 and 0.15; the sentence describing it

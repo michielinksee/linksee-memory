@@ -360,6 +360,7 @@ export function buildBootDigest(
       db.prepare(
         `SELECT COUNT(*) AS n FROM memories
           WHERE layer IN ('learning', 'caveat') AND json_valid(content)
+            AND json_extract(content, '$.distill_verdict') IS NULL
             AND (json_extract(content, '$.needs_distill') = 1
                  OR json_extract(content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
                  OR json_extract(content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')`
@@ -384,7 +385,7 @@ export function buildBootDigest(
   if (distill > 0) {
     parts.push(
       '',
-      `🧪 ${distill} auto-captured memories are still raw utterances — call dream() and rewrite the distill_queue via remember(memory_id, content) with "distilled": true.`
+      `🧪 ${distill} auto-captured memories still need a rewrite (rules already settled the acknowledgements and stale ones). Do 3: recall({ dream: true }) → remember({ memory_id, content }) with "distilled": true.`
     );
   }
   if (anchors.length > 0)

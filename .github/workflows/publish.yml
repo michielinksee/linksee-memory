@@ -100,6 +100,7 @@ jobs:
           node test/guard-dismiss.mjs
           node test/remember-anchor.mjs
           node test/tool-surface.mjs
+          node test/distill-triage.mjs
 
       - name: MCP initialize + tools/list handshake
         run: |
