@@ -132,7 +132,7 @@ nodes:
   - id: lp
     layer: surface
     stage: understand
-    statement: linksee-site.vercel.app — Driftセクション(PR#3)・3呪文・Pro節「ローカル永久無料」明示
+    statement: linksee.app（旧 linksee-site.vercel.app）— Driftセクション(PR#3)・3呪文・Pro節「ローカル永久無料」明示
     status: suspect
     note: PR#3マージ待ち — マージまでREADMEとLPの正準コピーが一時不整合
     revival_condition: PR#3 がマージされたら解消

@@ -13,7 +13,7 @@
 [![mcp-registry](https://img.shields.io/badge/MCP-Official_Registry-6366f1)](https://registry.modelcontextprotocol.io/)
 [![glama-score](https://glama.ai/mcp/servers/michielinksee/linksee-memory/badges/score.svg)](https://glama.ai/mcp/servers/michielinksee/linksee-memory)
 
-🌐 **Landing page**: [linksee-site.vercel.app](https://linksee-site.vercel.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
+🌐 **Landing page**: [linksee.app](https://linksee.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
 📖 **Docs**: [docs.linksee.app](https://docs.linksee.app) — full reference: the product map & drift, install, and all 11 tools
 
 <!-- releases: tag-driven, published from CI via npm trusted publishing (OIDC).
@@ -636,7 +636,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ One-command setup (`npx -y linksee-memory setup`)
 - ✅ Structured memory v2 (3-axis classification: altitude × type × state)
 - ✅ Cross-LLM: Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI
-- ✅ Landing page ([linksee-site.vercel.app](https://linksee-site.vercel.app))
+- ✅ Landing page ([linksee.app](https://linksee.app))
 - ✅ Drift detection engine + 4 MCP drift tools — v0.8.0
 - ✅ 4-species truth map (hypothesis/constraint/commitment/source_of_truth) — v0.8.0
 - ✅ Dashboard with Decision Register visualization
@@ -851,7 +851,7 @@ In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old
 
 Yes — any MCP-compatible client works:
 - **Claude Code**: `claude mcp add -s user linksee -- npx -y linksee-memory`
-- **Claude Desktop**: add to `claude_desktop_config.json` (see [onboarding on the LP](https://linksee-site.vercel.app))
+- **Claude Desktop**: add to `claude_desktop_config.json` (see [onboarding on the LP](https://linksee.app))
 - **Cursor**: add to MCP settings in Cursor → Settings → Features → Model Context Protocol
 - **OpenAI Codex**: `codex mcp add linksee -- npx -y linksee-memory` (or `~/.codex/config.toml` with `[mcp_servers.linksee]` block)
 - **Gemini CLI**: add to `~/.gemini/settings.json` mcpServers section
