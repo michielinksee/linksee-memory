@@ -14,7 +14,7 @@
 [![glama-score](https://glama.ai/mcp/servers/michielinksee/linksee-memory/badges/score.svg)](https://glama.ai/mcp/servers/michielinksee/linksee-memory)
 
 🌐 **Landing page**: [linksee.app](https://linksee.app) (includes non-developer onboarding for Claude Desktop / Cursor / Claude Code / OpenAI Codex / Gemini CLI)
-📖 **Docs**: [docs.linksee.app](https://docs.linksee.app) — full reference: the product map & drift, install, and all 11 tools
+📖 **Docs**: [docs.linksee.app](https://docs.linksee.app) — full reference: the product map & drift, install, and every tool
 
 <!-- releases: tag-driven, published from CI via npm trusted publishing (OIDC).
      See .github/workflows/publish.yml — no token, no OTP, provenance attached automatically. -->
@@ -289,7 +289,7 @@ It's **project-scoped on purpose** — the guard enforces *this* repo's decision
 
 Most "agent memory" services (Mem0, Letta, Zep) save a flat list of facts. Then the agent looks at "edited file X 30 times" and has no idea why. And none of them notice when this week's work contradicts last week's decision. **linksee-memory keeps the WHY — and watches the drift.**
 
-It is a Model Context Protocol (MCP) server with **11 tools** that gives any AI agent structured memory + drift detection:
+It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and drift, plus the optional `share_draft`) that gives any AI agent structured memory + drift detection:
 
 | | Mem0 / Letta / Zep | Claude Code auto-memory | linksee-memory |
 |---|---|---|---|
@@ -560,7 +560,7 @@ Nothing ever leaves your machine, so step 3 fully erases everything Linksee stor
 
 </details>
 
-## 6 Tools
+## 7 Tools: six for memory and drift, one you ask for
 
 Two pillars, one surface. **Memory** and **drift** each get the minimum; nothing else is exposed.
 Eleven tools bled model-dependent behaviour across Claude / GPT / Cursor / Codex / Gemini — six
