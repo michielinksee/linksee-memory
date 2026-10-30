@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- `@modelcontextprotocol/sdk` raised from `^1.0.0` (locked at 1.29.0) to `^1.32.2`, and the lockfile re-resolved within the existing ranges. `pnpm audit --audit-level moderate` goes from 46 findings (hono, qs, express, zod and others, mostly through the SDK) to 0. No change to the tool surface: still 6 tools, same handshake.
+
+### Fixed
+
+- `test/live-check.mjs` no longer writes to the real `~/.linksee-memory`. It now runs the server against a throwaway DB in a temp folder (`LINKSEE_MEMORY_DIR`) and removes it afterwards; CI runs it the same way.
+
 ## v0.16.1 — 2026-09-07
 
 ### Fixed
