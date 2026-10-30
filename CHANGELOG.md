@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.17.0 — 2026-10-30 (Share a fix as a link)
 
 ### Added — `share_draft`: share a fix as a link, never a send
 
@@ -14,10 +14,11 @@
   KanseiLINK `secret-mask.ts` (2026-10-30). URL capped at 2,000 characters — it asks to shorten,
   it does not cut. `kind` is required, so the draft never claims "executed" by default.
 - Records only that a draft was made (`events.kind = 'share_draft_created'`, no payload). No
-  telemetry added. The six memory/drift tools are unchanged.
+  telemetry added. The six memory/drift tools are unchanged; `tools/list` now shows 7.
+
 ### Security
 
-- `@modelcontextprotocol/sdk` raised from `^1.0.0` (locked at 1.29.0) to `^1.32.2`, and the lockfile re-resolved within the existing ranges. `pnpm audit --audit-level moderate` goes from 46 findings (hono, qs, express, zod and others, mostly through the SDK) to 0. No change to the tool surface: still 6 tools, same handshake.
+- `@modelcontextprotocol/sdk` raised from `^1.0.0` (locked at 1.29.0) to `^1.32.2`, and the lockfile re-resolved within the existing ranges. `pnpm audit --audit-level moderate` goes from 46 findings (hono, qs, express, zod and others, mostly through the SDK) to 0. This change alone does not touch the tool surface (same handshake).
 
 ### Fixed
 
