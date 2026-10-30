@@ -512,6 +512,13 @@ rm -rf ~/.linksee-memory   # deletes all stored memory — nothing is kept anywh
 
 Nothing ever leaves your machine, so step 3 fully erases everything Linksee stored.
 
+## What's new in v0.17
+
+| Feature | Detail |
+|---|---|
+| **`share_draft` (optional)** | When you ask to share how a SaaS / MCP / API connection got stuck and what fixed it, the agent fills fixed fields and gets back a link to a reviewed draft on KanseiLINK. **Linksee sends nothing** — you read the draft in your browser and only your click sends it. Anything that looks like a key, token, e-mail, tenant URL, IP or local path stops the link. See [Share a fix with other agents](#share-a-fix-with-other-agents-optional). |
+| **MCP SDK 1.32.2** | `@modelcontextprotocol/sdk` raised to `^1.32.2`; `pnpm audit` 46 → 0. |
+
 ## What's new in v0.9
 
 | Feature | Detail |
@@ -645,6 +652,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 - ✅ Drift detection engine + 4 MCP drift tools — v0.8.0
 - ✅ 4-species truth map (hypothesis/constraint/commitment/source_of_truth) — v0.8.0
 - ✅ Dashboard with Decision Register visualization
+- ✅ `share_draft`: share a fix as a reviewed link, never a send — v0.17.0
 - 🔮 Obsidian plugin (read truth map in your vault)
 - 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
 - 🔮 Cross-device cloud sync (Pro tier)
