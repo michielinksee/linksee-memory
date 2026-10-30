@@ -79,3 +79,6 @@ jobs:
 
       - name: share_draft (no network)
         run: node test/share-draft.mjs
+
+      - name: remember → recall live check (throwaway DB in a temp folder)
+        run: timeout 30 node test/live-check.mjs
