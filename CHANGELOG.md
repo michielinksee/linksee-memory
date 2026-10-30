@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added — `share_draft`: share a fix as a link, never a send
+
+- New MCP tool `share_draft` (and `npx -y linksee-memory share-draft`). For use only when the
+  user wants to share how a SaaS / MCP / API connection got stuck and what fixed it. Takes fixed
+  fields only (`service`, `task`, `symptom`, `tried`, `result`, `conditions`, `kind`, `runtime`),
+  checks them, and returns a link to KanseiLINK's reviewed draft page. Linksee makes no network
+  call; the user opens the link and sends from that page.
+- A field that looks like a key / token / JWT / Bearer value, an e-mail, a tenant URL, an IP, a
+  local path or a long hex / base64 run stops the build and names the field. Patterns ported from
+  KanseiLINK `secret-mask.ts` (2026-10-30). URL capped at 2,000 characters — it asks to shorten,
+  it does not cut. `kind` is required, so the draft never claims "executed" by default.
+- Records only that a draft was made (`events.kind = 'share_draft_created'`, no payload). No
+  telemetry added. The six memory/drift tools are unchanged.
+
 ## v0.16.1 — 2026-09-07
 
 ### Fixed
