@@ -71,3 +71,6 @@ jobs:
           fi
 
           echo "✓ MCP handshake passed"
+
+      - name: remember → recall live check (throwaway DB in a temp folder)
+        run: timeout 30 node test/live-check.mjs

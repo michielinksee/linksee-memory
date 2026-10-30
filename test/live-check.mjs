@@ -1,11 +1,19 @@
-// One-shot: verify remember → recall against the REAL user DB (~/.linksee-memory/memory.db).
-// Simulates exactly what Claude Code would do after MCP registration.
+// One-shot: verify remember → recall through the MCP server, the way Claude Code would after registration.
+// Runs against a throwaway DB in a temp folder (LINKSEE_MEMORY_DIR), never the real ~/.linksee-memory,
+// and removes the folder afterwards. Same locally and in CI.
 
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const dbDir = mkdtempSync(join(tmpdir(), 'linksee-live-check-'));
+const cleanup = () => { try { rmSync(dbDir, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanup);
 
 const server = spawn('node', ['dist/mcp/server.js'], {
   stdio: ['pipe', 'pipe', 'inherit'],
-  // note: NO LINKSEE_MEMORY_DIR override → uses default ~/.linksee-memory/memory.db
+  env: { ...process.env, LINKSEE_MEMORY_DIR: dbDir },
 });
 
 let buf = '';
