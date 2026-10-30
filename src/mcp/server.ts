@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // linksee-memory MCP server (stdio transport).
-// Tools: remember / recall / read_smart / drift_status / check_decision / declare_anchor / resolve_drift / flag_proposals / dream / resolve_proposal
+// Tools: remember / recall / read_smart / drift_status / check_decision / declare_anchor / resolve_drift / flag_proposals / dream / resolve_proposal / share_draft
 // v0.10.0 — Re-injection layer: pre-action guard (PreToolUse/SessionStart hooks) + extraction
 //           quality gate + distillation routine (dream distill_queue) + harden/soften escalation
 
@@ -35,6 +35,7 @@ import { getReinjectionFriction, setGateMode, type FrictionItem } from '../lib/g
 import { logAnchorTouch } from '../lib/anchor-touch.js';
 import { triageDistillQueue, distillPending } from '../lib/distill-triage.js';
 import { whereAmI, listMapProjects } from '../lib/map-view.js';
+import { buildShareDraft, KINDS, RUNTIMES } from '../lib/share-draft.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -73,6 +74,7 @@ const SUBCOMMANDS: Record<string, string> = {
   declare: 'declare-anchor.js',
   detect: 'detect-drift.js',
   export: 'export-report.js',
+  'share-draft': 'share-draft.js',
 };
 const subcommand = process.argv[2];
 if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand)) {
@@ -414,6 +416,36 @@ const TOOLS = [
         rationale: { type: 'string', description: 'Why — must reference North Star criteria' },
       },
       required: ['candidate_id', 'verdict', 'rationale'],
+    },
+  },
+  // ── Share a fix (opt-in, link only) ──────────────────────
+  {
+    name: 'share_draft',
+    description:
+      'Make a LINK to a reviewed draft of a field note for other agents (KanseiLINK note page). ' +
+      'ONLY when the user says they want to share — never call it on your own.\n\n' +
+      'Use after a SaaS / MCP / API connection got stuck and was fixed (or was not). You write the fields; ' +
+      'this tool only checks them and builds the URL. Linksee sends nothing: the user opens the link, ' +
+      'reviews the filled form, and only their click on that page sends it.\n\n' +
+      'No values, only kinds: write "401 invalid_token", not the token. A field that looks like a key, ' +
+      'token, JWT, e-mail, tenant URL (acme.slack.com), IP, local path (C:\, /Users/, /home/) or a long ' +
+      'hex/base64 run stops the build and returns which field. The whole URL must fit in 2,000 characters ' +
+      '(a Japanese character takes 9) — if not, it asks you to shorten; it does not cut.\n\n' +
+      'Returns { url, notice } — show the user both. Linksee records only that a draft was made (no field text).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        service: { type: 'string', description: 'KanseiLINK service_id, lowercase (e.g. freee, slack, google-drive). ^[a-z0-9_.-]{1,160}$' },
+        task: { type: 'string', maxLength: 300, description: 'What you were trying to do (≤300 chars)' },
+        symptom: { type: 'string', maxLength: 600, description: 'The KIND of error that came back — no values (≤600 chars)' },
+        tried: { type: 'string', maxLength: 2000, description: 'The steps you tried (≤2,000 chars)' },
+        result: { type: 'string', maxLength: 1000, description: 'How it was solved, or that it was not (≤1,000 chars)' },
+        conditions: { type: 'string', maxLength: 600, description: 'Optional. Tool + version, kind of environment (≤600 chars)' },
+        kind: { type: 'string', enum: [...KINDS], description: 'execution = you ran it · documentation = you read it · hypothesis = untested guess' },
+        runtime: { type: 'string', enum: [...RUNTIMES], description: 'Optional. Which AI wrote this' },
+      },
+      required: ['service', 'task', 'symptom', 'tried', 'result', 'kind'],
+      additionalProperties: false,
     },
   },
 ];
@@ -2168,6 +2200,17 @@ const LEGACY_TOOLS: Record<string, string> = {
   dream: 'recall({ dream: true }) — recall() with no arguments already includes the counts',
   resolve_proposal: "resolve_drift({ candidate_id, action: 'surface' | 'dismiss', rationale })",
 };
+// share_draft: check fields + build the link. No network. Records only that a draft was made.
+function handleShareDraft(args: any): string {
+  const r = buildShareDraft(args);
+  if (!r.ok) return JSON.stringify(r, null, 2);
+  try {
+    // events row with no entity and no payload: the fact and the time, nothing from the fields.
+    db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (NULL, ?, NULL)').run('share_draft_created');
+  } catch { /* the record must never break the tool */ }
+  return JSON.stringify(r, null, 2);
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const showLegacy = process.env.LINKSEE_LEGACY_TOOLS === '1';
   const tools = TOOLS
@@ -2196,6 +2239,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       // Dreaming Memory (v0.9.0)
       case 'dream': text = handleDream(args); break;
       case 'resolve_proposal': text = handleResolveProposal(args); break;
+      // Share a fix (link only)
+      case 'share_draft': text = handleShareDraft(args); break;
       default: {
         const migrations: Record<string, string> = {
           update_memory: 'remember({ memory_id: <id>, content: "...", importance: 0.8 })',

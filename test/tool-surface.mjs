@@ -70,6 +70,9 @@ async function withServer(dir, extraEnv, fn) {
 
 const SIX = ['recall', 'remember', 'read_smart', 'drift_status', 'declare_anchor', 'resolve_drift'];
 const LEGACY = ['where_am_i', 'check_decision', 'flag_proposals', 'dream', 'resolve_proposal'];
+// share_draft (0.17) is outside the memory/drift surface: an opt-in, link-only tool for sharing a
+// fix. It is listed, but the six above are unchanged.
+const SHARE = ['share_draft'];
 
 const dir = mkdtempSync(join(tmpdir(), 'linksee-surface-'));
 console.log('tool-surface regression');
@@ -94,7 +97,7 @@ try {
   await withServer(dir, {}, async ({ rpc, call }) => {
     // ── the surface ──
     const list = (await rpc('tools/list', {})).result.tools.map((t) => t.name).sort();
-    check('tools/list shows exactly the six', JSON.stringify(list) === JSON.stringify([...SIX].sort()), list.join(','));
+    check('tools/list shows exactly the six + share_draft', JSON.stringify(list) === JSON.stringify([...SIX, ...SHARE].sort()), list.join(','));
 
     // ── hidden but answering ──
     const dec = await call('remember', { content: 'Postgres for the primary store; MongoDB rejected on consistency.', anchor: { violation_signal: ['mongoose'] } });
@@ -153,7 +156,7 @@ try {
   await withServer(dir, { LINKSEE_LEGACY_TOOLS: '1' }, async ({ rpc }) => {
     const tools = (await rpc('tools/list', {})).result.tools;
     const names = tools.map((t) => t.name).sort();
-    check('LINKSEE_LEGACY_TOOLS=1 lists all eleven', JSON.stringify(names) === JSON.stringify([...SIX, ...LEGACY].sort()), names.join(','));
+    check('LINKSEE_LEGACY_TOOLS=1 lists all eleven (+ share_draft)', JSON.stringify(names) === JSON.stringify([...SIX, ...LEGACY, ...SHARE].sort()), names.join(','));
     const d = tools.find((t) => t.name === 'dream');
     check('legacy descriptions point at the replacement', /legacy/.test(d.description) && /recall\(\{ dream: true \}\)/.test(d.description), (d.description || '').slice(0, 100));
   });

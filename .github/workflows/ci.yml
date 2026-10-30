@@ -70,7 +70,15 @@ jobs:
             exit 1
           fi
 
+          if ! echo "$OUTPUT" | grep -q '"name":"share_draft"'; then
+            echo "::error::tools/list missing 'share_draft' tool"
+            exit 1
+          fi
+
           echo "✓ MCP handshake passed"
+
+      - name: share_draft (no network)
+        run: node test/share-draft.mjs
 
       - name: remember → recall live check (throwaway DB in a temp folder)
         run: timeout 30 node test/live-check.mjs

@@ -15,7 +15,8 @@
     "linksee-memory-detect": "dist/bin/detect-drift.js",
     "linksee-memory-guard": "dist/bin/guard-hook.js",
     "linksee-memory-map": "dist/bin/map-import.js",
-    "linksee-memory-export": "dist/bin/export-report.js"
+    "linksee-memory-export": "dist/bin/export-report.js",
+    "linksee-memory-share-draft": "dist/bin/share-draft.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
