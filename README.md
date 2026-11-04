@@ -27,7 +27,7 @@ A new install has an empty memory, so "how did we solve this before?" finds noth
 - Reminders and blocks before an edit are Claude Code hooks. Cursor, Windsurf, Codex and Gemini CLI share the memory but get no warning before an edit.
 - Saving every session automatically is also Claude Code only. Other clients save when the agent calls `remember`.
 - The memory is shared on one machine. There is no sync to another machine; to hand it over, copy `~/.linksee-memory/` (with every client closed).
-- A database from a very early version (schema 1–5) is refused without being changed. Close every client, then run `npx -y linksee-memory@0.17.2 migrate --dry` and `npx -y linksee-memory@0.17.2 migrate`: it migrates a copy and keeps the original files in `memory.db.pre-migrate-<time>/` ([details](docs/troubleshooting.md)).
+- A database from a very early version (schema 1–5) is refused without being changed. Close every client and keep them closed while it runs, then `npx -y linksee-memory@0.17.2 migrate --dry` and `npx -y linksee-memory@0.17.2 migrate`: it migrates a copy and moves the original files, as one set, into `memory.db.pre-migrate-<time>/` ([details and how to go back](docs/troubleshooting.md)).
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
 [![license](https://img.shields.io/npm/l/linksee-memory.svg)](./LICENSE)

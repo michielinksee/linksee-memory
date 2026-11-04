@@ -8,31 +8,43 @@ No new MCP tools (still 7). Two CLI subcommands, both run by hand.
 
 - **`npx -y linksee-memory@0.17.2 migrate [--dry] [--db <path>]`** — brings a schema 1–5 memory.db
   (0.11 and earlier, up to May 2026; 0.17.1 refuses these) to the current schema without starting
-  the server. It never opens the live files for writing: it copies `memory.db` (+ `-wal`,
-  `-journal`) byte for byte into `memory.db.migrating-<time>/`, lets SQLite recover the copy (a hot
-  journal is rolled back, a WAL is read — in the copy), requires `integrity_check` = ok, makes a
-  single-file replica with `VACUUM INTO` and checks it (same schema, same row count in every
-  table), and migrates the replica in one transaction. It commits only if no table lost rows, the
-  schema reached the current version and `quick_check` is ok. Any failure up to here removes the
-  work folder; `memory.db` and every sidecar (`-wal`, `-shm`, `-journal`) are byte-identical. Only
-  then does it swap: if the live files' size and mtime are unchanged since the copy and (for a
-  rollback-journal file) a `BEGIN IMMEDIATE` probe shows no other writer, it moves `memory.db` and
-  its sidecars into `memory.db.pre-migrate-<time>/` — the original files, byte for byte — and moves
-  the migrated replica in. A failed rename puts back what was already moved. `--dry` runs the same
-  rehearsal in a temporary folder and swaps nothing. Schema 6 and newer: "not needed" (a schema 6+
-  file with a hot journal is recovered the same way, since 0.17.1 refuses it). It never
-  consolidates, never merges duplicate entities (0.11's v5 merge deleted rows; they are kept), and
-  the server's refusal messages now point at this command pinned to this exact version (an
-  unpinned `npx linksee-memory` may resolve to an older cached version, which has no `migrate` and
-  would start its server; if the version cannot be read, the fixed `@0.17.2` is printed).
+  the server. **Every client must be closed for the whole run:** nothing here is a lock, a WAL-mode
+  file is never probed for writers, and an idle client on it is detected only on Windows (the final
+  rename is refused). What it does:
+  - checks free space for 3 × (memory.db + sidecars); if it cannot check, it stops;
+  - copies `memory.db` (+ `-wal`, `-journal`) byte for byte into `memory.db.migrating-<time>-<pid>/`
+    and stops if the live files' size or mtime change meanwhile;
+  - lets SQLite recover the copy (hot journal rolled back / WAL read, in the copy), requires
+    `integrity_check` = ok, makes a single-file replica with `VACUUM INTO` and checks it (same
+    schema, same row count in every table);
+  - migrates the replica in one transaction and commits only if no table lost rows, the schema is
+    current and `quick_check` is ok. Any failure up to here: this command has not written to the
+    live files (`memory.db`, `-wal`, `-shm`, `-journal` byte-identical in the tests);
+  - swap: if the live size and mtime are unchanged and — for a rollback-journal file without a
+    `-journal` / `-wal` — one writable connection's `BEGIN IMMEDIATE` + `ROLLBACK` probe finds no
+    writer (it writes nothing), it renames `memory.db` and its sidecars into
+    `memory.db.pre-migrate-<time>/` (the original set, byte for byte, with a `README.txt` on how to
+    go back) and renames the replica into place. If a rename fails it tries to put back what was
+    already moved and names anything it could not;
+  - removes the work folder, and says so if it cannot.
+  To go back: move the current `memory.db` and all its sidecars aside together, then move the whole
+  backup set back — never mix a database and sidecars from different sets. `--dry` rehearses in a
+  temporary folder and swaps nothing. Schema 6 and newer: "not needed" (a schema 6+ file with a hot
+  journal is recovered the same way, since 0.17.1 refuses it). It never consolidates or merges
+  duplicate entities (0.11's v5 merge deleted rows; they are kept). The server's refusal messages
+  point at this command pinned to this exact version (if the version cannot be read, the fixed
+  `@0.17.2` is printed — never an unpinned command, which could start an older version's server).
 - **`npx -y linksee-memory runtime list | prune [--yes --scope-confirmed] [--settings <file>]…`** —
   lists `~/.linksee-memory/runtime/<version>/` with sizes and what references each. References are
   looked for in `~/.claude/settings.json`, `settings.local.json`, `~/.claude.json`,
   `~/.codex/config.toml`, the current folder's `.claude/settings*.json` and every `--settings`:
-  JSON is parsed and every string checked (so `\/` escapes and backslashes count); the TOML file is
-  read by a small line parser (`command` / `args` strings). A JSON file that does not parse, a TOML
-  line it cannot read, an unreadable file or a missing `--settings` file → nothing is deleted and
-  the reason is printed. Other repos where `setup --project` was run cannot be found from here, so
+  JSON is parsed and every string checked (so `\/` escapes and backslashes count). The TOML file is
+  read by a deliberately small reader that accepts only blank lines, comments, `[table]` headers of
+  bare keys and `bare.key = ` a string, a one-line array of strings, a number or true/false; every
+  string it read is checked. Anything else (a quoted key, an inline table, a multi-line value, …)
+  makes the file "could not confirm". A JSON file that does not parse, a TOML file the reader does
+  not fully accept, an unreadable file or a missing `--settings` file → nothing is deleted and the
+  reason is printed. Other repos where `setup --project` was run cannot be found from here, so
   `--yes` alone deletes nothing: `--scope-confirmed` states that those were checked or passed with
   `--settings`. A deletion that fails exits 1 and is not reported as deleted. The version this
   command runs from, `.tmp-*`, `*.old-*` and non-version names are never touched.

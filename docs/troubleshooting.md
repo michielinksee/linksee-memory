@@ -34,14 +34,24 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 <details>
 <summary><b>The server says my memory.db is at schema 1–5 (I installed 0.11 or earlier, before June 2026).</b></summary>
 
-0.17.x refuses these files before writing anything. Close every client that uses linksee-memory, then:
+**Close every Claude Code / Cursor / Codex / other client that uses linksee-memory, and keep them closed until the command finishes.** It cannot detect an idle client on a WAL-mode file (only Windows refuses the final rename then), and nothing here is a lock.
+
+0.17.x refuses these files before writing anything. Then:
 
 ```bash
 npx -y linksee-memory@0.17.2 migrate --dry   # rehearse on a temporary copy
 npx -y linksee-memory@0.17.2 migrate         # migrate a copy, then swap it in
 ```
 
-It migrates a copy of the file and checks it (no table loses rows, `integrity_check` ok). Only then does it move `memory.db` and its `-wal` / `-shm` / `-journal` into `memory.db.pre-migrate-<time>/` (the originals, byte for byte) and put the migrated copy in their place. If anything fails before that, your files are not changed. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead. On macOS / Linux a client that is still open cannot be detected, so do close them first.
+What it does: it checks there is free space for 3 × the database, copies `memory.db` (+ `-wal`, `-journal`) and migrates the copy, checking it (no table loses rows, `integrity_check` ok). Up to here it does not write to your files. Then it checks they did not change, and for a rollback-journal file opens a connection once to try a write lock (`BEGIN IMMEDIATE`, then `ROLLBACK`; nothing is written). After that it moves `memory.db` and its `-wal` / `-shm` / `-journal` into `memory.db.pre-migrate-<time>/` (the originals, byte for byte, with a `README.txt`) and puts the migrated copy in their place. If one of those moves fails, it tries to put back what it moved and names anything it could not. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead.
+
+**To go back** to the originals:
+
+1. Close every client.
+2. Move the current `memory.db` **and** every `memory.db-wal` / `-shm` / `-journal` next to it into a new, separate folder, all together.
+3. Move all the files from `memory.db.pre-migrate-<time>/` back, as one set.
+
+Never combine a `memory.db` from one set with a `-wal` / `-shm` / `-journal` from the other: SQLite reads them as one database, and a mismatched pair can corrupt it.
 </details>
 
 <details>
