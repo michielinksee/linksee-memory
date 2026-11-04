@@ -25,7 +25,12 @@ export function stripBom(raw: string): string {
 
 /** Read a settings file. A missing file is `{}`; an unreadable or non-object file is a refusal. */
 export function readSettingsFile(path: string): SettingsRead {
-  if (!existsSync(path)) return { ok: true, exists: false, settings: {}, raw: '' };
+  if (!existsSync(path)) {
+    let dangling = false;
+    try { dangling = lstatSync(path).isSymbolicLink(); } catch { /* really absent */ }
+    if (dangling) return { ok: false, reason: 'symbolic link whose target does not exist' };
+    return { ok: true, exists: false, settings: {}, raw: '' };
+  }
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -93,7 +98,15 @@ export function writeSettingsFile(path: string, settings: Record<string, unknown
 
   // If settings.json is a symlink (dotfiles repos), replace the file it points to, not the link.
   let target = path;
-  try { if (lstatSync(path).isSymbolicLink()) target = realpathSync(path); } catch { /* new file */ }
+  let isLink = false;
+  try { isLink = lstatSync(path).isSymbolicLink(); } catch { /* no file, no link */ }
+  if (isLink) {
+    // A dangling link (target missing) is refused: replacing it would silently turn the user's
+    // link into a plain file, and following it would create a file somewhere they did not expect.
+    try { target = realpathSync(path); } catch {
+      throw new Error(`refusing to write ${path}: it is a symbolic link whose target does not exist`);
+    }
+  }
   // Keep the original permission bits (e.g. 600) — a fresh temp file gets the umask default.
   // On Windows chmod only toggles read-only, so this is effectively a no-op there.
   let mode: number | undefined;
@@ -101,7 +114,8 @@ export function writeSettingsFile(path: string, settings: Record<string, unknown
 
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
-    writeFileSync(tmp, next, 'utf8');
+    // Create the temp file with the original mode from the start (umask may widen it, so chmod too).
+    writeFileSync(tmp, next, mode !== undefined ? { encoding: 'utf8', mode } : 'utf8');
     if (mode !== undefined) chmodSync(tmp, mode);
     renameSync(tmp, target);
   } catch (e) {
