@@ -75,6 +75,8 @@ const SUBCOMMANDS: Record<string, string> = {
   detect: 'detect-drift.js',
   export: 'export-report.js',
   'share-draft': 'share-draft.js',
+  migrate: 'migrate-legacy.js',   // 0.17.2: schema 1–5 → current, without starting the server
+  runtime: 'runtime.js',          // 0.17.2: runtime list | prune
 };
 const subcommand = process.argv[2];
 if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand)) {

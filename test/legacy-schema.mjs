@@ -23,6 +23,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(HERE, '..', 'dist', 'mcp', 'server.js');
 const Database = createRequire(import.meta.url)('better-sqlite3');
 const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+// 0.17.2: the message may name this exact version (`npx -y linksee-memory@<own> migrate`), never another.
+const OWN_VERSION = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')).version;
+const otherVersionsIn = (msg) => [...msg.matchAll(/linksee-memory@(\d[\w.-]*)/g)].map((m) => m[1]).filter((v) => v !== OWN_VERSION);
 const fixture = (v) => readFileSync(join(HERE, 'fixtures', `schema-v${v}.sql`), 'utf8');
 
 let failures = 0;
@@ -82,7 +85,8 @@ for (const state of ['rollback', 'walclean', 'wal', 'wal-noshm', 'hot']) {
   const expected = state === 'hot' ? mod.HotJournalError : mod.LegacySchemaError;
   check(`schema 5 [${state}]: openDb refuses (${expected.name})`, err instanceof expected, String(err));
   check(`schema 5 [${state}]: message says back up, nothing written, no other version`,
-    /Back up/.test(err?.message ?? '') && /Stopped before writing anything/.test(err?.message ?? '') && !/linksee-memory@\d/.test(err?.message ?? ''), err?.message);
+    /Back up/.test(err?.message ?? '') && /Stopped before writing anything/.test(err?.message ?? '') && otherVersionsIn(err?.message ?? '').length === 0
+    && (state === 'hot' || err?.message.includes(`linksee-memory@${OWN_VERSION} migrate`)), err?.message);
   check(`schema 5 [${state}]: memory.db / -wal / -journal byte-identical after openDb`, JSON.stringify(shaAll(dir)) === shaBefore);
   check(`schema 5 [${state}]: folder listing unchanged after openDb (incl. -shm: none added)`, filesOf(dir).join(',') === listBefore, `${listBefore} → ${filesOf(dir).join(',')}`);
   check(`schema 5 [${state}]: -shm present only if it was before`, existsSync(file + '-shm') === listBefore.split(',').includes('memory.db-shm'));
