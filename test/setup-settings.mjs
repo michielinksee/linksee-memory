@@ -109,6 +109,26 @@ const FOREIGN = {
   check('missing file: setup exits cleanly', r.status === 0, `exit ${r.status} ${r.stderr}`);
   check('missing file: created', existsSync(settingsPath(home)));
   check('missing file: no .bak (nothing existed)', backups(home).length === 0);
+  // completion text (L-1-106): no "works across 5 clients" over-claim; an empty memory gets the
+  // remember → new session round trip, not a recall that is bound to come back empty
+  check('completion: says auto-capture/guard are Claude Code only', /Claude Code only/.test(r.stdout) && !/Works across/.test(r.stdout));
+  check('completion: gives the Codex registration line', /codex mcp add linksee -- npx -y linksee-memory/.test(r.stdout));
+  check('completion (empty memory): round trip, not "How did we solve this before?"', /new.*session/.test(r.stdout) && !/How did we solve this before/.test(r.stdout));
+}
+
+// 3b. a memory that already has something in it gets the recall prompts
+{
+  const home = freshHome(undefined);
+  const memDir = join(home, '.linksee-memory');
+  process.env.LINKSEE_MEMORY_DIR = memDir;
+  const { openDb, runMigrations } = await import(`../dist/db/migrate.js?d=${encodeURIComponent(memDir)}`);
+  const db = openDb();
+  runMigrations(db);
+  db.prepare(`INSERT INTO entities (name, kind, normalized_name) VALUES ('p', 'project', 'p')`).run();
+  db.prepare(`INSERT INTO memories (entity_id, layer, content, importance) VALUES (1, 'learning', '{"what":"x"}', 0.5)`).run();
+  db.close();
+  const r = runSetup(home);
+  check('completion (non-empty memory): recall prompt shown', /How did we solve this before/.test(r.stdout));
 }
 
 // 5. a JSON array at the top level is not a settings object — refuse

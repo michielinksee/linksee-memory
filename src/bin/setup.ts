@@ -41,6 +41,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import Database from 'better-sqlite3';
 import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
 import { resolveHookRuntime } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
@@ -65,7 +66,12 @@ What it does:
   1. Registers linksee-memory MCP server with Claude Code
   2. Installs SKILL.md (teaches the agent when to recall/remember)
   3. Configures Stop hook (auto-captures every session)
-  4. Offers to wire the re-injection guard into THIS project's .claude/settings.json
+  4. Wires the re-injection guard into ~/.claude/settings.json (every repo)
+     --project-guard: this repo only · --no-guard: skip
+
+Writes ~/.claude/settings.json (one settings.json.bak-<timestamp> kept before changing it),
+~/.claude/skills/linksee-memory/SKILL.md, and — when run through npx — a pinned copy under
+~/.linksee-memory/runtime/<version>/ that the hooks call with node directly.
 
 After setup, just chat with Claude Code normally.
 Add "Use Linksee" to any prompt to trigger memory recall.`);
@@ -358,6 +364,23 @@ const guardConfigured = await configureGuard();
 console.log('');
 
 // ── Telemetry consent (opt-in, anonymous, off unless you agree) ──────────
+/** True when there is no memory yet (or it cannot be read) — used only to pick the first-try text. */
+function memoryIsEmpty(): boolean {
+  const dbPath = join(TELEMETRY_DIR, 'memory.db');
+  if (!existsSync(dbPath)) return true;
+  try {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS c FROM memories').get() as { c: number } | undefined;
+      return !row || row.c === 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return true;
+  }
+}
+
 async function configureTelemetryConsent(): Promise<void> {
   console.log(`${BOLD}Anonymous usage stats${RESET} ${DIM}(optional)${RESET}`);
 
@@ -403,19 +426,27 @@ console.log('');
 console.log(`${BOLD}Setup complete!${RESET}`);
 console.log('');
 console.log('How it works:');
-console.log(`  ${DIM}• Every session is auto-captured (decisions, caveats, learnings)${RESET}`);
+console.log(`  ${DIM}• Every Claude Code session is auto-captured (decisions, caveats, learnings)${RESET}`);
 console.log(`  ${DIM}• Agent auto-recalls past context when starting a task${RESET}`);
 console.log(`  ${DIM}• Memory is local-first (your memory never leaves your machine)${RESET}`);
-console.log(`  ${DIM}• Works across Claude Code, Cursor, Windsurf, Codex, Gemini (cross-agent)${RESET}`);
+console.log(`  ${DIM}• The memory is shared over MCP by 5 clients (Claude Code, Cursor, Windsurf, Codex, Gemini CLI);${RESET}`);
+console.log(`  ${DIM}  auto-capture and the guard run in Claude Code only. Codex: codex mcp add linksee -- npx -y linksee-memory${RESET}`);
 if (guardConfigured) {
-  console.log(`  ${DIM}• Re-injection guard re-surfaces this project's accepted decisions before edits${RESET}`);
+  console.log(`  ${DIM}• Re-injection guard re-surfaces your accepted decisions before edits (${projectGuard ? 'this project' : 'every repo'})${RESET}`);
 }
 console.log('');
-console.log('Test by asking:');
-console.log(`  ${BOLD}"How did we solve this before?"${RESET}`);
-console.log(`  ${BOLD}"Same error again"${RESET}`);
-console.log(`  ${BOLD}"Remember: I prefer TypeScript over JavaScript"${RESET}`);
-console.log(`  ${BOLD}「前にこの問題どう解決したっけ」${RESET}`);
+if (memoryIsEmpty()) {
+  // A fresh install has nothing to recall, so "how did we solve this before?" always comes back
+  // empty — the first thing a new user tries would fail. Offer a round trip that cannot.
+  console.log('Try it (your memory is empty, so start by giving it something):');
+  console.log(`  1. Say: ${BOLD}"Remember: in this repo we decided to use X, because Y."${RESET}`);
+  console.log(`  2. Open a ${BOLD}new${RESET} session and ask: ${BOLD}"What did we decide about X?"${RESET}`);
+} else {
+  console.log('Test by asking:');
+  console.log(`  ${BOLD}"How did we solve this before?"${RESET}`);
+  console.log(`  ${BOLD}"Same error again"${RESET}`);
+  console.log(`  ${BOLD}「前にこの問題どう解決したっけ」${RESET}`);
+}
 console.log('');
 console.log(`Or add ${BOLD}"Use Linksee"${RESET} to any prompt to trigger memory recall.`);
 console.log('');
