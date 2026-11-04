@@ -133,6 +133,28 @@ const memoryDir = join(base, 'mem with space');
   check('prune: the kept version and the refs file survive', existsSync(join(rtBase, '0.17.2')) && existsSync(join(rtBase, REFS_FILE)));
 }
 
+// 4c. "could not verify" is not "no reference" (Codex third review): pruning is held
+{
+  const rtBase = join(base, 'mem-hold', 'runtime');
+  const mk = () => { mkdirSync(join(rtBase, '0.17.0'), { recursive: true }); mkdirSync(join(rtBase, '0.17.2'), { recursive: true }); };
+  const settingsA = join(base, 'settings-hold.json');
+  writeFileSync(settingsA, '{}');
+
+  mk();
+  writeFileSync(join(rtBase, REFS_FILE), '{ this is not json');
+  let pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('hold: corrupt .settings-refs.json → nothing removed, reason given', pr.removed.length === 0 && existsSync(join(rtBase, '0.17.0')) && /could not verify references/.test(pr.held ?? ''), JSON.stringify(pr));
+  check('hold: recordSettingsRef refuses to overwrite a corrupt list', recordSettingsRef(rtBase, settingsA) === false && readFileSync(join(rtBase, REFS_FILE), 'utf8') === '{ this is not json');
+
+  writeFileSync(join(rtBase, REFS_FILE), JSON.stringify([join(base, 'deleted-repo', '.claude', 'settings.json')]));
+  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('hold: a recorded settings file that cannot be read → nothing removed, reason names it', pr.removed.length === 0 && existsSync(join(rtBase, '0.17.0')) && /deleted-repo/.test(pr.held ?? ''), JSON.stringify(pr));
+
+  writeFileSync(join(rtBase, REFS_FILE), JSON.stringify([]));
+  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA, join(base, 'no-such-project', 'settings.json')]);
+  check('hold: a given project path that does not exist is fine → removed', pr.removed.join(',') === '0.17.0' && !pr.held, JSON.stringify(pr));
+}
+
 // 5. failures keep what was there and the npx form
 {
   const before = readdirSync(join(memoryDir, 'runtime')).join(',');

@@ -119,26 +119,34 @@ export function formatBytes(n: number): string {
 /** File under runtime/ listing every settings file setup pointed at a pinned runtime. */
 export const REFS_FILE = '.settings-refs.json';
 
-/** Remember that `settingsPath` now has hooks pointing into `base` (so pruning checks it later). */
-export function recordSettingsRef(base: string, settingsPath: string): void {
+/**
+ * Remember that `settingsPath` now has hooks pointing into `base` (so pruning checks it later).
+ * Returns false if the list could not be read or saved — setup then skips pruning for this run.
+ */
+export function recordSettingsRef(base: string, settingsPath: string): boolean {
+  const refs = readRefs(base);
+  if (!refs.ok) return false;
+  if (refs.list.includes(settingsPath)) return true;
   try {
-    const f = join(base, REFS_FILE);
-    let list: string[] = [];
-    try { list = JSON.parse(readFileSync(f, 'utf8')); } catch { /* first one */ }
-    if (!Array.isArray(list)) list = [];
-    if (!list.includes(settingsPath)) {
-      list.push(settingsPath);
-      mkdirSync(base, { recursive: true });
-      writeFileSync(f, JSON.stringify(list, null, 2));
-    }
-  } catch { /* best effort: pruning then only checks the paths it is given */ }
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, REFS_FILE), JSON.stringify([...refs.list, settingsPath], null, 2));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function readRefs(base: string): string[] {
+/** The recorded settings files. A missing list is empty; an unreadable or malformed one is NOT. */
+function readRefs(base: string): { ok: true; list: string[] } | { ok: false; reason: string } {
+  const f = join(base, REFS_FILE);
+  if (!existsSync(f)) return { ok: true, list: [] };
   try {
-    const list = JSON.parse(readFileSync(join(base, REFS_FILE), 'utf8'));
-    return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : [];
-  } catch { return []; }
+    const list = JSON.parse(readFileSync(f, 'utf8'));
+    if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) return { ok: false, reason: `${f} is not a list of paths` };
+    return { ok: true, list };
+  } catch (e) {
+    return { ok: false, reason: `could not read ${f} (${(e as Error)?.message ?? e})` };
+  }
 }
 
 const normRef = (t: string) => {
@@ -146,7 +154,12 @@ const normRef = (t: string) => {
   return process.platform === 'win32' ? fwd.toLowerCase() : fwd;
 };
 
-export type PruneResult = { removed: string[]; kept: Array<{ dir: string; referencedBy: string }> };
+export type PruneResult = {
+  removed: string[];
+  kept: Array<{ dir: string; referencedBy: string }>;
+  /** Set when references could not be verified: nothing was removed this run. */
+  held?: string;
+};
 
 /**
  * Remove runtime/<x> folders other than `keep` — called by setup only as its LAST step, after
@@ -154,20 +167,45 @@ export type PruneResult = { removed: string[]; kept: Array<{ dir: string; refere
  * settings file still mentions its path: the given ones (user + project), plus every settings file
  * setup has ever pointed at a runtime (REFS_FILE) — e.g. another repo set up with --project-guard,
  * a hook left on the old runtime by --no-guard, or a hand-made wrapper.
+ *
+ * "Could not check" is not "not referenced" (Codex third review): if the refs list is unreadable or
+ * malformed, or any settings file cannot be read — including a RECORDED one that has disappeared —
+ * nothing is removed and `held` says why. Only the given user/project paths may simply not exist.
  */
 export function pruneOldRuntimes(base: string, keep: string, settingsPaths: string[]): PruneResult {
   const out: PruneResult = { removed: [], kept: [] };
   let names: string[] = [];
   try { names = readdirSync(base); } catch { return out; }
-  const files = [...new Set([...settingsPaths, ...readRefs(base)])];
-  const texts = files.map((f) => {
-    try { return { f, t: normRef(readFileSync(f, 'utf8')) }; } catch { return { f, t: '' }; }
+  const candidates = names.filter((n) => {
+    if (n === keep || n === REFS_FILE) return false;
+    try { return statSync(join(base, n)).isDirectory(); } catch { return false; }
   });
+  if (!candidates.length) return out;
+  const hold = (reason: string): PruneResult => ({
+    removed: [],
+    kept: candidates.map((n) => ({ dir: join(base, n), referencedBy: '(not checked)' })),
+    held: reason,
+  });
+
+  const refs = readRefs(base);
+  if (!refs.ok) return hold(`could not verify references: ${refs.reason}`);
+  const texts: Array<{ f: string; t: string }> = [];
+  for (const f of settingsPaths) {
+    if (!existsSync(f)) continue; // a given user/project path that does not exist holds no reference
+    try { texts.push({ f, t: normRef(readFileSync(f, 'utf8')) }); } catch (e) {
+      return hold(`could not verify references: could not read ${f} (${(e as Error)?.message ?? e})`);
+    }
+  }
+  for (const f of refs.list) {
+    if (settingsPaths.includes(f)) continue;
+    try { texts.push({ f, t: normRef(readFileSync(f, 'utf8')) }); } catch (e) {
+      return hold(`could not verify references: recorded settings file ${f} could not be read (${(e as Error)?.message ?? e}); remove it from ${join(base, REFS_FILE)} if it is gone for good`);
+    }
+  }
+
   const nbase = normRef(base).replace(/\/$/, '');
-  for (const n of names) {
-    if (n === keep || n === REFS_FILE) continue;
+  for (const n of candidates) {
     const dir = join(base, n);
-    try { if (!statSync(dir).isDirectory()) continue; } catch { continue; }
     const needle = `${nbase}/${normRef(n)}`;
     const hit = texts.find(({ t }) => t.includes(needle + '/') || t.includes(needle + '"'));
     if (hit) { out.kept.push({ dir, referencedBy: hit.f }); continue; }

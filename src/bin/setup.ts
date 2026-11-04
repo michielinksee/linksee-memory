@@ -256,11 +256,13 @@ interface SettingsJson {
 
 // Did every settings read/write this run succeed? Old runtimes are pruned only if so.
 let settingsOk = true;
+// Could every runtime reference be recorded? If not, pruning is skipped this run.
+let refsOk = true;
 /** writeSettingsFile that reports instead of throwing, and remembers which files use the runtime. */
 function safeWrite(path: string, settings: Record<string, unknown>): { backup?: string } | null {
   try {
     const w = writeSettingsFile(path, settings);
-    if (runtime.mode === 'pinned' && runtime.runtimeBase) recordSettingsRef(runtime.runtimeBase, path);
+    if (runtime.mode === 'pinned' && runtime.runtimeBase && !recordSettingsRef(runtime.runtimeBase, path)) refsOk = false;
     return w;
   } catch (e) {
     settingsOk = false;
@@ -403,10 +405,13 @@ console.log('');
 if (runtime.mode === 'pinned' && runtime.runtimeBase && runtime.version && !dryRun) {
   if (!settingsOk) {
     console.log(`  ${SKIP} Older runtimes kept: settings were not fully updated this run.`);
+  } else if (!refsOk) {
+    console.log(`  ${SKIP} Older runtimes kept: could not verify references (the runtime reference list could not be saved).`);
   } else {
     const pr = pruneOldRuntimes(runtime.runtimeBase, runtime.version, [SETTINGS_PATH, PROJECT_SETTINGS_PATH]);
+    if (pr.held) console.log(`  ${SKIP} Older runtimes kept: ${pr.held}`);
     if (pr.removed.length) console.log(`  ${DIM}Removed older runtime(s): ${pr.removed.join(', ')}${RESET}`);
-    for (const k of pr.kept) console.log(`  ${SKIP} Kept ${k.dir} — still referenced by ${k.referencedBy}`);
+    if (!pr.held) for (const k of pr.kept) console.log(`  ${SKIP} Kept ${k.dir} — still referenced by ${k.referencedBy}`);
     if (pr.removed.length || pr.kept.length) console.log('');
   }
 }

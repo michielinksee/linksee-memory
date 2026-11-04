@@ -302,6 +302,21 @@ if (process.platform !== 'win32') {
     check('runtime D: wrapper untouched', s.hooks.PostToolUse[0].hooks[0].command === wrapper);
     check('runtime D: old runtime kept because the wrapper still uses it', existsSync(old) && /still referenced/.test(r.stdout), r.stdout.slice(-600));
   }
+  // E. the reference list is corrupt → setup cannot verify references → old runtime kept, reason shown
+  {
+    const { home, rt, old } = prepare(npx017);
+    writeFileSync(join(rt, '.settings-refs.json'), '{ broken');
+    const r = run(home);
+    check('runtime E: corrupt reference list → old runtime kept with a reason', r.status === 0 && existsSync(old) && /Older runtimes kept: could not verify references/.test(r.stdout), r.stdout.slice(-600));
+  }
+
+  // F. a recorded settings file is gone → kept
+  {
+    const { home, rt, old } = prepare(npx017);
+    writeFileSync(join(rt, '.settings-refs.json'), JSON.stringify([join(home, 'gone-repo', '.claude', 'settings.json')]));
+    const r = run(home);
+    check('runtime F: recorded settings file unreadable → old runtime kept with a reason', r.status === 0 && existsSync(old) && /gone-repo/.test(r.stdout), r.stdout.slice(-600));
+  }
 }
 
 // 10. symlinked settings.json (dotfiles setups): a live link is written through to its target and
