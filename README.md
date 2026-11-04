@@ -1,8 +1,10 @@
 # linksee-memory
 
-A local MCP memory server: one SQLite file on your machine that Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write. No account, no cloud, no API key. The server makes no network calls; telemetry is opt-in and off by default.
+A local MCP memory server: one SQLite file on your machine that Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write. No account, no credit card, no cloud, no API key. The server makes no network calls; telemetry is opt-in and off by default.
 
-It is for handing a project over — to your next session, to another client, to the person after you — with the reasons attached. A decision you record comes back before the agent acts on it, and drift detection shows which recorded decisions the code has since left.
+It is for handing a project over — to your next session, to another client, to the person after you — with the reasons attached. Every client can save and search the memory. In Claude Code, hooks also bring a recorded decision back at session start and before an edit. Drift detection shows which recorded decisions the code has since left.
+
+Needs Node.js 20 or later, and Claude Code or Codex to try it (either one is enough).
 
 ## Install
 
@@ -17,13 +19,14 @@ One command for Claude Code. `setup --dry-run` prints what it would change. It e
 
 A new install has an empty memory, so "how did we solve this before?" finds nothing yet. Try this instead:
 
-1. In Claude Code, say: *"Remember: in this repo we decided to use X, because Y."*
-2. Open a **new** session — Claude Code or Codex — and ask: *"What did we decide about X? Use Linksee."*
+1. In Claude Code or Codex, say: *"Remember: in this repo we decided to use X, because Y. Use Linksee."*
+2. Open a **new** session — in either one — and ask: *"What did we decide about X? Use Linksee."*
 
 ## What it does not do
 
 - Reminders and blocks before an edit are Claude Code hooks. Cursor, Windsurf, Codex and Gemini CLI share the memory but get no warning before an edit.
 - Saving every session automatically is also Claude Code only. Other clients save when the agent calls `remember`.
+- The memory is shared on one machine. There is no sync to another machine; to hand it over, copy `~/.linksee-memory/` (with every client closed).
 - A database from a very early version (schema 1–5) is refused without being changed. A migration command is planned for 0.17.2; keep a copy of `~/.linksee-memory/` until then.
 
 [![npm](https://img.shields.io/npm/v/linksee-memory.svg)](https://www.npmjs.com/package/linksee-memory)
@@ -40,17 +43,17 @@ Docs: [docs.linksee.app](https://docs.linksee.app) · Site: [linksee.app](https:
 
 ## What setup writes, and how to undo it
 
-`setup` registers the MCP server (`claude mcp add -s user linksee -- npx -y linksee-memory`), installs the agent skill, adds a `Stop` hook that saves each session, and wires the [re-injection guard](https://github.com/michielinksee/linksee-memory/blob/main/docs/guard.md) for every repo (`--project-guard` for this repo only, `--no-guard` to skip). Running it again changes nothing that is already in place.
+`setup` registers the MCP server (`claude mcp add -s user linksee -- npx -y linksee-memory`), installs the agent skill, adds a `Stop` hook that saves each session, and wires the [re-injection guard](docs/guard.md) for every repo (`--project-guard` for this repo only, `--no-guard` to skip). Running it again changes nothing that is already in place.
 
 | File | What |
 |---|---|
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (shown with its size; this downloads from the npm registry), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
-To remove everything: `claude mcp remove linksee`, delete the linksee hooks from `settings.json` (or copy the `.bak` back), then `rm -rf ~/.claude/skills/linksee-memory ~/.linksee-memory` — the last one deletes all stored memory, and nothing is kept anywhere else. Step by step, with manual setup: [docs/install.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/install.md).
+To remove everything: `claude mcp remove linksee`, delete the linksee hooks from `settings.json` (or copy the `.bak` back), then `rm -rf ~/.claude/skills/linksee-memory ~/.linksee-memory` — the last one deletes all stored memory. Memory text is never sent anywhere, so no copy of it exists elsewhere; telemetry already sent (only if you opted in) is not deleted by this. Step by step, with manual setup: [docs/install.md](docs/install.md).
 
 ## Other clients
 
@@ -70,7 +73,7 @@ The JSON clients take the same block:
 { "mcpServers": { "linksee": { "command": "npx", "args": ["-y", "linksee-memory"] } } }
 ```
 
-Full configs, including Codex's `config.toml`: [docs/install.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/install.md#other-editors--clis).
+Full configs, including Codex's `config.toml`: [docs/install.md](docs/install.md#other-editors--clis).
 
 ## Everyday use
 
@@ -82,7 +85,11 @@ Full configs, including Codex's `config.toml`: [docs/install.md](https://github.
 
 To make recall automatic, add **"Use Linksee Memory"** to your system prompt or `CLAUDE.md`.
 
-Record a decision and enforce it in one call: `remember({ content, anchor: {} })`. In Claude Code it is re-injected at session start and before any `Edit` / `Write` / `Bash` that touches it; mark it `hard` and a contradicting edit is blocked. The guard fails open: its own errors never block anything. Details: [docs/guard.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/guard.md).
+What each part does, and where:
+
+- **Shared (every client):** `remember` saves to the one SQLite file; `recall` searches it when the agent calls it.
+- **Re-injected (Claude Code only, hooks):** `remember({ content, anchor: {} })` also records the decision as an anchor. At session start the guard hook replays your recorded decisions; before an `Edit` / `Write` / `Bash` it brings back the ones whose `affects` paths or `detect_terms` match.
+- **Contradiction warned or blocked (Claude Code only):** the guard can only tell that an edit contradicts a decision if you give it the strings that mean "contradiction": `anchor: { violation_signal: ["pgvector"] }`. An empty `anchor: {}` is stored as a constraint and is re-injected, never matched as a contradiction. A match warns; after `resolve_drift(action: "harden")` it blocks. The guard fails open: its own errors never block anything. Details: [docs/guard.md](docs/guard.md).
 
 ## Tools: seven, six for memory and drift and one you ask for
 
@@ -93,7 +100,7 @@ an agent can hold without a manual.
 | Tool | What it does |
 |---|---|
 | `recall` | **Start here.** No arguments → the **session brief**: what needs attention, where you are on the Map, open loops, top entities. `query` → search; `path` → a file's edit history with the user intent behind each edit; `where: "<topic>"` → your position on the Current Truth Map + blast radius; `dream: true` → the triage session (North Star, orphaned proposals, distill queue, friction). |
-| `remember` | **Save / update / delete.** `content` is the only required field — entity and layer default to the project you're in. Add `anchor: {}` to record a decision **and** enforce it in one call (re-injected before Edit/Write/Bash and on session start). |
+| `remember` | **Save / update / delete.** `content` is the only required field — entity and layer default to the project you're in. Add `anchor: {}` to also record it as a decision (in Claude Code, re-injected on session start and before a matching Edit/Write/Bash); add `violation_signal` to it so a contradicting edit can be detected. |
 | `read_smart` | **Token-saving file reader** with AST diff caching. Re-read unchanged = ~50 tokens; modified = changed chunks only. |
 | `drift_status` | **"What's drifting right now?"** The truth map: 🔴 drift / 🟡 review / ⚪ held / 🔵 verified / ⚫ unverified, with the evidence for each. `anchor_id` → deep-dive into one decision. |
 | `declare_anchor` | **Record a normative claim** — `decision` / `prohibition` / `constraint` the detector checks against reality, or `proposal`: an option you presented that the user never addressed, parked as a review item. |
@@ -115,7 +122,7 @@ One more tool sits outside the memory/drift surface and does nothing unless the 
 | `npx -y linksee-memory setup` | One-command setup: MCP server + skill + Stop hook + the re-injection guard for every repo (`--project-guard` for this repo only, `--no-guard` to skip). Idempotent — skips what's already done. |
 | `npx linksee-memory` | MCP server (stdio) |
 | `npx -y linksee-memory sync` | Claude Code Stop-hook entry point |
-| `npx -y linksee-memory guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired by `setup` for every repo (see [Re-injection Guard](https://github.com/michielinksee/linksee-memory/blob/main/docs/guard.md)); fail-open. |
+| `npx -y linksee-memory guard` | Re-injection guard hook: `PreToolUse` gate (`Edit`/`Write`/`Bash`) + `SessionStart` boot digest. Wired by `setup` for every repo (see [Re-injection Guard](docs/guard.md)); fail-open. |
 | `npx -y linksee-memory import` | Batch-import Claude Code session JSONL history |
 | `npx -y linksee-memory install-skill` | Install the Claude Code Skill that teaches the agent when to call recall/remember/read_smart |
 | `npx -y linksee-memory stats` | Summary of the local DB (entity count / layer breakdown / top entities / top edited files). Add `--json` for machine-readable output. |
@@ -137,7 +144,7 @@ npx -y linksee-memory map explain readme    # why the node is in its state, with
 npx -y linksee-memory map affects readme    # what else a change here must move
 ```
 
-States, resolutions, the four species and the full map CLI: [docs/drift-and-map.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/drift-and-map.md).
+States, resolutions, the four species and the full map CLI: [docs/drift-and-map.md](docs/drift-and-map.md).
 
 ## Share a fix with other agents (optional)
 
@@ -175,27 +182,27 @@ SaaS・MCP・API の接続で詰まって直った（または直らなかった
 linksee-memory runs locally and is built to read — and send — as little as possible.
 
 - **Local-first.** Memory is one SQLite file at `~/.linksee-memory/memory.db`. No account, no cloud, no API key.
-- **Telemetry is opt-in and OFF by default.** `setup` asks once; nothing is sent unless you agree there (or set `LINKSEE_TELEMETRY=basic`). Even then it never sends your source code, file contents, prompts, conversation, entity/project names, or the memory DB — only anonymous counters ([details](https://github.com/michielinksee/linksee-memory/blob/main/docs/telemetry.md)).
+- **Telemetry is opt-in and OFF by default.** `setup` asks once; nothing is sent unless you agree there (or set `LINKSEE_TELEMETRY=basic`). Even then it never sends your source code, file contents, prompts, conversation, entity/project names, or the memory DB — only anonymous counters ([details](docs/telemetry.md)).
 - **No automatic repo crawling.** linksee reads: memory you explicitly save, your `map.yaml`, the specific files a map reality-check points at, the local SQLite DB, and — when the Stop hook fires — your Claude Code session transcript (locally, to capture what happened). It does **not** crawl your repo, read `.env`/secrets/`node_modules`, or touch your home directory on its own.
 - **`share_draft` makes a link only; Linksee itself never sends it.** The user opens it and decides ([details](#share-a-fix-with-other-agents-optional)).
 - **Clean MCP transport.** The server writes only JSON-RPC to stdout; all logs go to stderr.
-- **Hooks are documented and removable.** `setup` adds a Stop hook (session capture) and the guard hooks (skip them with `--no-guard`). They make no network calls by default, are time-bounded, fail-open (a hook error never breaks your session), and are listed under [Uninstall](https://github.com/michielinksee/linksee-memory/blob/main/docs/install.md#uninstall).
+- **Hooks are documented and removable.** `setup` adds a Stop hook (session capture) and the guard hooks (skip them with `--no-guard`). They send nothing unless you opted in to telemetry (then the Stop hook posts one set of counters per session). Hooks written in the `npx -y` form — the fallback when setup cannot write a direct `node` call — start npm, which checks the registry. They are time-bounded, fail-open (a hook error never breaks your session), and are listed under [Uninstall](docs/install.md#uninstall).
 - **No shell-injection surface.** Subcommands run via `spawn` with array args and `shell: false`, from a fixed allowlist; `map.yaml` is parsed with the safe `yaml` parser (no arbitrary tag execution).
 - **Supply chain.** MIT, published from a single owner. `npx -y linksee-memory` runs the published package — pin a version in CI if you need reproducibility.
 
 Found a security issue? See [SECURITY.md](./SECURITY.md).
 
-Every telemetry field, and what is never sent: [docs/telemetry.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/telemetry.md).
+Every telemetry field, and what is never sent: [docs/telemetry.md](docs/telemetry.md).
 
 ## Questions this answers
 
 These are the questions people actually type — measured, verbatim (2026-09-04). If yours is here, this is the answer.
 
 **Claude Code forgets everything when I start a new session. How do I make it remember decisions across sessions?**  
-Run `npx -y linksee-memory setup`. Every new session opens with `recall()` — a brief of what needs attention, where you are, what's unresolved — and your locked decisions are re-injected before the agent acts. Nothing to re-explain.
+Run `npx -y linksee-memory setup`. In Claude Code, each new session starts with a short digest of your recorded decisions and open items, injected by the SessionStart hook; the agent can call `recall()` (no arguments) for the full brief — what needs attention, where you are, what's unresolved. Decisions whose paths or terms an edit touches come back before that edit.
 
 **Claude Codeがセッションをまたぐと過去の経緯を忘れてしまいます。記憶を持たせる方法を教えてください。**  
-`npx -y linksee-memory setup` の一回で入ります。新しいセッションは `recall()` の brief（注意すべきこと・いまどこか・未解決）から始まり、固定した決定は行動の直前に再注入されます。説明し直す必要はありません。
+`npx -y linksee-memory setup` の一回で入ります。Claude Code では、新しいセッションの最初に SessionStart フックが記録済みの決定と未解決の要約を差し込みます。全体の brief（注意すべきこと・いまどこか・未解決）は、エージェントが `recall()` を引数なしで呼んだときに出ます。編集が決定の対象のパスや語に触れると、その編集の直前にも出ます。
 
 **What is the best MCP server for persistent memory across AI coding agents?**  
 Honest answer: if "remember across sessions" is all you need, a `CLAUDE.md` is enough — we measured it. Linksee is for the three moments it isn't: right before a mistake, when you change your mind, and when you run many projects and need to see which one drifted.
@@ -204,16 +211,16 @@ Honest answer: if "remember across sessions" is all you need, a `CLAUDE.md` is e
 正直に言うと、「セッションを跨いで覚える」だけなら `CLAUDE.md` で足ります（実測しました）。Linksee が要るのは、間違いかけたとき・方針を変えたとき・並行案件のどれが外れたかを知りたいとき、の3場面です。
 
 **I want one shared memory between Claude Code, Cursor, and OpenAI Codex. What tools exist for that?**  
-One SQLite file. Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write the same memory — a decision made in one shows up in the others.
+One SQLite file. Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write the same memory — a decision recorded in one can be recalled in the others. Only Claude Code brings it back automatically before an edit (hooks).
 
 **Claude CodeとCursorとCodexで同じ記憶を共有したいのですが、どうすればいいですか？**  
-SQLite ファイル1つを全員で読みます。Claude Code / Cursor / Windsurf / Codex / Gemini CLI のどこで決めた決定も、他のエージェントの行動の直前に出てきます。
+SQLite ファイル1つを全員で読み書きします。Claude Code / Cursor / Windsurf / Codex / Gemini CLI のどこで記録した決定も、他のクライアントから `recall` で引けます。行動の直前に自動で出るのは Claude Code だけです（フックのため）。
 
 **My AI agent keeps re-implementing things we already decided against. How can I detect that a codebase has drifted from past decisions?**  
-Declare the decision (`remember({ content, anchor: { violation_signal: [...] } })`). The guard then warns — or blocks, if you hardened it — the moment an edit contradicts it, and `drift_status` shows every decision that reality has quietly left.
+Declare the decision (`remember({ content, anchor: { violation_signal: [...] } })`). In Claude Code the guard then warns — or blocks, if you hardened it — the moment an edit contradicts it, and `drift_status` shows every decision that reality has quietly left.
 
 **過去に決めた設計方針とコードがずれていないかを検出できるツールはありますか？**  
-決定を宣言しておくと（`remember({ content, anchor: {...} })`）、それに反する編集の直前に警告（hardened なら拒否）が出ます。`drift_status` は「宣言と現実がずれた決定」を証拠つきで一覧します。
+決定を「反したと分かる語」つきで宣言しておくと（`remember({ content, anchor: { violation_signal: [...] } })`）、Claude Code ではそれに反する編集の直前に警告（hardened なら拒否）が出ます。`drift_status` は「宣言と現実がずれた決定」を証拠つきで一覧します。
 
 **Is there a local-first, self-hosted alternative to Mem0 for agent memory?**  
 Yes. No account, no API key, no cloud — one local file, MIT licensed. `npx -y linksee-memory setup` and it's on.
@@ -225,14 +232,14 @@ We installed them and ran one scenario across all of them. Storing and recalling
 Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are protected from forgetting and come back when the same ground is touched again — and if you anchor it, the guard stops the repeat before it lands.
 
 **開発の意思決定履歴をMCPサーバーで残しておく定番のやり方はありますか？**  
-`remember({ content, anchor: {} })` の1回で、記録と強制が同時に入ります。`drift_status` がその台帳で、各決定が いま守られているか（🔵）・ずれているか（🔴）・誰も確かめていないか（⚫）を示します。
+`remember({ content, anchor: {} })` の1回で、記録と決定の登録が同時に入ります（Claude Code では再注入も）。反する編集を止めるには `violation_signal` を足します。`drift_status` がその台帳で、各決定が いま守られているか（🔵）・ずれているか（🔴）・誰も確かめていないか（⚫）を示します。
 
 ## More
 
 - [docs/README.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/README.md) — index of the pages moved out of this README
-- [Troubleshooting and FAQ](https://github.com/michielinksee/linksee-memory/blob/main/docs/troubleshooting.md) — skill not firing, Stop hook not recording, recall too long, resetting, DB size
-- [How the memory is built](https://github.com/michielinksee/linksee-memory/blob/main/docs/memory.md) — the six layers, `read_smart` token savings, SQLite layout, comparison with Mem0 / Letta / Zep and Claude Code auto-memory
-- [History](https://github.com/michielinksee/linksee-memory/blob/main/docs/history.md) — release highlights, roadmap, articles about the project
+- [Troubleshooting and FAQ](docs/troubleshooting.md) — skill not firing, Stop hook not recording, recall too long, resetting, DB size
+- [How the memory is built](docs/memory.md) — the six layers, `read_smart` token savings, SQLite layout, comparison with Mem0 / Letta / Zep and Claude Code auto-memory
+- [History](docs/history.md) — release highlights, roadmap, articles about the project
 - [CHANGELOG.md](./CHANGELOG.md) — every release · [GitHub Releases](https://github.com/michielinksee/linksee-memory/releases)
 
 ## Support and license
@@ -240,3 +247,9 @@ Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are pr
 - Issues: [github.com/michielinksee/linksee-memory/issues](https://github.com/michielinksee/linksee-memory/issues) (feature requests: the `enhancement` label)
 - Security: [SECURITY.md](./SECURITY.md), or a private advisory on GitHub
 - MIT — Synapse Arrows PTE. LTD. (Singapore)
+
+<!-- Old section links, kept so deep links still land somewhere. -->
+<a id="the-map"></a>The Map moved to [docs/drift-and-map.md](docs/drift-and-map.md).
+<a id="reinjection-guard"></a>Re-injection Guard moved to [docs/guard.md](docs/guard.md).
+<a id="uninstall"></a>Uninstall moved to [docs/install.md](docs/install.md#uninstall).
+<a id="telemetry-opt-in-off-by-default"></a>Telemetry moved to [docs/telemetry.md](docs/telemetry.md).

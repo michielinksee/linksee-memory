@@ -28,7 +28,7 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
    ```bash
    echo '{"session_id":"test","transcript_path":"/path/to/some.jsonl"}' | npx -y linksee-memory sync
    ```
-3. Make sure the `Stop` hook in `~/.claude/settings.json` points to `npx -y linksee-memory sync` (not the old `-import`).
+3. Make sure `~/.claude/settings.json` has a `Stop` hook for linksee. Since 0.17.1 setup writes a direct call ending in `dist/bin/sync-session.js" --linksee-managed`; older installs, and paths that cannot be quoted safely, use `npx -y linksee-memory sync`. Either is fine; the old `-import` form is not. If you upgraded Node to a new major version, re-run `npx -y linksee-memory setup`.
 </details>
 
 <details>
@@ -40,7 +40,7 @@ v0.0.6+ fixed the entity detection bug that collapsed all memories into the sess
 npx -y linksee-memory import --all
 ```
 
-The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
+This needs a database at schema 6 or later: a schema 1–5 file is refused without being changed (a migration command is planned for 0.17.2), so back up `~/.linksee-memory/` and wait for it. The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
 </details>
 
 <details>
@@ -90,7 +90,7 @@ You don't need to use drift detection to benefit from linksee-memory — the 3 m
 Three axes:
 1. **Local-first**: those tools require cloud accounts and send your data to their servers. linksee-memory runs entirely on your machine — one SQLite file, no network calls by default.
 2. **WHY-layered**: they store flat facts or knowledge-graph nodes. linksee-memory has 6 explicit layers (`goal`/`context`/`emotion`/`implementation`/`caveat`/`learning`) so retrieval returns structured reasoning, not just data.
-3. **File diff cache**: `read_smart` tool saves 86–99% of tokens on file re-reads via AST-aware chunking. None of the memory services do this — it's a feature usually shipped in IDEs.
+3. **File diff cache**: `read_smart` returns only what changed on a re-read (AST-aware chunking), so re-reads cost far fewer tokens. None of the memory services do this — it's a feature usually shipped in IDEs.
 </details>
 
 <details>
@@ -103,14 +103,14 @@ Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor, 
 </details>
 
 <details>
-<summary><strong>Is 86% token savings real? Where does it come from?</strong></summary>
+<summary><strong>How much does <code>read_smart</code> save, and where does it come from?</strong></summary>
 
-Yes — see `tools/bench-read-smart.ts` in the repo. The `read_smart` tool:
+The check in the repo is `test/smoke-read-smart.mjs`: it builds a 300-line TypeScript file with 10 functions, changes one, and requires at least 60% saved on the re-read (it prints the measured figure). The `read_smart` tool:
 1. Hashes file content on first read, returns full content + chunk metadata (AST/heading/indent boundaries).
 2. On re-read with unchanged mtime+sha256, returns `~50 tokens` of "unchanged" confirmation instead of re-sending the file.
 3. On real edits, returns only the changed chunks as full content + unchanged chunks as metadata-only references.
 
-For a typical TypeScript file edit in an agentic loop, this cuts round-trip token costs by ~86%. On pure re-reads (user navigating back to a previously-read file), savings exceed 99%.
+How much you save depends on the file and how much of it changed; an unchanged re-read returns about 50 tokens instead of the file.
 </details>
 
 <details>

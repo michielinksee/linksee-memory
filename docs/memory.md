@@ -13,7 +13,7 @@ It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and
 | **Drift detection** | ❌ | ❌ | ✅ intent ↔ reality divergence tracking |
 | Cross-agent | △ (cloud) | ❌ Claude only | ✅ single SQLite file |
 | 6-layer WHY structure | ❌ flat | ❌ flat markdown | ✅ goal / context / emotion / impl / caveat / learning |
-| File diff cache | ❌ | ❌ | ✅ AST-aware, 50-99% token savings on re-reads |
+| File diff cache | ❌ | ❌ | ✅ AST-aware, re-reads return only what changed |
 | Active forgetting | △ | ❌ | ✅ Ebbinghaus curve, caveat layer protected |
 | Local-first / private | ❌ | ✅ | ✅ |
 
@@ -22,7 +22,7 @@ It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and
 1. **Drift detection** — declare decisions as anchors, then the engine automatically detects when committed reality diverges from stated intent. Think "Datadog for product decisions" — unaccounted divergences surface as drift, intentional evolution (recorded as supersede/fix) stays quiet.
 2. **Cross-agent portability** — single SQLite file at `~/.linksee-memory/memory.db`. Same brain for Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI.
 3. **WHY-first structured memory** — six explicit layers (`goal` / `context` / `emotion` / `implementation` / `caveat` / `learning`). Solves "flat fact memory is useless without goals".
-4. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. **Measured 86% saved on a typical TS file edit, 99% saved on unchanged re-reads.**
+4. **Token savings** via `read_smart` — sha256 + AST/heading/indent chunking. Re-reads return only diffs. An unchanged re-read returns about 50 tokens; `test/smoke-read-smart.mjs` requires at least 60% saved when 1 of 10 functions changes.
 
 ## 🧠 The 6-layer structure
 

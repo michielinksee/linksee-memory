@@ -82,3 +82,13 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 - 🔮 Vector search via `sqlite-vec` (already in deps, embedding backend pending)
 - 🔮 Cross-device cloud sync (Pro tier)
 
+## Tool count over time
+
+| Version | Tools listed | Note |
+|---|---|---|
+| 0.1 – 0.6 | 8 | first public release |
+| 0.7.0 | 3 | `remember`, `recall`, `read_smart` |
+| 0.8.0 | 7 | four drift tools added |
+| 0.11.0 – 0.14.x | 11 | `where_am_i` was the 11th |
+| 0.15.0 | 6 | three for memory, three for drift; the five older names still answer but are hidden |
+| 0.17.0 – | 7 | `share_draft` added, used only when the user asks |

@@ -5,18 +5,27 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 
 linksee-memory ships with **opt-in** anonymous telemetry that helps us understand which MCP servers and workflows actually work in the wild. **Nothing is sent unless you explicitly enable it.** No conversation content, no file content, no entity names, no project paths — ever.
 
-### Enable
+### Turn it on or off
+
+The mode is decided in this order (`src/lib/telemetry.ts`, `getTelemetryMode`):
+
+1. `LINKSEE_TELEMETRY`, if it is set to anything. `basic` / `on` / `1` / `true` turn it on; any other value (`off`, `0`, `false`, …) turns it off.
+2. Otherwise, the answer you gave `setup`, saved in `~/.linksee-memory/telemetry-consent`. `basic` or `on` there means on.
+3. Otherwise, off.
+
+Unsetting the variable does **not** stop telemetry if you said yes during setup: the saved answer applies again. To stop it, either set `LINKSEE_TELEMETRY=off` explicitly, or change the saved answer:
 
 ```bash
-export LINKSEE_TELEMETRY=basic     # opt in
-export LINKSEE_TELEMETRY=off       # opt out (or just unset the variable)
-# `linksee-memory setup` also asks once and records your choice in
-# ~/.linksee-memory/telemetry-consent (delete that file to be asked again).
+echo off > ~/.linksee-memory/telemetry-consent   # stop, and keep the answer
+rm ~/.linksee-memory/telemetry-consent           # stop; setup asks again next time
+export LINKSEE_TELEMETRY=basic                   # turn on without setup
 ```
+
+Data already sent is not removed by any of these, nor by deleting `~/.linksee-memory`.
 
 ### Exactly what gets sent (Level 1 contract)
 
-After each Claude Code session ends, the Stop hook sends one POST to `https://linksee-site.vercel.app/api/telemetry/linksee` containing only these fields:
+After each Claude Code session ends, the Stop hook sends one POST to `https://linksee-site.vercel.app/api/telemetry/linksee` with exactly these fields (built in `buildPayload`, `src/lib/telemetry.ts`):
 
 | Field | Example | What it is |
 |---|---|---|
@@ -24,10 +33,13 @@ After each Claude Code session ends, the Stop hook sends one POST to `https://li
 | `linksee_version` | `0.0.3` | Package version |
 | `session_turn_count` | `120` | How many turns the session had |
 | `session_duration_sec` | `3600` | How long the session lasted |
-| `file_ops_edit/write/read` | `12, 2, 40` | Counts only |
+| `file_ops_edit`, `file_ops_write`, `file_ops_read` | `12, 2, 40` | Counts only |
+| `errors_count` | `0` | Always 0 for now (not yet measured) |
 | `mcp_servers` | `["kansei-link","freee","slack"]` | Names of MCP servers configured (from `~/.claude.json`). Names only — never command paths. |
 | `file_extensions` | `{".ts":60,".md":30}` | Percent distribution of file extensions touched |
-| `read_smart_*`, `recall_*` | counts | Tool usage counters |
+| `read_smart_savings_pct`, `read_smart_calls`, `recall_calls`, `recall_file_calls` | `null, 0, 0, 0` | Tool usage counters. Not wired yet: currently always `null` / `0` |
+| `anchor_creates` | `1` | How many decisions (anchors) were recorded during the session's edit span — a count, no text |
+| `anchor_returns` | `3` | How many times an earlier decision came back in that span (looked up, or re-injected by the guard) — a count, no text |
 
 **What is NEVER sent**:
 - ❌ Conversation messages (user or assistant)
