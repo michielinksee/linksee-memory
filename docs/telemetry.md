@@ -9,11 +9,11 @@ linksee-memory ships with **opt-in** anonymous telemetry that helps us understan
 
 The mode is decided in this order (`src/lib/telemetry.ts`, `getTelemetryMode`):
 
-1. `LINKSEE_TELEMETRY`, if it is set to anything. `basic` / `on` / `1` / `true` turn it on; any other value (`off`, `0`, `false`, …) turns it off.
+1. `LINKSEE_TELEMETRY`, after trimming spaces and lower-casing. `basic` / `on` / `1` / `true` turn it on; any other non-empty value (`off`, `0`, `false`, …) turns it off. Unset, empty, or only spaces counts as not set and moves on to step 2.
 2. Otherwise, the answer you gave `setup`, saved in `~/.linksee-memory/telemetry-consent`. `basic` or `on` there means on.
 3. Otherwise, off.
 
-Unsetting the variable does **not** stop telemetry if you said yes during setup: the saved answer applies again. To stop it, either set `LINKSEE_TELEMETRY=off` explicitly, or change the saved answer:
+Unsetting the variable does **not** stop telemetry if you said yes during setup: the saved answer applies again. To stop it, either set `LINKSEE_TELEMETRY=off` explicitly, or change the saved answer. Changing the saved answer works only while `LINKSEE_TELEMETRY` is unset (or empty), because a value of `basic` there wins over the file:
 
 ```bash
 echo off > ~/.linksee-memory/telemetry-consent   # stop, and keep the answer
@@ -35,11 +35,11 @@ After each Claude Code session ends, the Stop hook sends one POST to `https://li
 | `session_duration_sec` | `3600` | How long the session lasted |
 | `file_ops_edit`, `file_ops_write`, `file_ops_read` | `12, 2, 40` | Counts only |
 | `errors_count` | `0` | Always 0 for now (not yet measured) |
-| `mcp_servers` | `["kansei-link","freee","slack"]` | Names of MCP servers configured (from `~/.claude.json`). Names only — never command paths. |
+| `mcp_servers` | `["kansei-link","freee","slack"]` | Names of MCP servers configured (from `~/.claude.json` and `~/.claude/settings.json`, at most 50). Names only — never command paths. |
 | `file_extensions` | `{".ts":60,".md":30}` | Percent distribution of file extensions touched |
 | `read_smart_savings_pct`, `read_smart_calls`, `recall_calls`, `recall_file_calls` | `null, 0, 0, 0` | Tool usage counters. Not wired yet: currently always `null` / `0` |
 | `anchor_creates` | `1` | How many decisions (anchors) were recorded during the session's edit span — a count, no text |
-| `anchor_returns` | `3` | How many times an earlier decision came back in that span (looked up, or re-injected by the guard) — a count, no text |
+| `anchor_returns` | `3` | In the session's edit span: the number of guard re-injections plus anchor interactions other than creation. It does not check whether the anchor was made in an earlier session. A count, no text |
 
 **What is NEVER sent**:
 - ❌ Conversation messages (user or assistant)

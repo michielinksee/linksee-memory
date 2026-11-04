@@ -145,7 +145,7 @@ Yes — any MCP-compatible client works:
 <details>
 <summary><strong>What telemetry does it send?</strong></summary>
 
-**By default: zero network calls, zero telemetry.** There is an optional Level-1 mode: after a Claude Code session ends, the Stop hook sends anonymous counters (session length, edit/read counts, tool-usage counters, the names of configured MCP servers) — never memory content, file contents, paths or queries. The full field list is in [telemetry.md](telemetry.md).
+**By default: no telemetry, and Linksee never sends memory text.** npm itself still talks to the registry: `npx` fetching the package, the one `npm install` setup runs for the hook runtime, and hooks left in the `npx -y` form checking the registry on each call. Deleting `~/.linksee-memory/` does not delete telemetry already sent. There is an optional Level-1 mode: after a Claude Code session ends, the Stop hook sends anonymous counters (session length, edit/read counts, tool-usage counters, the names of configured MCP servers) — never memory content, file contents, paths or queries. The full field list is in [telemetry.md](telemetry.md).
 </details>
 
 <details>

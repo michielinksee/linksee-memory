@@ -37,7 +37,7 @@ Add **"Use Linksee"** to any prompt to force a recall.
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (shown with its size; this downloads from the npm registry), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup ran from a temporary location (`npx`, `pnpm dlx`, `bunx`, or the system temp directory): setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (shown with its size; this downloads from the npm registry), because the hooks call `node` on it directly and those locations are temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
 Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the hooks print one line saying so and let the action through).
@@ -203,8 +203,8 @@ claude mcp remove linksee
 
 # 3. Remove the installed skill and all local memory (optional)
 rm -rf ~/.claude/skills/linksee-memory
-rm -rf ~/.linksee-memory   # deletes all stored memory — nothing is kept anywhere else
+rm -rf ~/.linksee-memory   # deletes the memory stored in this folder
 ```
 
-Memory text never leaves your machine, so step 3 erases every copy of it. If you opted in to telemetry, the counters already sent are not deleted by this. While installed, the only other traffic is npm itself: `npx` fetching the package, the one `npm install` setup runs for the hook runtime, and hooks left in the `npx -y` form checking the registry on each call.
+Step 3 deletes what is inside `~/.linksee-memory/`. It does not reach copies you made yourself, and if you opted in to telemetry, the counters already sent are not deleted by this. Linksee itself never sends memory text anywhere. While installed, the only other traffic is npm itself: `npx` fetching the package, the one `npm install` setup runs for the hook runtime, and hooks left in the `npx -y` form checking the registry on each call.
 

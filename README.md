@@ -50,10 +50,10 @@ Docs: [docs.linksee.app](https://docs.linksee.app) · Site: [linksee.app](https:
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (shown with its size; this downloads from the npm registry), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup ran from a temporary location (`npx`, `pnpm dlx`, `bunx`, or the system temp directory): setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (shown with its size; this downloads from the npm registry), because the hooks call `node` on it directly and those locations are temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
-To remove everything: `claude mcp remove linksee`, delete the linksee hooks from `settings.json` (or copy the `.bak` back), then `rm -rf ~/.claude/skills/linksee-memory ~/.linksee-memory` — the last one deletes all stored memory. Memory text is never sent anywhere, so no copy of it exists elsewhere; telemetry already sent (only if you opted in) is not deleted by this. Step by step, with manual setup: [docs/install.md](docs/install.md).
+To remove everything: `claude mcp remove linksee`, delete the linksee hooks from `settings.json` (or copy the `.bak` back), then `rm -rf ~/.claude/skills/linksee-memory ~/.linksee-memory` — the last one deletes the memory stored in that folder. It does not reach copies you made yourself (for example to hand the memory over) or telemetry already sent if you opted in. Linksee itself never sends memory text anywhere. Step by step, with manual setup: [docs/install.md](docs/install.md).
 
 ## Other clients
 
@@ -83,12 +83,12 @@ Full configs, including Codex's `config.toml`: [docs/install.md](docs/install.md
 | **"linksee this"** | Saves the decision or lesson now |
 | **"what's drifting?"** | Checks reality against the decisions you recorded |
 
-To make recall automatic, add **"Use Linksee Memory"** to your system prompt or `CLAUDE.md`.
+Adding **"Use Linksee Memory"** to your system prompt or `CLAUDE.md` prompts the agent to call `recall` more often; whether it does is still up to the agent.
 
 What each part does, and where:
 
 - **Shared (every client):** `remember` saves to the one SQLite file; `recall` searches it when the agent calls it.
-- **Re-injected (Claude Code only, hooks):** `remember({ content, anchor: {} })` also records the decision as an anchor. At session start the guard hook replays your recorded decisions; before an `Edit` / `Write` / `Bash` it brings back the ones whose `affects` paths or `detect_terms` match.
+- **Re-injected (Claude Code only, hooks):** `remember({ content, anchor: {} })` also records the decision as an anchor. At session start the guard hook adds a short digest of recorded decisions (up to 8). Before an `Edit` / `Write` / `Bash`, a decision comes back only if it matches: with `affects` globs, the edited path must match (a `Bash` command that names no file can still match on a `violation_signal`); without `affects`, a `detect_terms` or `violation_signal` hit is needed. An empty `anchor: {}` has none of these, so it appears only in the session-start digest, never before an edit.
 - **Contradiction warned or blocked (Claude Code only):** the guard can only tell that an edit contradicts a decision if you give it the strings that mean "contradiction": `anchor: { violation_signal: ["pgvector"] }`. An empty `anchor: {}` is stored as a constraint and is re-injected, never matched as a contradiction. A match warns; after `resolve_drift(action: "harden")` it blocks. The guard fails open: its own errors never block anything. Details: [docs/guard.md](docs/guard.md).
 
 ## Tools: seven, six for memory and drift and one you ask for
@@ -229,14 +229,14 @@ Yes. No account, no API key, no cloud — one local file, MIT licensed. `npx -y 
 We installed them and ran one scenario across all of them. Storing and recalling a decision: everyone passes. The difference appears *before a mistake* and *when you change your mind* — Linksee is built for those two moments; the others leave them to you.
 
 **How do I stop Claude Code from repeating the same mistake it made last week?**  
-Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are protected from forgetting and come back when the same ground is touched again — and if you anchor it, the guard stops the repeat before it lands.
+Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are protected from forgetting and come back when `recall` touches the same ground again. To have Claude Code stop the repeat before it lands, record it as an anchor with a `violation_signal`, then harden it (`resolve_drift(action: "harden")`); without hardening, a match only warns.
 
 **開発の意思決定履歴をMCPサーバーで残しておく定番のやり方はありますか？**  
-`remember({ content, anchor: {} })` の1回で、記録と決定の登録が同時に入ります（Claude Code では再注入も）。反する編集を止めるには `violation_signal` を足します。`drift_status` がその台帳で、各決定が いま守られているか（🔵）・ずれているか（🔴）・誰も確かめていないか（⚫）を示します。
+`remember({ content, anchor: {} })` の1回で、記録と決定の登録が同時に入ります（Claude Code では再注入も）。反する編集で警告を出すには `violation_signal` を足し、拒否まで行うにはさらに `resolve_drift(action: "harden")` で hard にします。`drift_status` がその台帳で、各決定が いま守られているか（🔵）・ずれているか（🔴）・誰も確かめていないか（⚫）を示します。
 
 ## More
 
-- [docs/README.md](https://github.com/michielinksee/linksee-memory/blob/main/docs/README.md) — index of the pages moved out of this README
+- [docs/README.md](docs/README.md) — index of the pages moved out of this README
 - [Troubleshooting and FAQ](docs/troubleshooting.md) — skill not firing, Stop hook not recording, recall too long, resetting, DB size
 - [How the memory is built](docs/memory.md) — the six layers, `read_smart` token savings, SQLite layout, comparison with Mem0 / Letta / Zep and Claude Code auto-memory
 - [History](docs/history.md) — release highlights, roadmap, articles about the project
@@ -253,3 +253,8 @@ Record it as a caveat (`remember({ content, layer: 'caveat' })`). Caveats are pr
 <a id="reinjection-guard"></a>Re-injection Guard moved to [docs/guard.md](docs/guard.md).
 <a id="uninstall"></a>Uninstall moved to [docs/install.md](docs/install.md#uninstall).
 <a id="telemetry-opt-in-off-by-default"></a>Telemetry moved to [docs/telemetry.md](docs/telemetry.md).
+<a id="other-editors--clis"></a>Other editors / CLIs moved to [docs/install.md](docs/install.md#other-editors--clis).
+<a id="database-location"></a>Database location moved to [docs/install.md](docs/install.md#database-location).
+<a id="architecture"></a>Architecture moved to [docs/memory.md](docs/memory.md#architecture).
+<a id="troubleshooting"></a>Troubleshooting moved to [docs/troubleshooting.md](docs/troubleshooting.md#troubleshooting).
+<a id="faq"></a>FAQ moved to [docs/troubleshooting.md](docs/troubleshooting.md#faq).
