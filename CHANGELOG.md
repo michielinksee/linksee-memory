@@ -11,7 +11,8 @@ No new MCP tools (still 7). Two CLI subcommands, both run by hand.
   the server. **Every client must be closed for the whole run:** nothing here is a lock, a WAL-mode
   file is never probed for writers, and an idle client on it is detected only on Windows (the final
   rename is refused). What it does:
-  - checks free space for 3 × (memory.db + sidecars); if it cannot check, it stops;
+  - checks free space for 3 × (memory.db + sidecars); if it cannot check, it stops. 3 × is a floor,
+    not a bound: WAL / journal growth during the migration comes on top;
   - copies `memory.db` (+ `-wal`, `-journal`) byte for byte into `memory.db.migrating-<time>-<pid>/`
     and stops if the live files' size or mtime change meanwhile;
   - lets SQLite recover the copy (hot journal rolled back / WAL read, in the copy), requires
@@ -25,10 +26,13 @@ No new MCP tools (still 7). Two CLI subcommands, both run by hand.
     writer (it writes nothing), it renames `memory.db` and its sidecars into
     `memory.db.pre-migrate-<time>/` (the original set, byte for byte, with a `README.txt` on how to
     go back) and renames the replica into place. If a rename fails it tries to put back what was
-    already moved and names anything it could not;
-  - removes the work folder, and says so if it cannot.
-  To go back: move the current `memory.db` and all its sidecars aside together, then move the whole
-  backup set back — never mix a database and sidecars from different sets. `--dry` rehearses in a
+    already moved. If something could not be put back, it prints (and writes to `README.txt`) where
+    each original file is now and the exact `move <from> → <to>` lines that reunite the set;
+  - removes the work folder, and says so if it cannot. If the process itself is killed or crashes,
+    `memory.db.migrating-<time>-<pid>/` can be left behind; it holds copies only and can be deleted.
+  To go back after a successful run: move the current `memory.db` and all its sidecars aside
+  together, then move the whole backup set back — never mix a database and sidecars from different
+  sets. (After a failed swap, follow the printed moves instead.) `--dry` rehearses in a
   temporary folder and swaps nothing. Schema 6 and newer: "not needed" (a schema 6+ file with a hot
   journal is recovered the same way, since 0.17.1 refuses it). It never consolidates or merges
   duplicate entities (0.11's v5 merge deleted rows; they are kept). The server's refusal messages

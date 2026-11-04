@@ -11,7 +11,7 @@
 //
 // Run: node test/legacy-migrate.mjs   (needs `pnpm build`; throwaway dirs, temp HOME)
 
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, statSync, writeFileSync, copyFileSync, openSync, closeSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync, statSync, writeFileSync, renameSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -170,21 +170,45 @@ for (const [label, mk] of Object.entries(injections)) {
   check('write lock held: version still 5 after the holder let go', versionOf(file) === '5');
 }
 
-// 3b. a rename in the swap fails (explicit injection): put back, or name what could not be put back
+// 3b. a rename in the swap fails (explicit injection). The guidance is generated from where the
+//     files really are; following it must restore the original set byte for byte.
 {
-  // 'wal' state: renames are memory.db, -wal, -shm, then the replica. #3 (-shm) fails.
+  // 'wal' state: renames are memory.db, -wal, -shm, then the replica. #3 (-shm) fails, all put back.
   const { dir, file } = make('wal');
   const listBefore = filesOf(dir).join(','); const shaBefore = liveSha(dir);
   const r = cli(['migrate', '--db', file], { LINKSEE_TEST_FAIL_RENAME: '3' });
-  check('swap rename fails → exit 1, names what it moved back', r.status === 1 && /Moved back: memory\.db, memory\.db-wal/.test(r.stdout), r.stdout + r.stderr);
+  check('swap rename fails → exit 1, every original moved back', r.status === 1 && /Every original file was moved back: memory\.db, memory\.db-wal, memory\.db-shm/.test(r.stdout), r.stdout + r.stderr);
   untouched('swap rename fails, all put back', dir, shaBefore, listBefore);
-
-  // #3 fails and the put-back of memory.db (#5, after -wal #4) fails too
-  const r2 = cli(['migrate', '--db', file], { LINKSEE_TEST_FAIL_RENAME: '3,5' });
-  const bk = filesOf(dir).find((f) => /pre-migrate/.test(f));
-  check('put-back fails → exit 1, names memory.db as not moved back, gives the one-set restore steps',
-    r2.status === 1 && /could NOT move back: memory\.db\b/.test(r2.stdout) && /no complete database/.test(r2.stdout) && /Never combine/.test(r2.stdout), r2.stdout + r2.stderr);
-  check('put-back fails → memory.db is in the backup folder with its original bytes', !!bk && existsSync(join(dir, bk, 'memory.db')) && sha(join(dir, bk, 'memory.db')) === JSON.parse(shaBefore)['memory.db'], filesOf(dir).join(','));
+}
+/** Run the "move A → B" lines the command printed, exactly, and nothing else. */
+const followMoves = (stdout) => {
+  const moves = [...stdout.matchAll(/^\s*move (.+) → (.+)$/gm)].map((m) => [m[1].trim(), m[2].trim()]);
+  for (const [a, b] of moves) renameSync(a, b);
+  return moves;
+};
+const SPLIT = {
+  // [state, injected renames] — originals split between the live folder and pre-migrate/
+  wal: '3,5',          // -shm fails; put-back: -wal ok (#4), memory.db fails (#5) → memory.db stuck
+};
+for (const state of STATES) {
+  const { dir, file } = make(state);
+  const n = filesOf(dir).filter((f) => LIVE.test(f)).length;
+  // generic split: the replica rename (#n+1) fails and the first put-back (#n+2, the last file moved)
+  // fails too; for 'wal' also the case above where memory.db itself stays behind
+  const specs = state === 'wal' ? [SPLIT.wal, `${n + 1},${n + 2}`] : [`${n + 1},${n + 2}`];
+  for (const spec of specs) {
+    const { dir: d, file: f } = spec === specs[0] ? { dir, file } : make(state);
+    const shaBefore = liveSha(d);
+    const r = cli(['migrate', '--db', f], { LINKSEE_TEST_FAIL_RENAME: spec });
+    const bk = filesOf(d).find((x) => /pre-migrate/.test(x));
+    const readme = bk && existsSync(join(d, bk, 'README.txt')) ? readFileSync(join(d, bk, 'README.txt'), 'utf8') : '';
+    check(`[${state} ${spec}] split → exit 1, says FAILED, lists where each original is`, r.status === 1 && /This migration FAILED during the swap/.test(r.stdout) && /in place/.test(r.stdout) && /move .+ → /.test(r.stdout), r.stdout + r.stderr);
+    check(`[${state} ${spec}] split → no one-set "move the CURRENT set aside" advice`, !/Move the CURRENT/.test(r.stdout) && !/Move the CURRENT/.test(readme), r.stdout);
+    check(`[${state} ${spec}] split → README.txt in the backup folder has the same moves`, /This migration FAILED/.test(readme) && /move .+ → /.test(readme), readme.slice(0, 300));
+    const moves = followMoves(r.stdout);
+    check(`[${state} ${spec}] following the printed moves (${moves.length}) restores memory.db + every sidecar byte for byte`, moves.length > 0 && liveSha(d) === shaBefore, `${filesOf(d).join(',')}`);
+    check(`[${state} ${spec}] after that, migrate works on the restored set`, cli(['migrate', '--db', f]).status === 0 && versionOf(f) === TARGET);
+  }
 }
 
 // 3c. same second, run twice (Date fixed): the second run is "not needed"; and a backup folder
@@ -233,6 +257,9 @@ for (const [label, mk] of Object.entries(injections)) {
   untouched('schema 7', dir, shaBefore, listBefore);
   const none = cli(['migrate', '--db', join(dir, 'nope.db')]);
   check('no file: exit 0, nothing created', none.status === 0 && !existsSync(join(dir, 'nope.db')), none.stdout);
+  mkdirSync(join(dir, 'gone.db.pre-migrate-20261104T000000Z'));
+  const half = cli(['migrate', '--db', join(dir, 'gone.db')]);
+  check('no file but a backup folder (a run stopped half-way): exit 1, points at the folder', half.status === 1 && /stopped half-way/.test(half.stdout) && /gone\.db\.pre-migrate-/.test(half.stdout), half.stdout);
 }
 
 // 6. runtime prune

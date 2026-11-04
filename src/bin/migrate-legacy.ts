@@ -35,7 +35,7 @@
 import Database from 'better-sqlite3';
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync,
-  rmSync, rmdirSync, statSync, statfsSync, writeFileSync, constants as fsc,
+  readdirSync, rmdirSync, statSync, statfsSync, writeFileSync, constants as fsc,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -134,15 +134,20 @@ function isWalFile(path: string): boolean {
 export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
   const log = o.log ?? ((l: string) => console.log(l));
   const ctx: { work?: string } = {};
-  const r = migrateInner(o, log, ctx);
-  if (ctx.work && existsSync(ctx.work)) {
-    // The work folder goes in every case (after a swap only the raw copies are left in it).
-    try { rmGuarded(ctx.work, { recursive: true, force: true }); } catch (e) {
-      log(`Could not remove the work folder ${ctx.work} (${(e as Error)?.message ?? e}); delete it by hand. It holds copies only.`);
+  let r: MigrateLegacyResult | undefined;
+  try {
+    r = migrateInner(o, log, ctx);
+    return r;
+  } finally {
+    // The work folder goes in every case, also when migrateInner threw (after a swap only the raw
+    // copies are left in it). If it cannot be removed, say so.
+    if (ctx.work && existsSync(ctx.work)) {
+      try { rmGuarded(ctx.work, { recursive: true, force: true }); } catch (e) {
+        log(`Could not remove the work folder ${ctx.work} (${(e as Error)?.message ?? e}); delete it by hand. It holds copies only.`);
+      }
+      if (existsSync(ctx.work) && r) r.workLeft = ctx.work;
     }
-    if (existsSync(ctx.work)) r.workLeft = ctx.work;
   }
-  return r;
 }
 
 function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { work?: string }): MigrateLegacyResult {
@@ -152,6 +157,13 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
   const step = (s: string, db: Database.Database) => o.onStep?.(s, db);
 
   if (!existsSync(path)) {
+    // A run killed during the swap can leave memory.db inside a backup folder: say so, do not say "nothing".
+    let left: string[] = [];
+    try { left = readdirSync(dirname(path)).filter((f) => f.startsWith(`${name}.pre-migrate-`)); } catch { /* none visible */ }
+    if (left.length) {
+      log(`No ${name} at ${path}, but ${left.map((f) => join(dirname(path), f)).join(', ')} exists — an earlier migrate may have stopped half-way. Read README.txt there (if any) and check which original files are in it before doing anything else.`);
+      return { code: 1, outcome: 'refused' };
+    }
     log(`No memory.db at ${path} — nothing to migrate.`);
     return { code: 0, outcome: 'missing' };
   }
@@ -319,51 +331,57 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
         return { code: 1, outcome: 'refused', from };
       }
     }
+    // The swap. Where every original file is, is tracked file by file, so a failure can say exactly
+    // what to move where (Codex third review of #19: a fixed "move the current set aside, restore
+    // the backup set" text would split a set that is half here, half there).
     const readme = join(backupDir, 'README.txt');
+    const originals = ['', ...SIDECARS].filter((ext) => existsSync(path + ext)).map((ext) => name + ext);
+    const where: Record<string, 'live' | 'backup'> = Object.fromEntries(originals.map((f) => [f, 'live']));
     let created = false; // only a folder this run created may be removed again
     try {
       mkdirSync(backupDir);
       created = true;
-      writeFileSync(readme, [
-        `linksee-memory migrate (${stamp}) moved the original files here, unchanged, as one set:`,
-        `  ${['', ...SIDECARS].filter((ext) => existsSync(path + ext)).map((ext) => name + ext).join(', ')} (from ${dirname(path)})`,
-        `They were at schema ${from}; the migrated database (schema ${from < MIN_SUPPORTED_SCHEMA ? target : from}) took their place.`,
-        '',
-        ...restoreSteps(path, backupDir),
-        '',
-      ].join('\n'));
     } catch (e) {
-      if (created) { try { rmSync(backupDir, { recursive: true, force: true }); } catch { /* left empty or with README.txt */ } }
       log(`Could not create ${backupDir} (${(e as { code?: string })?.code ?? (e as Error)?.message}); run again in a second. Not swapped; ${liveNote()}`);
       return { code: 1, outcome: 'refused', from };
     }
-    const done: string[] = [];
-    const putBack = () => {
-      const stuck: string[] = [];
-      for (const ext of done.slice().reverse()) {
-        try { renameGuarded(join(backupDir, name + ext), path + ext); } catch { stuck.push(name + ext); }
+    const writeReadme = (lines: string[]) => {
+      try { writeFileSync(readme, lines.join('\n') + '\n'); return true; } catch (e) {
+        log(`  (could not write ${readme}: ${(e as Error)?.message ?? e})`);
+        return false;
       }
-      if (stuck.length === 0) { try { rmSync(readme, { force: true }); rmdirSync(backupDir); } catch { /* leave the folder */ } }
-      return stuck;
     };
     try {
-      for (const ext of ['', ...SIDECARS]) {
-        if (!existsSync(path + ext)) continue;
-        renameGuarded(path + ext, join(backupDir, name + ext));
-        done.push(ext);
+      for (const f of originals) {
+        renameGuarded(join(dirname(path), f), join(backupDir, f));
+        where[f] = 'backup';
       }
       renameGuarded(replica, path);
     } catch (e) {
-      const moved = done.map((ext) => name + ext);
-      const stuck = putBack();
       log(`Could not swap the files (${(e as { code?: string })?.code ?? (e as Error)?.message}); on Windows this usually means another process has ${name} open.`);
-      if (stuck.length) {
-        log(`  Tried to move back ${moved.join(', ')}; could NOT move back: ${stuck.join(', ')}. They are in ${backupDir}/.`);
-        log(`  ${dirname(path)} now has no complete database. Before anything opens it:`);
-        for (const l of restoreSteps(path, backupDir)) log(`  ${l}`);
-      } else {
-        log(`  Moved back: ${moved.length ? moved.join(', ') : '(nothing had been moved)'}. Close every client using linksee-memory and run again.`);
+      // put back, newest first; record each result
+      for (const f of originals.slice().reverse()) {
+        if (where[f] !== 'backup') continue;
+        try { renameGuarded(join(backupDir, f), join(dirname(path), f)); where[f] = 'live'; } catch { /* stays in backup */ }
       }
+      const stuck = originals.filter((f) => where[f] === 'backup');
+      if (stuck.length === 0) {
+        try { rmdirSync(backupDir); } catch { /* empty folder left; harmless */ }
+        log(`  Every original file was moved back: ${originals.join(', ')}. Close every client using linksee-memory and run again.`);
+        return { code: 1, outcome: 'failed', from };
+      }
+      const table = originals.map((f) => `    ${f.padEnd(name.length + 9)} ${where[f] === 'live' ? `in ${dirname(path)} (in place)` : `in ${backupDir}/`}`);
+      const moves = stuck.map((f) => `    move ${join(backupDir, f)} → ${join(dirname(path), f)}`);
+      const body = [
+        `This migration FAILED during the swap. The original files (one set, unchanged) are now split:`,
+        ...table,
+        `The migrated copy was NOT put in place. To put the original set back together, with every client closed:`,
+        ...moves,
+        `Move exactly these and nothing else. Do not move ${originals.filter((f) => where[f] === 'live').join(', ') || 'anything else'} — those are already in place.`,
+        `Do not open linksee-memory before this is done: ${name} is missing or incomplete without them.`,
+      ];
+      for (const l of body) log(`  ${l}`);
+      writeReadme([`linksee-memory migrate (${stamp})`, '', ...body]);
       return { code: 1, outcome: 'failed', from };
     }
 
@@ -371,6 +389,13 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
     report();
     log(`The original files, byte for byte and as one set, are in ${backupDir}/ (see README.txt there).`);
     for (const l of restoreSteps(path, backupDir)) log(l);
+    writeReadme([
+      `linksee-memory migrate (${stamp}) moved the original files here, unchanged, as one set:`,
+      `  ${originals.join(', ')} (from ${dirname(path)})`,
+      `They were at schema ${from}; the migrated database (schema ${from < MIN_SUPPORTED_SCHEMA ? target : from}) took their place.`,
+      '',
+      ...restoreSteps(path, backupDir),
+    ]);
     log(`Nothing was consolidated or deleted. The server switches the file to WAL on its next start.`);
     return { code: 0, outcome, backupDir, before, after, from, to: from < MIN_SUPPORTED_SCHEMA ? target : from };
   } finally {
