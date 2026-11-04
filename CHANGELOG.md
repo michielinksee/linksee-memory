@@ -19,7 +19,8 @@ Fixes for what a new user runs into on the first day. No new features, no new to
   ~/.linksee-memory/runtime/<version> --no-save --omit=dev` (npx's cache is temporary), shows its
   size, and keeps one version: an older runtime is removed only as setup's last step, after every
   settings write succeeded, and never while any settings file (user, project, or one setup wrote
-  before) still points at it. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
+  before) still points at it; if those references cannot be verified (unreadable list or settings
+  file), nothing is removed and setup says why. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
   be undone. On failure the existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
   wrote: the exact `npx -y linksee-memory sync|guard` strings and the `--linksee-managed` form.
   Wrappers and hand edits are left alone and listed; `--no-guard` leaves the guard hooks untouched.
@@ -39,7 +40,9 @@ Fixes for what a new user runs into on the first day. No new features, no new to
   (0.8.0 – 0.17.0), after partly altering the file. Schema 6–8 now migrate. Schema 1–5 is refused
   before anything is written — the schema is read on a read-only connection before any writable
   one exists, so a leftover WAL is not checkpointed and memory.db / -wal / -journal stay
-  byte-identical (a file with a hot rollback journal is refused the same way) — with one message: back up the folder, and do not open it with another
+  byte-identical (a file with a hot rollback journal is refused the same way; if the read-only
+  check cannot run at all — e.g. another process holds a lock — it refuses too and says to close
+  other clients, rather than guessing) — with one message: back up the folder, and do not open it with another
   linksee-memory version meanwhile. No older version is suggested as a stepping stone (0.7.2,
   for one, has no subcommands: any `npx linksee-memory@0.7.2 …` starts its server, whose start-up
   consolidate can delete rows). A migration command for these files is planned for 0.17.2.
