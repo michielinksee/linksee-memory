@@ -41,7 +41,8 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { GUARD_COMMAND, guardFullyWired, wireGuard, syncWiredFor, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { resolveHookRuntime } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
 const args = process.argv.slice(2);
@@ -82,13 +83,15 @@ const SKILL_SRC = join(dirname(__filename), '..', 'skill', 'SKILL.md');
 
 const SERVER_NAME = 'linksee';
 const MCP_COMMAND = `claude mcp add -s user ${SERVER_NAME} -- npx -y linksee-memory`;
-// Subcommand form (npx -y linksee-memory <sub>) so the hooks resolve for a cold user —
-// npx can resolve the package name, but not sibling bin names like linksee-memory-sync.
-const HOOK_COMMAND = 'npx -y linksee-memory sync';
-
-// Re-injection guard: command + merge rules live in lib/guard-wiring.ts (shared with the tests).
-// It points at the globally-installed bin rather than a dist path, so it ships without a build
-// step, and the shell form is resolved at run time so it survives npx-cache eviction.
+// Hook commands (0.17.1, L-1-106): `"<node>" "<package>/dist/bin/<bin>.js"` — node called directly,
+// not `npx -y linksee-memory <sub>` (6–9 s per call vs the 8 s PreToolUse timeout). When setup runs
+// from npx's temporary cache, lib/hook-runtime.ts pins a copy under <memory dir>/runtime/<version>
+// and the hooks point there; if that fails it falls back to the npx form and says so.
+// Merge / replace rules live in lib/guard-wiring.ts (shared with the tests).
+const PACKAGE_ROOT = join(dirname(__filename), '..', '..');
+const PACKAGE_VERSION = (() => {
+  try { return String(JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version); } catch { return 'unknown'; }
+})();
 const PROJECT_DIR = process.cwd();
 const PROJECT_CLAUDE_DIR = join(PROJECT_DIR, '.claude');
 const PROJECT_SETTINGS_PATH = join(PROJECT_CLAUDE_DIR, 'settings.json');
@@ -207,6 +210,21 @@ console.log('');
 
 console.log(`${BOLD}[3/4]${RESET} Configuring auto-capture hook...`);
 
+const runtime = resolveHookRuntime({
+  packageRoot: PACKAGE_ROOT,
+  nodePath: process.execPath,
+  memoryDir: TELEMETRY_DIR,
+  version: PACKAGE_VERSION,
+  dryRun,
+});
+const HOOK_COMMANDS = runtime.commands;
+const HOOK_COMMAND = HOOK_COMMANDS.sync;
+if (runtime.mode === 'npx') {
+  console.log(`  ${SKIP} Hooks use npx (slower, ~6–9 s per call): ${runtime.note ?? ''}`);
+} else {
+  console.log(`  ${DIM}Hooks call node directly: ${runtime.root}${runtime.note ? ` (${runtime.note})` : ''}${RESET}`);
+}
+
 interface SettingsJson {
   hooks?: {
     Stop?: Array<{
@@ -226,7 +244,9 @@ if (!stopRead.ok) {
   console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
   const settings = stopRead.settings as SettingsJson;
-  const replaced: string[] = [];
+  // Swap the hook forms earlier setups wrote (exact npx strings, or our own older direct form)
+  // for the current direct node form. Exact matches only; other hooks and hand edits stay.
+  const replaced = rewireLegacyHooks(settings as ClaudeSettings, HOOK_COMMANDS).replaced;
   // Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
   // path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
   const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
@@ -245,7 +265,7 @@ if (!stopRead.ok) {
       });
     }
     const w = writeSettingsFile(SETTINGS_PATH, settings);
-    if (replaced.length) console.log(`  ${CHECK} Switched ${replaced.length} npx hook(s) to direct node calls → ${SETTINGS_PATH}`);
+    if (replaced.length) console.log(`  ${CHECK} Repointed ${replaced.length} hook(s) to ${HOOK_COMMANDS.sync.startsWith('npx') ? 'npx' : 'a direct node call'} → ${SETTINGS_PATH}`);
     if (!alreadyHooked) console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
     if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
   }
@@ -290,14 +310,15 @@ async function configureGuard(): Promise<boolean> {
   }
   const settings = read.settings as ClaudeSettings;
 
-  const replaced: string[] = [];
+  // Known npx forms → direct node call (exact matches only; see lib/guard-wiring.ts).
+  const { replaced } = rewireLegacyHooks(settings, HOOK_COMMANDS);
   if (guardFullyWired(settings) && replaced.length === 0) {
     console.log(`  ${SKIP} Guard already wired in ${targetPath}`);
     return true;
   }
   if (guardFullyWired(settings) && !dryRun) {
     const w = writeSettingsFile(targetPath, settings);
-    console.log(`  ${CHECK} Switched ${replaced.length} npx guard hook(s) to direct node calls → ${targetPath}`);
+    console.log(`  ${CHECK} Repointed ${replaced.length} guard hook(s) → ${targetPath}`);
     if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
     return true;
   }
@@ -321,7 +342,7 @@ async function configureGuard(): Promise<boolean> {
   }
 
   // Merge, don't replace (see lib/guard-wiring.ts for the rules it holds to).
-  wireGuard(settings);
+  wireGuard(settings, HOOK_COMMANDS.guard);
 
   const w = writeSettingsFile(targetPath, settings);
   console.log(`  ${CHECK} Guard wired → ${targetPath} ${DIM}(${scopeLabel})${RESET}`);

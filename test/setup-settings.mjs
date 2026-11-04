@@ -118,6 +118,43 @@ const FOREIGN = {
   check('top-level array: left untouched', readSettings(home) === '[1,2,3]');
 }
 
+// 6. 0.17.1: an existing 0.17.0 install (npx hooks) is switched to direct node calls in place
+{
+  const legacy = {
+    ...FOREIGN,
+    hooks: {
+      Stop: [
+        FOREIGN.hooks.Stop[0],
+        { matcher: '', hooks: [{ type: 'command', command: 'npx -y linksee-memory sync' }] },
+      ],
+      PreToolUse: [
+        FOREIGN.hooks.PreToolUse[0],
+        { matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 8 }] },
+      ],
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 15 }] }],
+    },
+  };
+  const home = freshHome(JSON.stringify(legacy, null, 2));
+  const r = runSetup(home);
+  check('legacy npx: setup exits cleanly', r.status === 0, `exit ${r.status} ${r.stderr}`);
+  const s = JSON.parse(readSettings(home));
+  const all = Object.values(s.hooks).flat().flatMap((e) => e.hooks.map((h) => h.command));
+  check('legacy npx: no npx hook left', !all.some((c) => c.startsWith('npx ')), JSON.stringify(all));
+  check('legacy npx: Stop now calls node on sync-session.js', /^"[^"]+" "[^"]+\/dist\/bin\/sync-session\.js"$/.test(s.hooks.Stop[1].hooks[0].command), s.hooks.Stop[1].hooks[0].command);
+  check('legacy npx: guard now calls node on guard-hook.js (timeouts kept)',
+    /guard-hook\.js"$/.test(s.hooks.PreToolUse[1].hooks[0].command) && s.hooks.PreToolUse[1].hooks[0].timeout === 8 && s.hooks.SessionStart[0].hooks[0].timeout === 15);
+  check('legacy npx: no duplicates added', s.hooks.Stop.length === 2 && s.hooks.PreToolUse.length === 2 && s.hooks.SessionStart.length === 1);
+  check('legacy npx: foreign hooks kept', s.hooks.Stop[0].hooks[0].command === 'node other-tool/sync.js' && s.hooks.PreToolUse[0].hooks[0].command === 'node someone-elses-linter.js');
+  check('legacy npx: one .bak', backups(home).length === 1);
+  const before = readSettings(home);
+  runSetup(home);
+  check('legacy npx: 2nd run byte-identical', readSettings(home) === before);
+  check('legacy npx: 2nd run no new .bak', backups(home).length === 1);
+  if (process.env.SHOW_DIFF) {
+    console.log(['--- before', JSON.stringify(legacy.hooks, null, 2), '--- after', JSON.stringify(s.hooks, null, 2)].join('\n'));
+  }
+}
+
 for (const h of homes) { try { rmSync(h, { recursive: true, force: true }); } catch { /* ignore */ } }
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);

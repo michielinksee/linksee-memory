@@ -56,6 +56,7 @@ export function backupTimestamp(d = new Date()): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+/** `backup` is set only on the write that created it. */
 export type SettingsWrite = { written: boolean; backup?: string };
 
 /**
@@ -78,7 +79,9 @@ export function writeSettingsFile(path: string, settings: Record<string, unknown
 
   mkdirSync(dirname(path), { recursive: true });
   let backup = backedUp.get(path);
+  let created = false;
   if (backup === undefined) {
+    created = true;
     if (current !== null) {
       backup = `${path}.bak-${backupTimestamp()}`;
       copyFileSync(path, backup);
@@ -96,5 +99,6 @@ export function writeSettingsFile(path: string, settings: Record<string, unknown
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* ignore */ }
     throw e;
   }
-  return { written: true, backup: backup || undefined };
+  // Report the backup only on the write that made it, so callers print it once.
+  return { written: true, backup: created && backup ? backup : undefined };
 }

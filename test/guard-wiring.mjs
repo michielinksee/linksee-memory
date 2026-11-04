@@ -9,7 +9,7 @@
 //
 // Run: node test/guard-wiring.mjs   (pure functions, no filesystem, no DB)
 
-const { wireGuard, guardWiredFor, guardFullyWired, syncWiredFor, GUARD_EVENTS } = await import('../dist/lib/guard-wiring.js');
+const { wireGuard, guardWiredFor, guardFullyWired, syncWiredFor, GUARD_EVENTS, nodeHookCommands, rewireLegacyHooks, setupWrittenKind } = await import('../dist/lib/guard-wiring.js');
 
 let failures = 0;
 const check = (name, cond, extra = '') => {
