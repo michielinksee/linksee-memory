@@ -329,7 +329,7 @@ It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and
                   Returns match_reasons explaining each hit
 ```
 
-Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories are auto-consolidated into `learning` entries on server startup.
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories can be consolidated into `learning` entries, but only if you opt in (`LINKSEE_AUTO_CONSOLIDATE=1` on the server — it deletes the originals; off by default since 0.17.1).
 
 ---
 
@@ -369,10 +369,10 @@ Add **"Use Linksee"** to any prompt to force a recall.
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. One version is kept; an older one is removed after the new one loads. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. One version is kept: an older one is removed as setup's last step, only if every settings write succeeded and no settings file still points at it. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
-Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the guard prints that hint and lets the action through).
+Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the hooks print one line saying so and let the action through).
 
 ### Manual setup (if you prefer step-by-step)
 
@@ -569,7 +569,7 @@ Nothing ever leaves your machine, so step 3 fully erases everything Linksee stor
 | Feature | Detail |
 |---|---|
 | **3-tool unified surface** | 8 tools → 3: `remember` (create + update + delete), `recall` (search + file history + overview), `read_smart` (token-saving reads). Fewer tools = better cross-LLM consistency. Follows Context7's proven pattern. |
-| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. |
+| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. *(Off by default since 0.17.1 — opt in with `LINKSEE_AUTO_CONSOLIDATE=1`.)* |
 | **Deprecation guidance** | Old tool names (`forget`, `recall_file`, etc.) return specific migration examples instead of silent failures. |
 | **"Use Linksee Memory" trigger** | Add "Use Linksee Memory" to any prompt to force memory recall — same adoption pattern as Context7. |
 | **Claude Code Plugin** | `claude plugin add -- linksee-memory` — ships MCP server + auto-invocation skill in one install. |
@@ -668,7 +668,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 ## Roadmap
 
 - ✅ 3-tool unified surface (remember / recall / read_smart) — v0.7.0
-- ✅ Auto-consolidate on server startup — v0.7.0
+- ✅ Auto-consolidate on server startup — v0.7.0 (opt-in since 0.17.1)
 - ✅ Claude Code Plugin (`claude plugin add -- linksee-memory`)
 - ✅ Five MCP Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
 - ✅ Stop-hook auto-capture for Claude Code
@@ -857,9 +857,7 @@ Or delete individual memories via `remember({ forget: true, memory_id: <id> })`.
 <details>
 <summary><b>DB is getting large (>100 MB). How do I trim it?</b></summary>
 
-Consolidation runs automatically on server startup (7-day threshold). It clusters old cold memories into compressed learning-layer summaries. Caveat and active-goal layers are always preserved.
-
-If you want to force a manual consolidation, restart the MCP server — auto-consolidate triggers on every startup.
+Since 0.17.1 nothing is consolidated automatically: consolidation deletes the original rows (keeping a short summary), so it runs only if you start the server with `LINKSEE_AUTO_CONSOLIDATE=1` (then at most weekly, 7-day threshold). When enabled it clusters old cold memories into compressed learning-layer summaries and deletes the originals; caveat and active-goal layers are always preserved. Back up `~/.linksee-memory/` before turning it on. There is no `consolidate` tool to call.
 </details>
 
 ## FAQ
@@ -889,7 +887,7 @@ Three axes:
 Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor, OpenAI Codex, or Gemini CLI) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
 - Works across Claude Code, Cursor, OpenAI Codex, Gemini CLI (shared SQLite)
 - Structured 6-layer format makes recall explainable
-- Auto-consolidation compresses cold memories on startup; caveats are permanently protected
+- Consolidation of cold memories is opt-in (`LINKSEE_AUTO_CONSOLIDATE=1`, deletes originals); caveats are permanently protected
 </details>
 
 <details>
@@ -914,7 +912,7 @@ The default is no sync — the SQLite file lives at `~/.linksee-memory/memory.db
 
 Two mechanisms:
 1. **Ebbinghaus forgetting**: cold low-importance memories decay naturally, eligible for auto-forget sweeps. `caveat` layer and memories with `importance ≥ 0.9` are always protected.
-2. **Auto-consolidation**: runs on every server startup (7-day threshold). Compresses clusters of cold low-importance memories by entity into a single `learning`-layer summary, then deletes the originals. No manual scheduling needed.
+2. **Consolidation (opt-in)**: off by default since 0.17.1. With `LINKSEE_AUTO_CONSOLIDATE=1` on the server it runs at start-up at most weekly (7-day threshold), compressing clusters of cold low-importance memories by entity into a single `learning`-layer summary and deleting the originals.
 
 In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old DB I tested with 80K memories still recalls in <10ms.
 </details>

@@ -17,22 +17,29 @@ Fixes for what a new user runs into on the first day. No new features, no new to
   `"<node>" "<package>/dist/bin/<bin>.js" --linksee-managed` (0.20–0.27 s on the same machine).
   Run through `npx`, setup installs this version once with `npm install --prefix
   ~/.linksee-memory/runtime/<version> --no-save --omit=dev` (npx's cache is temporary), shows its
-  size, keeps one version, and removes the old one only after the new one loads; on failure the
-  existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
+  size, and keeps one version: an older runtime is removed only as setup's last step, after every
+  settings write succeeded, and never while any settings file (user, project, or one setup wrote
+  before) still points at it. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
+  be undone. On failure the existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
   wrote: the exact `npx -y linksee-memory sync|guard` strings and the `--linksee-managed` form.
   Wrappers and hand edits are left alone and listed; `--no-guard` leaves the guard hooks untouched.
-  Paths with `$`, backticks, `%` or `"` keep the npx form. If the guard cannot load its SQLite
-  driver (e.g. after a Node major upgrade) it prints "re-run setup" to stderr and lets the action
-  through. Rewriting `settings.json` keeps its permission bits and follows a symlink.
+  Paths with `$`, backticks, `%` or `"` keep the npx form. If the SQLite native addon cannot load
+  (e.g. after a Node major upgrade — it fails when the DB is opened), the guard and Stop hooks print
+  one line, "linksee-memory: native module failed to load (Node changed?). Re-run: npx -y
+  linksee-memory setup", and let the action through; other failures stay silent (hook.log).
+  Rewriting `settings.json` keeps its permission bits, writes through a symlink, and refuses a
+  symlink whose target is missing.
 - **The server no longer consolidates memories on its own.** Start-up consolidation deleted the
   original rows (keeping a 3 × 200-character summary) without the user asking. It is now off
   unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). There is no `consolidate` tool
-  (merged away in 0.7.0); the old hint that it "auto-runs on server startup" is corrected. Rows
-  removed by earlier versions are not restored.
+  (merged away in 0.7.0); the old hint that it "auto-runs on server startup" is corrected, and so
+  are the README FAQ and the bundled agent skill (which told agents to run a `consolidate` tool
+  weekly). Rows removed by earlier versions are not restored.
 - **Old databases.** Every DB older than schema 8 stopped with `no such table: drift_anchors`
   (0.8.0 – 0.17.0), after partly altering the file. Schema 6–8 now migrate. Schema 1–5 is refused
-  before anything is written — the schema is read before the journal-mode switch, so the file
-  stays byte-identical — with one message: back up the folder, and do not open it with another
+  before anything is written — the schema is read on a read-only connection before any writable
+  one exists, so a leftover WAL is not checkpointed and memory.db / -wal / -journal stay
+  byte-identical (a file with a hot rollback journal is refused the same way) — with one message: back up the folder, and do not open it with another
   linksee-memory version meanwhile. No older version is suggested as a stepping stone (0.7.2,
   for one, has no subcommands: any `npx linksee-memory@0.7.2 …` starts its server, whose start-up
   consolidate can delete rows). A migration command for these files is planned for 0.17.2.

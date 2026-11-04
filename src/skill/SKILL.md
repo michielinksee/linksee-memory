@@ -372,26 +372,19 @@ Recording `prior_belief` leaves a **belief-update history**. Later, this becomes
 2. ❌ Solve an error on the spot without recording — future you (or another agent) will hit the same failure
 3. ❌ Use `Read` everywhere instead of `read_smart` (wastes tokens)
 4. ❌ Write caveats in a flippant tone — preserve them seriously
-5. ❌ Skip `consolidate` during long-running work — run it weekly
+5. ❌ Try to call a `consolidate` tool — there is none; consolidation is a server opt-in that deletes originals (see below)
 6. ❌ Recall the same entity twice in one session without new context (wastes tokens)
 7. ❌ Write `recall({ query: "what happened last time" })` — use specific keywords
 
 ---
 
-## 🔁 Consolidate — periodic memory tidy-up
+## 🔁 Consolidation — off unless the user turns it on
 
-When memory has grown (rough guideline: DB > 20MB, memories > 15,000):
+There is no `consolidate` tool. Consolidation clusters cold, low-importance memories older than 7 days into one `learning`-layer entry and **deletes the originals**, so since 0.17.1 it never runs on its own. The user can opt in by starting the server with `LINKSEE_AUTO_CONSOLIDATE=1` (then it runs at start-up, at most weekly).
 
-```
-mcp__linksee__consolidate({
-  scope: "session",
-  min_age_days: 7
-})
-```
+Do not suggest turning it on as routine housekeeping. If the user asks about a large DB, explain the trade-off (originals are deleted) and suggest backing up `~/.linksee-memory/` first.
 
-This clusters cold, low-importance memories older than 7 days → compresses them into a single `learning`-layer entry → deletes originals.
-
-**`caveat` memories and active `goal` memories are never consolidated away.** Equivalent to sleep-time memory reorganization.
+**`caveat` memories and active `goal` memories are never consolidated away.**
 
 ---
 
@@ -525,7 +518,6 @@ User: "That's it for today"
    })
 
 3. Report: "Recorded N decisions, M caveats. Retrievable via recall."
-4. Optionally suggest: consolidate({scope:"session", min_age_days: 14})
 ```
 
 ### Case F2 — Flag orphaned proposals at session end
@@ -725,7 +717,7 @@ Now you have both bodies of knowledge before starting
 | Day 1 | low (little data) | Stop hook is still collecting |
 | Week 1 | medium | thousands of memories, FTS5 kicks in |
 | Month 1 | high | heat_score stabilizes, important memories surface |
-| Month 3+ | strongest | consolidate has run, learnings crystallized |
+| Month 3+ | strongest | learnings crystallized (distilled) |
 
 **"Gets smarter with use"** — time is on your side. Today's record is read by tomorrow's you.
 
