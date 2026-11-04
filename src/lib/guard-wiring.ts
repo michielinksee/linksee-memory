@@ -28,58 +28,100 @@ export type HookCommands = Record<HookKind, string>;
 export const NPX_HOOK_COMMANDS: HookCommands = { guard: GUARD_COMMAND, sync: SYNC_COMMAND };
 
 /**
+ * Marker setup appends to every direct-node hook it writes. It is an ordinary trailing argument
+ * (the hook scripts ignore argv), so it survives cmd.exe and sh alike — a `#` comment would not
+ * (cmd.exe has no inline comments). Only a command carrying it is treated as setup-owned.
+ */
+export const MANAGED_MARKER = '--linksee-managed';
+
+/**
  * Direct `node` form (0.17.1, L-1-106 / audit F11): `npx -y` costs 6–9 s per call on a warm
  * cache (npm start-up + a registry check), against an 8 s PreToolUse timeout — so the guard
- * could time out and silently not fire. `"<node>" "<root>/dist/bin/<bin>.js"` starts in well under
- * a second. Both paths are quoted (spaces in `Program Files` / user names) and use forward
- * slashes, which cmd.exe, PowerShell and Git Bash all accept.
+ * could time out and silently not fire. `"<node>" "<root>/dist/bin/<bin>.js" --linksee-managed`
+ * starts in well under a second.
+ *
+ * Shells: Claude Code runs a hook command through cmd.exe on Windows and through sh on POSIX
+ * (PowerShell is not used for hooks — assumed here; under PowerShell this form would need `&`).
+ * Double quotes protect spaces in both. They do NOT neutralise `$` or backticks (sh) or `%`
+ * (cmd.exe), and a path containing `"` cannot be quoted at all — see `shellSafePath`; setup falls
+ * back to the npx form for such paths instead of writing a command that might expand.
  */
 export function nodeHookCommands(nodePath: string, packageRoot: string): HookCommands {
   const fwd = (p: string) => p.replace(/\\/g, '/');
-  const bin = (file: string) => `"${fwd(nodePath)}" "${fwd(packageRoot).replace(/\/$/, '')}/dist/bin/${file}"`;
+  const bin = (file: string) => `"${fwd(nodePath)}" "${fwd(packageRoot).replace(/\/$/, '')}/dist/bin/${file}" ${MANAGED_MARKER}`;
   return { guard: bin('guard-hook.js'), sync: bin('sync-session.js') };
 }
 
-/** Exactly the npx strings earlier setups wrote. Anything else is someone's hand edit — left alone. */
-const LEGACY_NPX: Record<HookKind, string[]> = {
-  guard: ['npx -y linksee-memory guard', 'npx linksee-memory guard'],
-  sync: ['npx -y linksee-memory sync', 'npx linksee-memory sync'],
+/** Can this path go inside double quotes in both cmd.exe and sh without being expanded? */
+export function shellSafePath(p: string): boolean {
+  return !/["$`%!\r\n]/.test(p);
+}
+
+/** Exactly the npx strings setup wrote up to 0.17.0. */
+const LEGACY_NPX: Record<HookKind, string> = {
+  guard: 'npx -y linksee-memory guard',
+  sync: 'npx -y linksee-memory sync',
 };
 
-/** The quoted direct form setup itself writes (0.17.1+), so a re-run after an upgrade can repoint it. */
-const SETUP_NODE_FORM = /^"[^"]+" "([^"]*linksee-memory[^"]*)\/dist\/bin\/(guard-hook|sync-session)\.js"$/;
+/** The form setup itself writes from 0.17.1 on — quoted node, quoted script, the marker. */
+const MANAGED_NODE_FORM = /^"[^"]+" "[^"]+\/dist\/bin\/(guard-hook|sync-session)\.js" --linksee-managed$/;
 
-/** Which of our setup-written forms is this command, if any? Whole-string matches only. */
+/**
+ * Is this command one setup wrote — (a) the exact 0.17.0-and-earlier npx string, or (b) the
+ * 0.17.1+ direct form carrying MANAGED_MARKER? Anything else (wrappers, unquoted paths, extra
+ * flags, someone else's script) is not ours to change.
+ */
 export function setupWrittenKind(command: string | undefined): HookKind | null {
   if (typeof command !== 'string') return null;
   const c = command.trim();
-  for (const kind of ['guard', 'sync'] as const) if (LEGACY_NPX[kind].includes(c)) return kind;
-  const m = SETUP_NODE_FORM.exec(c);
-  if (m) return m[2] === 'guard-hook' ? 'guard' : 'sync';
+  for (const kind of ['guard', 'sync'] as const) if (LEGACY_NPX[kind] === c) return kind;
+  const m = MANAGED_NODE_FORM.exec(c);
+  if (m) return m[1] === 'guard-hook' ? 'guard' : 'sync';
   return null;
 }
 
-/**
- * Point every hook that setup itself wrote (the npx forms, or an older direct form) at `commands`.
- * Exec-form hooks (`args`), other tools' hooks and hand-edited commands are never touched.
- * Only `command` changes — matcher, timeout and any other field stay as the user left them.
- * Mutates `settings`; returns the commands that were replaced (empty = nothing to do).
- */
-export function rewireLegacyHooks(settings: ClaudeSettings, commands: HookCommands): { replaced: string[] } {
-  const replaced: string[] = [];
+function eachCommandHook(settings: ClaudeSettings, fn: (h: HookCommand) => void): void {
   for (const entries of Object.values(settings.hooks ?? {})) {
     if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      for (const h of entry?.hooks ?? []) {
-        if (!h || h.type !== 'command' || (Array.isArray(h.args) && h.args.length)) continue;
-        const kind = setupWrittenKind(h.command);
-        if (!kind || h.command === commands[kind]) continue;
-        replaced.push(h.command as string);
-        h.command = commands[kind];
-      }
-    }
+    for (const entry of entries) for (const h of entry?.hooks ?? []) if (h && h.type === 'command') fn(h);
   }
+}
+
+/**
+ * Point the setup-written hooks of the given kinds at `commands`. Exec-form hooks (`args`), other
+ * tools' hooks and hand-edited commands are never touched. Only `command` changes — matcher,
+ * timeout and any other field stay. Mutates `settings`; returns the replaced commands.
+ */
+export function rewireLegacyHooks(
+  settings: ClaudeSettings,
+  commands: HookCommands,
+  kinds: readonly HookKind[] = ['guard', 'sync'],
+): { replaced: string[] } {
+  const replaced: string[] = [];
+  eachCommandHook(settings, (h) => {
+    if (Array.isArray(h.args) && h.args.length) return;
+    const kind = setupWrittenKind(h.command);
+    if (!kind || !kinds.includes(kind) || h.command === commands[kind]) return;
+    replaced.push(h.command as string);
+    h.command = commands[kind];
+  });
   return { replaced };
+}
+
+/**
+ * Hooks that look like ours (they run the guard or the sync script) but were not written by setup —
+ * hand-wired paths, wrappers, exec form. setup leaves them alone and lists them so the user knows.
+ */
+export function unmanagedLinkseeHooks(settings: ClaudeSettings): string[] {
+  const out: string[] = [];
+  eachCommandHook(settings, (h) => {
+    const hay = [h.command, ...(h.args ?? [])].filter((x) => typeof x === 'string').join(' ');
+    const looksOurs = /guard-hook|sync-session/.test(hay) || (/linksee-memory/.test(hay) && /\b(guard|sync)\b/.test(hay));
+    if (!looksOurs) return;
+    if ((!h.args || !h.args.length) && setupWrittenKind(h.command)) return;
+    out.push(hay);
+  });
+  return out;
 }
 
 export function guardHooks(command: string = GUARD_COMMAND): Record<GuardEvent, HookEntry> {

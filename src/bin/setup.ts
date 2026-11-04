@@ -42,7 +42,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import Database from 'better-sqlite3';
-import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, unmanagedLinkseeHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
 import { resolveHookRuntime } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
@@ -91,8 +91,9 @@ const SERVER_NAME = 'linksee';
 const MCP_COMMAND = `claude mcp add -s user ${SERVER_NAME} -- npx -y linksee-memory`;
 // Hook commands (0.17.1, L-1-106): `"<node>" "<package>/dist/bin/<bin>.js"` — node called directly,
 // not `npx -y linksee-memory <sub>` (6–9 s per call vs the 8 s PreToolUse timeout). When setup runs
-// from npx's temporary cache, lib/hook-runtime.ts pins a copy under <memory dir>/runtime/<version>
-// and the hooks point there; if that fails it falls back to the npx form and says so.
+// from npx's temporary cache, lib/hook-runtime.ts installs this version under
+// <memory dir>/runtime/<version> (npm install, once) and the hooks point there; if that fails it
+// keeps the npx form and says so.
 // Merge / replace rules live in lib/guard-wiring.ts (shared with the tests).
 const PACKAGE_ROOT = join(dirname(__filename), '..', '..');
 const PACKAGE_VERSION = (() => {
@@ -222,6 +223,8 @@ const runtime = resolveHookRuntime({
   memoryDir: TELEMETRY_DIR,
   version: PACKAGE_VERSION,
   dryRun,
+  // For testing an unpublished build: what to npm-install instead of linksee-memory@<version>.
+  spec: process.env.LINKSEE_RUNTIME_SPEC || undefined,
 });
 const HOOK_COMMANDS = runtime.commands;
 const HOOK_COMMAND = HOOK_COMMANDS.sync;
@@ -230,6 +233,15 @@ if (runtime.mode === 'npx') {
 } else {
   console.log(`  ${DIM}Hooks call node directly: ${runtime.root}${runtime.note ? ` (${runtime.note})` : ''}${RESET}`);
 }
+
+// Hooks that run our scripts but were wired by hand (wrappers, unquoted paths, exec form) are
+// never rewritten; list them at the end so the user can update them if they want to.
+function handWiredNotice(path: string): void {
+  const r = readSettingsFile(path);
+  if (!r.ok) return;
+  for (const c of unmanagedLinkseeHooks(r.settings as ClaudeSettings)) handWired.add(`${c}   (${path})`);
+}
+const handWired = new Set<string>();
 
 interface SettingsJson {
   hooks?: {
@@ -250,9 +262,9 @@ if (!stopRead.ok) {
   console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
   const settings = stopRead.settings as SettingsJson;
-  // Swap the hook forms earlier setups wrote (exact npx strings, or our own older direct form)
-  // for the current direct node form. Exact matches only; other hooks and hand edits stay.
-  const replaced = rewireLegacyHooks(settings as ClaudeSettings, HOOK_COMMANDS).replaced;
+  // Swap the Stop hook forms setup wrote (the exact 0.17.0 npx string, or our marked direct form).
+  // Only the sync kind here: the guard hooks are step 4's, after its --no-guard check.
+  const replaced = rewireLegacyHooks(settings as ClaudeSettings, HOOK_COMMANDS, ['sync']).replaced;
   // Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
   // path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
   const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
@@ -317,7 +329,7 @@ async function configureGuard(): Promise<boolean> {
   const settings = read.settings as ClaudeSettings;
 
   // Known npx forms → direct node call (exact matches only; see lib/guard-wiring.ts).
-  const { replaced } = rewireLegacyHooks(settings, HOOK_COMMANDS);
+  const { replaced } = rewireLegacyHooks(settings, HOOK_COMMANDS, ['guard']);
   if (guardFullyWired(settings) && replaced.length === 0) {
     console.log(`  ${SKIP} Guard already wired in ${targetPath}`);
     return true;
@@ -435,6 +447,14 @@ if (guardConfigured) {
   console.log(`  ${DIM}• Re-injection guard re-surfaces your accepted decisions before edits (${projectGuard ? 'this project' : 'every repo'})${RESET}`);
 }
 console.log('');
+handWiredNotice(SETTINGS_PATH);
+if (projectGuard) handWiredNotice(PROJECT_SETTINGS_PATH);
+if (handWired.size) {
+  console.log('Left as you wired them (not written by setup, so not changed):');
+  for (const c of handWired) console.log(`  ${DIM}• ${c}${RESET}`);
+  console.log(`  ${DIM}setup writes "<node>" "<package>/dist/bin/<script>.js" --linksee-managed; switch to that form if you want setup to manage them.${RESET}`);
+  console.log('');
+}
 if (memoryIsEmpty()) {
   // A fresh install has nothing to recall, so "how did we solve this before?" always comes back
   // empty — the first thing a new user tries would fail. Offer a round trip that cannot.

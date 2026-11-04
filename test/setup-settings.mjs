@@ -11,7 +11,7 @@
 // Run: node test/setup-settings.mjs   (needs `pnpm build` first)
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -160,9 +160,9 @@ const FOREIGN = {
   const s = JSON.parse(readSettings(home));
   const all = Object.values(s.hooks).flat().flatMap((e) => e.hooks.map((h) => h.command));
   check('legacy npx: no npx hook left', !all.some((c) => c.startsWith('npx ')), JSON.stringify(all));
-  check('legacy npx: Stop now calls node on sync-session.js', /^"[^"]+" "[^"]+\/dist\/bin\/sync-session\.js"$/.test(s.hooks.Stop[1].hooks[0].command), s.hooks.Stop[1].hooks[0].command);
+  check('legacy npx: Stop now calls node on sync-session.js', /^"[^"]+" "[^"]+\/dist\/bin\/sync-session\.js" --linksee-managed$/.test(s.hooks.Stop[1].hooks[0].command), s.hooks.Stop[1].hooks[0].command);
   check('legacy npx: guard now calls node on guard-hook.js (timeouts kept)',
-    /guard-hook\.js"$/.test(s.hooks.PreToolUse[1].hooks[0].command) && s.hooks.PreToolUse[1].hooks[0].timeout === 8 && s.hooks.SessionStart[0].hooks[0].timeout === 15);
+    /guard-hook\.js" --linksee-managed$/.test(s.hooks.PreToolUse[1].hooks[0].command) && s.hooks.PreToolUse[1].hooks[0].timeout === 8 && s.hooks.SessionStart[0].hooks[0].timeout === 15);
   check('legacy npx: no duplicates added', s.hooks.Stop.length === 2 && s.hooks.PreToolUse.length === 2 && s.hooks.SessionStart.length === 1);
   check('legacy npx: foreign hooks kept', s.hooks.Stop[0].hooks[0].command === 'node other-tool/sync.js' && s.hooks.PreToolUse[0].hooks[0].command === 'node someone-elses-linter.js');
   check('legacy npx: one .bak', backups(home).length === 1);
@@ -173,6 +173,39 @@ const FOREIGN = {
   if (process.env.SHOW_DIFF) {
     console.log(['--- before', JSON.stringify(legacy.hooks, null, 2), '--- after', JSON.stringify(s.hooks, null, 2)].join('\n'));
   }
+}
+
+// 7. Codex review of #15: --no-guard must not touch the guard hooks, and hand-wired hooks
+//    (here: a wrapper running our script without the managed marker) are left alone and listed
+{
+  const wrapper = '"C:/Program Files/nodejs/node.exe" "C:/tools/linksee-memory/dist/bin/guard-hook.js"';
+  const s0 = {
+    hooks: {
+      Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'npx -y linksee-memory sync' }] }],
+      PreToolUse: [
+        { matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 8 }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: wrapper }] },
+      ],
+    },
+  };
+  const home = freshHome(JSON.stringify(s0, null, 2));
+  const r = runSetup(home, ['--no-guard']);
+  const s = JSON.parse(readSettings(home));
+  check('--no-guard: Stop hook switched to node', /sync-session\.js" --linksee-managed$/.test(s.hooks.Stop[0].hooks[0].command), s.hooks.Stop[0].hooks[0].command);
+  check('--no-guard: guard npx hook NOT touched', s.hooks.PreToolUse[0].hooks[0].command === 'npx -y linksee-memory guard');
+  check('hand-wired wrapper untouched', s.hooks.PreToolUse[1].hooks[0].command === wrapper);
+  check('hand-wired wrapper listed in the closing message', /Left as you wired them/.test(r.stdout) && r.stdout.includes('C:/tools/linksee-memory/dist/bin/guard-hook.js'), r.stdout.slice(-800));
+  const r2 = runSetup(home);
+  const s2 = JSON.parse(readSettings(home));
+  check('guard run afterwards: npx guard switched, wrapper still untouched', /guard-hook\.js" --linksee-managed$/.test(s2.hooks.PreToolUse[0].hooks[0].command) && s2.hooks.PreToolUse[1].hooks[0].command === wrapper && r2.status === 0);
+}
+
+// 8. permissions survive the temp-file replace (POSIX only; chmod is a no-op on Windows)
+if (process.platform !== 'win32') {
+  const home = freshHome(JSON.stringify({ model: 'opus' }));
+  chmodSync(settingsPath(home), 0o600);
+  runSetup(home);
+  check('mode 600 kept after setup rewrote the file', (statSync(settingsPath(home)).mode & 0o777) === 0o600, (statSync(settingsPath(home)).mode & 0o777).toString(8));
 }
 
 for (const h of homes) { try { rmSync(h, { recursive: true, force: true }); } catch { /* ignore */ } }

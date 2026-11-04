@@ -9,7 +9,7 @@
 //
 // Run: node test/guard-wiring.mjs   (pure functions, no filesystem, no DB)
 
-const { wireGuard, guardWiredFor, guardFullyWired, syncWiredFor, GUARD_EVENTS, nodeHookCommands, rewireLegacyHooks, setupWrittenKind } = await import('../dist/lib/guard-wiring.js');
+const { wireGuard, guardWiredFor, guardFullyWired, syncWiredFor, GUARD_EVENTS, nodeHookCommands, rewireLegacyHooks, setupWrittenKind, shellSafePath, unmanagedLinkseeHooks } = await import('../dist/lib/guard-wiring.js');
 
 let failures = 0;
 const check = (name, cond, extra = '') => {
@@ -111,6 +111,67 @@ console.log('guard-wiring regression');
   // the two kinds must not be confused with each other
   const guardOnly = { hooks: { Stop: [{ matcher: '*', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard' }] }] } };
   check('the guard hook does not read as the sync hook', !syncWiredFor(guardOnly));
+}
+
+// 7. 0.17.1 (L-1-106 + Codex review of #15): direct node form, and which hooks setup may rewrite.
+//    Only (a) the exact 0.17.0 npx strings and (b) the form 0.17.1 writes, which carries
+//    --linksee-managed. Wrappers, unquoted paths, extra flags and exec form are never touched.
+{
+  const cmds = nodeHookCommands('C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\Jane Doe\\.linksee-memory\\runtime\\0.17.1\\node_modules\\linksee-memory');
+  check('node form: both paths quoted, forward slashes, managed marker',
+    cmds.guard === '"C:/Program Files/nodejs/node.exe" "C:/Users/Jane Doe/.linksee-memory/runtime/0.17.1/node_modules/linksee-memory/dist/bin/guard-hook.js" --linksee-managed', cmds.guard);
+  check('node form for sync points at sync-session.js', cmds.sync.includes('/dist/bin/sync-session.js" --linksee-managed'));
+  check('node form reads as our guard', guardWiredFor({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: cmds.guard }] }] } }, 'PreToolUse'));
+  check('node form reads as our sync', syncWiredFor({ hooks: { Stop: [{ hooks: [{ type: 'command', command: cmds.sync }] }] } }));
+  check('shellSafePath: spaces ok', shellSafePath('C:/Program Files/x'));
+  check('shellSafePath: $ ` % " rejected', !shellSafePath('/home/a$b') && !shellSafePath('/x/`y`') && !shellSafePath('C:/%USERNAME%/x') && !shellSafePath('C:/a"b'));
+
+  const wrapper = '"C:/Program Files/nodejs/node.exe" "C:/tools/linksee-memory/dist/bin/guard-hook.js"';
+  const legacy = {
+    hooks: {
+      Stop: [
+        { matcher: '', hooks: [{ type: 'command', command: 'npx -y linksee-memory sync' }] },
+        { matcher: '*', hooks: [{ type: 'command', command: 'node other-tool/sync.js' }] },
+      ],
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 15 }] }],
+      PreToolUse: [
+        { matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 8 }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard --verbose' }] },
+        { matcher: 'Edit', hooks: [{ type: 'command', command: 'echo npx -y linksee-memory guard' }] },
+        { matcher: 'Write', hooks: [{ type: 'command', command: 'node C:/Users/HP/linksee-memory/dist/bin/guard-hook.js' }] },
+        { matcher: 'Read', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', args: ['x'] }] },
+        { matcher: 'Glob', hooks: [{ type: 'command', command: wrapper }] },
+        { matcher: 'Grep', hooks: [{ type: 'command', command: 'npx linksee-memory guard' }] },
+      ],
+    },
+  };
+
+  // kinds filter: a guard-less run touches only the Stop hook
+  const onlySync = JSON.parse(JSON.stringify(legacy));
+  const rs = rewireLegacyHooks(onlySync, cmds, ['sync']).replaced;
+  check('kinds=[sync]: only the Stop hook replaced', rs.length === 1 && onlySync.hooks.Stop[0].hooks[0].command === cmds.sync && onlySync.hooks.PreToolUse[0].hooks[0].command === 'npx -y linksee-memory guard', JSON.stringify(rs));
+
+  const { replaced } = rewireLegacyHooks(legacy, cmds);
+  check('three exact 0.17.0 npx hooks replaced', replaced.length === 3, JSON.stringify(replaced));
+  check('SessionStart → node guard, timeout kept', legacy.hooks.SessionStart[0].hooks[0].command === cmds.guard && legacy.hooks.SessionStart[0].hooks[0].timeout === 15);
+  check('PreToolUse → node guard, matcher + timeout kept', legacy.hooks.PreToolUse[0].hooks[0].command === cmds.guard && legacy.hooks.PreToolUse[0].matcher === 'Edit|Write|Bash' && legacy.hooks.PreToolUse[0].hooks[0].timeout === 8);
+  check('foreign Stop hook untouched', legacy.hooks.Stop[1].hooks[0].command === 'node other-tool/sync.js');
+  check('npx form with extra flags untouched', legacy.hooks.PreToolUse[1].hooks[0].command === 'npx -y linksee-memory guard --verbose');
+  check('command merely containing the npx string untouched', legacy.hooks.PreToolUse[2].hooks[0].command === 'echo npx -y linksee-memory guard');
+  check('hand-written unquoted node path untouched', legacy.hooks.PreToolUse[3].hooks[0].command === 'node C:/Users/HP/linksee-memory/dist/bin/guard-hook.js');
+  check('exec form (args) untouched', legacy.hooks.PreToolUse[4].hooks[0].command === 'npx -y linksee-memory guard');
+  check('quoted node + dist path WITHOUT the marker (a wrapper) untouched', legacy.hooks.PreToolUse[5].hooks[0].command === wrapper);
+  check('npx without -y (never written by setup) untouched', legacy.hooks.PreToolUse[6].hooks[0].command === 'npx linksee-memory guard');
+  check('second rewire is a no-op', rewireLegacyHooks(legacy, cmds).replaced.length === 0);
+
+  const left = unmanagedLinkseeHooks(legacy);
+  check('hand-wired look-alikes are listed for the closing message', left.includes(wrapper) && left.some((c) => c.includes('--verbose')) && !left.includes(cmds.guard), JSON.stringify(left));
+
+  // an upgrade repoints our own marked form
+  const newer = nodeHookCommands('/usr/bin/node', '/home/j/.linksee-memory/runtime/0.17.2/node_modules/linksee-memory');
+  const { replaced: r2 } = rewireLegacyHooks(legacy, newer);
+  check('marked 0.17.1 form is repointed on upgrade', r2.length === 3 && legacy.hooks.Stop[0].hooks[0].command === newer.sync, JSON.stringify(r2));
+  check('setupWrittenKind ignores unmarked commands', setupWrittenKind('node "x/dist/bin/guard-hook.js"') === null && setupWrittenKind(wrapper) === null);
 }
 
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
