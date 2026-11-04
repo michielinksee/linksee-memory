@@ -80,5 +80,12 @@ jobs:
       - name: share_draft (no network)
         run: node test/share-draft.mjs
 
+      - name: Old databases + migrate + runtime prune (throwaway DBs, temp HOME)
+        run: |
+          export HOME="$RUNNER_TEMP/home" LINKSEE_MEMORY_DIR="$RUNNER_TEMP/mem" LINKSEE_TELEMETRY=off
+          mkdir -p "$HOME" "$LINKSEE_MEMORY_DIR"
+          timeout 120 node test/legacy-schema.mjs
+          timeout 120 node test/legacy-migrate.mjs
+
       - name: remember → recall live check (throwaway DB in a temp folder)
         run: timeout 30 node test/live-check.mjs

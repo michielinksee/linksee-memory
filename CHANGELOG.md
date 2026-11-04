@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.17.2 — unreleased (Old databases, runtime cleanup)
+
+No new MCP tools (still 7). Two CLI subcommands, both run by hand.
+
+### Added
+
+- **`npx -y linksee-memory@0.17.2 migrate [--dry] [--db <path>]`** — brings a schema 1–5 memory.db
+  (0.11 and earlier, up to May 2026; 0.17.1 refuses these) to the current schema without starting
+  the server. It reads the schema on a read-only connection first (schema 6 and newer: "not
+  needed", nothing written; `--dry`: reports the steps, the backup it would make and the row
+  counts, and writes nothing — a hot journal is read from a temporary copy). A real run takes the
+  write lock (`BEGIN IMMEDIATE`; another writer → refused), backs the file up with `VACUUM INTO
+  memory.db.pre-migrate-<time>` from a second connection while that lock is held, checks the copy
+  (`integrity_check` = ok, same schema and row counts), then runs the migration steps inside the
+  same transaction. It commits only if no table lost rows, the schema reached the current version
+  and `quick_check` is ok; otherwise it rolls back (the schema version is not advanced) and prints
+  how to restore from the backup. A file with a hot rollback journal is first copied byte for byte
+  to `memory.db.pre-migrate-<time>-hot` (+ `-hot-journal`). It never consolidates, never merges
+  duplicate entities (0.11's v5 merge deleted rows; they are left as they are and counted), and
+  does not change the journal mode. The refusal messages of the server now point at this command,
+  pinned to this exact version (an unpinned `npx linksee-memory` may resolve to an older cached
+  version, which has no `migrate` and would start its server).
+- **`npx -y linksee-memory runtime list | prune [--yes] [--settings <file>]…`** — lists
+  `~/.linksee-memory/runtime/<version>/` with sizes. With `--yes`, deletes only versions that no
+  settings file references (`~/.claude/settings.json`, `settings.local.json`, `~/.claude.json`,
+  `~/.codex/config.toml`, the current folder's `.claude/settings*.json`, and every `--settings`).
+  If any of them cannot be read or parsed, or a `--settings` file is missing, nothing is deleted
+  and the reason is printed. The version this command runs from, `.tmp-*` (install in progress)
+  and `*.old-*` (kept from a failed same-version swap) are never touched. Project settings of other
+  repos are not found automatically — pass them with `--settings`.
+
+### Fixed
+
+- Same-version runtime swap: when the old runtime could not be moved back, setup's note said both
+  "existing runtime left as it was" and "the previous one is at …". It now says only where the
+  previous runtime is and how to restore it.
+- The read-only check's clean-up of a `-shm` it created no longer runs when the `-wal` changed
+  while it looked (another process is active), and renames the `-shm` before deleting it (on
+  Windows a `-shm` another process has open cannot be renamed, so it stays). On POSIX a process
+  that opens the file in that exact instant is still a known limit.
+
 ## v0.17.1 — unreleased (Fixes only)
 
 Fixes for what a new user runs into on the first day. No new features, no new tools (still 7).

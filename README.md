@@ -369,7 +369,7 @@ Add **"Use Linksee"** to any prompt to force a recall.
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, and `npx -y linksee-memory runtime prune` lists them; with `--yes` it deletes only the versions no settings file references (if a settings file cannot be read, it deletes nothing). If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
 Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the hooks print one line saying so and let the action through).
@@ -817,6 +817,19 @@ No account, no credit card, no API key. Just install and use.
    echo '{"session_id":"test","transcript_path":"/path/to/some.jsonl"}' | npx -y linksee-memory sync
    ```
 3. Make sure the `Stop` hook in `~/.claude/settings.json` points to `npx -y linksee-memory sync` (not the old `-import`).
+</details>
+
+<details>
+<summary><b>The server says my memory.db is at schema 1–5 (I installed 0.11 or earlier, before June 2026).</b></summary>
+
+0.17.x refuses these files before writing anything. Close every client that uses linksee-memory, then:
+
+```bash
+npx -y linksee-memory@0.17.2 migrate --dry   # read-only: what it would do
+npx -y linksee-memory@0.17.2 migrate         # back up, then migrate
+```
+
+It copies the file to `memory.db.pre-migrate-<time>` first (checked with `integrity_check`), runs every step in one transaction, and rolls back if a step fails or any table would lose rows. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead.
 </details>
 
 <details>
