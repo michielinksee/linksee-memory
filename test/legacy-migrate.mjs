@@ -119,7 +119,7 @@ for (const state of STATES) {
 const STAMP = new Date('2026-11-04T00:00:00Z');
 const injections = {
   'a migrate.ts step throws (v6-v7)': () => (step) => { if (step === 'v6-v7') throw new Error('injected failure at v6-v7'); },
-  'VACUUM INTO fails (output exists)': (file) => (step) => { if (step === 'vacuum-into') writeFileSync(join(`${file}.migrating-20261104T000000Z`, 'replica.db'), 'not empty'); },
+  'VACUUM INTO fails (output exists)': (file) => (step) => { if (step === 'vacuum-into') writeFileSync(join(`${file}.migrating-20261104T000000Z-${process.pid}`, 'replica.db'), 'not empty'); },
   'replica check fails (row removed from the replica)': () => (step, db) => { if (step === 'verify-replica') db.prepare('DELETE FROM memories').run(); },
   'a step loses a row (count check)': () => (step, db) => { if (step === 'schema.sql') db.prepare('DELETE FROM memories').run(); },
   'COMMIT fails (deferred foreign key)': () => (step, db) => {

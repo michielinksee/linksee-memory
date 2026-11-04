@@ -121,10 +121,12 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
   }
   const stamp = stampOf(o.now ?? new Date());
   const backupDir = `${path}.pre-migrate-${stamp}`;
-  const work = o.dry ? mkdtempSync(join(tmpdir(), 'linksee-migrate-dry-')) : `${path}.migrating-${stamp}`;
+  // The work folder name carries the pid so two runs never share it; the backup folder name is
+  // checked only at the swap (a run that ends "not needed" must not be refused by an earlier backup).
+  const work = o.dry ? mkdtempSync(join(tmpdir(), 'linksee-migrate-dry-')) : `${path}.migrating-${stamp}-${process.pid}`;
   if (!o.dry) {
-    if (existsSync(work) || existsSync(backupDir)) {
-      log(`${existsSync(work) ? work : backupDir} already exists; run again in a second. Nothing was changed.`);
+    if (existsSync(work)) {
+      log(`${work} already exists; run again in a second. Nothing was changed.`);
       return { code: 1, outcome: 'refused' };
     }
     mkdirSync(work);
@@ -266,7 +268,10 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
         return { code: 1, outcome: 'refused', from };
       }
     }
-    mkdirSync(backupDir);
+    try { mkdirSync(backupDir); } catch (e) {
+      log(`Could not create ${backupDir} (${(e as { code?: string })?.code ?? (e as Error)?.message}); run again in a second. Not swapped; ${liveNote()}`);
+      return { code: 1, outcome: 'refused', from };
+    }
     const done: string[] = [];
     const putBack = () => {
       const stuck: string[] = [];
