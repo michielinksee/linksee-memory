@@ -88,7 +88,7 @@ You don't need to use drift detection to benefit from linksee-memory — the 3 m
 <summary><strong>How is this different from Mem0 / Letta / Zep?</strong></summary>
 
 Three axes:
-1. **Local-first**: those tools require cloud accounts and send your data to their servers. linksee-memory runs entirely on your machine — one SQLite file, no network calls by default.
+1. **Local-first**: those tools require cloud accounts and send your data to their servers. linksee-memory keeps the memory on your machine — one SQLite file. The server itself makes no network calls; npm contacts the registry to install or update it, and telemetry is sent only if you opt in.
 2. **WHY-layered**: they store flat facts or knowledge-graph nodes. linksee-memory has 6 explicit layers (`goal`/`context`/`emotion`/`implementation`/`caveat`/`learning`) so retrieval returns structured reasoning, not just data.
 3. **File diff cache**: `read_smart` returns only what changed on a re-read (AST-aware chunking), so re-reads cost far fewer tokens. None of the memory services do this — it's a feature usually shipped in IDEs.
 </details>

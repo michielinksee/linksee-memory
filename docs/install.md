@@ -28,7 +28,7 @@ codex mcp add linksee -- npx -y linksee-memory
 1. In Claude Code, say: *"Remember: in this repo we decided to use X, because Y."*
 2. Open a **new** session and ask: *"What did we decide about X?"*
 
-Add **"Use Linksee"** to any prompt to force a recall.
+Add **"Use Linksee"** to a prompt to nudge the agent to call `recall`. It is a prompt, not a guarantee.
 
 **What setup writes, and how to undo it.**
 
@@ -183,7 +183,7 @@ Config file: macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\C
 
 </details>
 
-All editors share the same `~/.linksee-memory/memory.db`. A decision made in Claude Code is recalled in Cursor. A caveat recorded in Windsurf prevents the same mistake in Codex.
+All editors share the same `~/.linksee-memory/memory.db`. A decision recorded in Claude Code can be found by `recall` in Cursor, and a caveat recorded in Windsurf can be found in Codex when the agent calls `recall`. Only Claude Code re-injects decisions before an edit (hooks); other clients get them when the agent asks.
 
 ### Database location
 
