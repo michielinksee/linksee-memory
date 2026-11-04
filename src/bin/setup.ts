@@ -42,6 +42,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { GUARD_COMMAND, guardFullyWired, wireGuard, syncWiredFor, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -118,7 +119,7 @@ try {
   for (const confFile of [SETTINGS_PATH, join(HOME, '.claude.json')]) {
     if (!existsSync(confFile)) continue;
     try {
-      const conf = JSON.parse(readFileSync(confFile, 'utf8'));
+      const conf = JSON.parse(stripBom(readFileSync(confFile, 'utf8')));
       if (conf?.mcpServers?.[SERVER_NAME]) {
         mcpAlreadyRegistered = true;
         break;
@@ -217,39 +218,37 @@ interface SettingsJson {
   [key: string]: unknown;
 }
 
-let settings: SettingsJson = {};
-if (existsSync(SETTINGS_PATH)) {
-  try {
-    settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'));
-  } catch {
-    console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH}`);
-    settings = {};
-  }
-}
-
-// Check if hook already exists
-const stopHooks = settings?.hooks?.Stop ?? [];
-// Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
-// path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
-const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
-
-if (alreadyHooked) {
-  console.log(`  ${SKIP} Stop hook already configured`);
-} else if (dryRun) {
-  console.log(`  ${DIM}[dry-run] Would add Stop hook to ${SETTINGS_PATH}${RESET}`);
+// Same protection as the guard step below (lib/settings-file.ts): BOM stripped, an unparseable
+// file is left untouched, one .bak before the first write, temp file + rename.
+const stopRead = readSettingsFile(SETTINGS_PATH);
+if (!stopRead.ok) {
+  console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH} (${stopRead.reason}) — left untouched`);
+  console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
-  // Add hook
-  if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks.Stop) settings.hooks.Stop = [];
+  const settings = stopRead.settings as SettingsJson;
+  const replaced: string[] = [];
+  // Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
+  // path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
+  const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
 
-  settings.hooks.Stop.push({
-    matcher: '',
-    hooks: [{ type: 'command', command: HOOK_COMMAND }],
-  });
-
-  mkdirSync(CLAUDE_DIR, { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8');
-  console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
+  if (alreadyHooked && replaced.length === 0) {
+    console.log(`  ${SKIP} Stop hook already configured`);
+  } else if (dryRun) {
+    console.log(`  ${DIM}[dry-run] Would ${alreadyHooked ? 'switch the npx hooks to direct node calls in' : 'add Stop hook to'} ${SETTINGS_PATH}${RESET}`);
+  } else {
+    if (!alreadyHooked) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.Stop) settings.hooks.Stop = [];
+      settings.hooks.Stop.push({
+        matcher: '',
+        hooks: [{ type: 'command', command: HOOK_COMMAND }],
+      });
+    }
+    const w = writeSettingsFile(SETTINGS_PATH, settings);
+    if (replaced.length) console.log(`  ${CHECK} Switched ${replaced.length} npx hook(s) to direct node calls → ${SETTINGS_PATH}`);
+    if (!alreadyHooked) console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
+    if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
+  }
 }
 console.log('');
 
@@ -282,22 +281,24 @@ async function configureGuard(): Promise<boolean> {
     return false;
   }
 
-  let settings: ClaudeSettings = {};
-  if (existsSync(targetPath)) {
-    try {
-      // Strip a leading BOM (U+FEFF) — Windows editors (Notepad) emit UTF-8+BOM, which JSON.parse rejects.
-      const raw = readFileSync(targetPath, 'utf8');
-      settings = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
-    } catch {
-      // Never clobber a file we can't parse — the user may have hand-authored it.
-      console.log(`  ${FAIL} Could not parse ${targetPath} — left untouched`);
-      console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
-      return false;
-    }
+  // BOM stripped; never clobber a file we can't parse — the user may have hand-authored it.
+  const read = readSettingsFile(targetPath);
+  if (!read.ok) {
+    console.log(`  ${FAIL} Could not parse ${targetPath} (${read.reason}) — left untouched`);
+    console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
+    return false;
   }
+  const settings = read.settings as ClaudeSettings;
 
-  if (guardFullyWired(settings)) {
+  const replaced: string[] = [];
+  if (guardFullyWired(settings) && replaced.length === 0) {
     console.log(`  ${SKIP} Guard already wired in ${targetPath}`);
+    return true;
+  }
+  if (guardFullyWired(settings) && !dryRun) {
+    const w = writeSettingsFile(targetPath, settings);
+    console.log(`  ${CHECK} Switched ${replaced.length} npx guard hook(s) to direct node calls → ${targetPath}`);
+    if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
     return true;
   }
 
@@ -322,9 +323,9 @@ async function configureGuard(): Promise<boolean> {
   // Merge, don't replace (see lib/guard-wiring.ts for the rules it holds to).
   wireGuard(settings);
 
-  mkdirSync(targetDir, { recursive: true });
-  writeFileSync(targetPath, JSON.stringify(settings, null, 2), 'utf8');
+  const w = writeSettingsFile(targetPath, settings);
   console.log(`  ${CHECK} Guard wired → ${targetPath} ${DIM}(${scopeLabel})${RESET}`);
+  if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
   if (!projectGuard) {
     console.log(`  ${DIM}Active in every repo. Scope an anchor with \`affects\` globs to limit where it fires;`);
     console.log(`  --no-guard to skip, --project-guard for this repo only.${RESET}`);
