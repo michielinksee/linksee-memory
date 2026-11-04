@@ -15,7 +15,7 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { openDb, runMigrations } from '../db/migrate.js';
+import { openDb, runMigrations, LegacySchemaError } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
@@ -85,7 +85,17 @@ if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand))
 }
 
 const db = openDb();
-runMigrations(db);
+try {
+  runMigrations(db);
+} catch (e) {
+  // A pre-June-2026 DB (schema < 6) is refused before any write; print the recovery steps
+  // instead of a stack trace. MCP clients show the server's stderr in their logs.
+  if (e instanceof LegacySchemaError) {
+    process.stderr.write(`${e.message}\n`);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // Distill triage runs on EVERY start, before the first request. It is one indexed scan and a
 // handful of JSON rewrites — cheap — and 0.16.0 had tucked it inside the auto-consolidate block

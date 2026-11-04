@@ -49,6 +49,35 @@ export function openDb(): Database.Database {
   }
 }
 
+/** Oldest schema this version migrates in place. Older files are refused before any write. */
+export const MIN_SUPPORTED_SCHEMA = 6;
+
+/**
+ * Thrown by runMigrations for a schema older than MIN_SUPPORTED_SCHEMA (a DB last opened by a
+ * 2026-05-or-earlier version). The message is the recovery procedure, so any caller that just
+ * prints the error shows the user what to do.
+ *
+ * The route was checked on a schema-5 file (2026-11-04): 0.7.2 takes it to schema 7 without
+ * touching memories; 0.8.0 through 0.17.0 all stop on `no such table: drift_anchors` (fixed in
+ * 0.17.1, so 0.17.1 takes schema 7 on to 16).
+ */
+export class LegacySchemaError extends Error {
+  readonly schemaVersion: number;
+  constructor(schemaVersion: number, dbPath: string) {
+    super(
+      `[linksee-memory] ${dbPath} is at schema ${schemaVersion}; this version migrates schema ${MIN_SUPPORTED_SCHEMA} and newer only. ` +
+      `Nothing was written. To bring it forward:\n` +
+      `  1. Close every Claude Code / Cursor / other client using linksee-memory.\n` +
+      `  2. Back up the folder that holds memory.db (copy memory.db, and memory.db-wal / memory.db-shm if present).\n` +
+      `  3. Run once: npx -y linksee-memory@0.7.2 stats   (same LINKSEE_MEMORY_DIR if you set one) — this moves it to schema 7.\n` +
+      `  4. Start this version again; it migrates schema 7 to the current one.\n` +
+      `If anything goes wrong, put the backup back. (A direct migration is planned for 0.17.2.)`,
+    );
+    this.name = 'LegacySchemaError';
+    this.schemaVersion = schemaVersion;
+  }
+}
+
 export function runMigrations(db: Database.Database): void {
   const __filename = fileURLToPath(import.meta.url);
   const schemaPath = join(dirname(__filename), 'schema.sql');
@@ -63,6 +92,14 @@ export function runMigrations(db: Database.Database): void {
   if (metaTable?.name) {
     const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
     if (versionRow) currentVersion = Number(versionRow.value) || 0;
+  }
+
+  // 0.17.1 (L-1-106 / audit F3): refuse schema 1–5 BEFORE any write. Their path through here
+  // (v5 → v6 generated columns, then the v5 entity merge running after the version has already
+  // been bumped to 16, with no transaction around it) can leave a half-migrated file. A safe,
+  // tested migration is 0.17.2 work; until then stop and say how to get through.
+  if (currentVersion > 0 && currentVersion < MIN_SUPPORTED_SCHEMA) {
+    throw new LegacySchemaError(currentVersion, getDbPath());
   }
 
   // v3 → v4: rebuild memories_fts with trigram tokenizer for JP/CJK support.
@@ -132,7 +169,14 @@ export function runMigrations(db: Database.Database): void {
   // detector/dashboard (which read the original columns + status active/retired) are unaffected.
   // `lifecycle` carries the rich state; `status` stays the coarse scan-gate. New tables
   // (reality_events, memory_write_candidates) are created by db.exec(sql) below (CREATE IF NOT EXISTS).
-  if (currentVersion > 0 && currentVersion < 9) {
+  // 0.17.1 (L-1-106 / audit F3): drift_anchors only exists from v8 on. On an older DB the table is
+  // missing, PRAGMA table_info returns nothing, and every ALTER below threw "no such table" — so
+  // any pre-0.12 DB could not start. If the table is absent, skip: db.exec(sql) below creates it
+  // with all of these columns.
+  const hasDriftAnchors = !!db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='drift_anchors'"
+  ).get();
+  if (currentVersion > 0 && currentVersion < 9 && hasDriftAnchors) {
     const have = new Set(
       (db.prepare('PRAGMA table_info(drift_anchors)').all() as Array<{ name: string }>).map((c) => c.name)
     );
