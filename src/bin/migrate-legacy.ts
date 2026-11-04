@@ -2,40 +2,46 @@
 // linksee-memory migrate — bring a schema 1–5 memory.db (0.11 and earlier, up to May 2026) to the
 // current schema, by hand, without starting the server (0.17.2, L-1-068 / L-1-122).
 //
-//   npx -y linksee-memory@<version> migrate --dry   # read-only: what would happen
-//   npx -y linksee-memory@<version> migrate         # back up, then migrate in one transaction
+//   npx -y linksee-memory@<version> migrate --dry   # full rehearsal on a temporary copy
+//   npx -y linksee-memory@<version> migrate         # migrate a copy, then swap it in
 //
-// What it does NOT do: start the MCP server, consolidate, merge duplicate entities, delete rows,
-// or switch the journal mode. Every check that cannot be completed stops the run.
+// The live files (memory.db and its -wal / -shm / -journal) are never opened for writing and never
+// changed until the final swap (Codex review of #19: a writable connection on them recovers a hot
+// journal on open and checkpoints a WAL on close, so "rolled back" could not mean "unchanged").
 //
-// Order (each step only runs when the one before succeeded):
-//   1. read the schema on a READ-ONLY connection (no checkpoint, no rollback)
-//        schema ≥ 6 → "not needed", nothing written;  --dry → report and stop
-//   2. hot rollback journal only: copy memory.db + memory.db-journal byte for byte
-//        to memory.db.pre-migrate-<ts>-hot(-journal) before anything opens them for writing
-//   3. open for writing, BEGIN IMMEDIATE (refused if another process is writing)
-//   4. consistent backup: a second connection runs VACUUM INTO memory.db.pre-migrate-<ts>
-//        while (3) holds the write lock, then the backup is checked: integrity_check = ok,
-//        same row counts as the original
-//   5. migrate.ts steps 5→6→…→16 inside the transaction from (3)
-//   6. every table's row count ≥ before, schema = current, quick_check = ok → COMMIT
-//        otherwise ROLLBACK: the schema version is not advanced and the backup stays
+//   1. copy memory.db, -wal, -journal byte for byte into <memory.db>.migrating-<ts>/ (plain file
+//      copy, no SQLite). If any live file's size or mtime changed during the copy → stop.
+//   2. open the COPY: SQLite recovers it (rolls back a hot journal / reads the WAL) there.
+//      Read its schema; integrity_check must be ok. schema ≥ 6 → "not needed" (unless the copy
+//      had an unfinished write to roll back — then it is recovered and swapped like a migration).
+//   3. VACUUM INTO a single-file replica; check it: integrity_check ok, same schema, same rows.
+//   4. migrate the replica in one transaction (migrate.ts steps 5→6→…→16). Commit only if no table
+//      lost rows, schema = current, quick_check = ok. Any failure → the work folder is removed;
+//      the live files were not touched.
+//   5. swap: live files unchanged since step 1? (size + mtime), no other writer (rollback-journal
+//      files: a writable BEGIN IMMEDIATE probe that writes nothing), then move memory.db and its
+//      sidecars into <memory.db>.pre-migrate-<ts>/ (that folder IS the backup, byte for byte) and
+//      move the replica in. A failed rename puts back what was already moved.
+// It never starts the server, consolidates, merges duplicate entities or deletes rows.
 
 import Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, constants as fsc } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync,
+  renameSync, rmSync, rmdirSync, statSync, constants as fsc,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import {
-  getDbPath, probeReadonly, readSchemaVersion, runMigrations, MIN_SUPPORTED_SCHEMA, DbRefusedError, migrateCommand,
-} from '../db/migrate.js';
+import { getDbPath, readSchemaVersion, runMigrations, MIN_SUPPORTED_SCHEMA, DbRefusedError, migrateCommand } from '../db/migrate.js';
 import { isNativeLoadError, NATIVE_HINT } from '../lib/native-hint.js';
 
 export type MigrateLegacyOpts = {
   dbPath: string;
   dry?: boolean;
   now?: Date;
-  /** Called before each migration step; tests throw here to check the rollback. */
+  /** Called before each step with the connection it is about to use; tests inject failures here.
+   *  Steps: 'vacuum-into' (the recovered copy), 'verify-replica' (the replica), every migrate.ts
+   *  step (the replica, inside the transaction), 'commit' (the replica, just before COMMIT). */
   onStep?: (step: string, db: Database.Database) => void;
   log?: (line: string) => void;
 };
@@ -43,8 +49,7 @@ export type MigrateLegacyOpts = {
 export type MigrateLegacyResult = {
   code: 0 | 1;
   outcome: 'missing' | 'not-needed' | 'dry' | 'migrated' | 'recovered' | 'refused' | 'failed';
-  backup?: string;
-  rawCopy?: string;
+  backupDir?: string;
   before?: Record<string, number>;
   after?: Record<string, number>;
   from?: number;
@@ -53,6 +58,7 @@ export type MigrateLegacyResult = {
 
 /** The four tables the report shows. Every table is checked; these are the ones people know. */
 export const REPORTED = ['memories', 'entities', 'memory_edges', 'drift_anchors'] as const;
+const SIDECARS = ['-wal', '-shm', '-journal'] as const;
 
 export function currentSchemaVersion(): number {
   const sql = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'db', 'schema.sql'), 'utf8');
@@ -73,7 +79,7 @@ export function rowCounts(db: Database.Database): Record<string, number> {
 
 const shown = (c: Record<string, number> | undefined, t: string) => (c && t in c ? String(c[t]) : '(no table)');
 
-/** Which steps migrate.ts would run from schema `v` (for --dry and the report). */
+/** Which steps migrate.ts runs from schema `v` (for the report). */
 export function planFor(v: number, hasDriftAnchors: boolean): string[] {
   const s: string[] = [];
   if (v < 4) s.push('v3→v4: rebuild the full-text index (trigram) from memories');
@@ -89,171 +95,211 @@ function stampOf(d: Date): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 }
 
-function restoreSteps(dbPath: string, backup: string | undefined, log: (l: string) => void): void {
-  log(`  memory.db was rolled back: its schema version and rows are as they were before this run.`);
-  if (backup && existsSync(backup)) {
-    log(`  A consistent copy from before the run is at ${backup}. To go back to it by hand:`);
-    log(`    1. close every Claude Code / Cursor / other client using linksee-memory`);
-    log(`    2. move memory.db and any memory.db-wal / -shm / -journal out of ${dirname(dbPath)}`);
-    log(`    3. copy ${backup} to ${dbPath}`);
-  }
+/** size + mtime of memory.db and every sidecar (absent = null). Plain stat, no SQLite. */
+function liveState(path: string): string {
+  return JSON.stringify(['', ...SIDECARS].map((ext) => {
+    try { const s = statSync(path + ext); return [ext, s.size, s.mtimeMs]; } catch { return [ext, null]; }
+  }));
+}
+
+/** Header byte 18 = 2 means WAL mode (read with fs, not SQLite). */
+function isWalFile(path: string): boolean {
+  const fd = openSync(path, 'r');
+  try { const b = Buffer.alloc(20); readSync(fd, b, 0, 20, 0); return b[18] === 2; } finally { closeSync(fd); }
 }
 
 export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
   const log = o.log ?? ((l: string) => console.log(l));
-  const path = o.dbPath;
+  const path = resolve(o.dbPath);
+  const name = basename(path);
   const target = currentSchemaVersion();
+  const step = (s: string, db: Database.Database) => o.onStep?.(s, db);
 
-  // 1. read-only look. Throws PrecheckError (busy / unreadable) or the native error: the caller stops.
-  const { probe, tidy } = probeReadonly(path);
-  if (probe.kind === 'missing') {
+  if (!existsSync(path)) {
     log(`No memory.db at ${path} — nothing to migrate.`);
     return { code: 0, outcome: 'missing' };
   }
-  if (probe.kind === 'notadb') {
-    tidy();
-    log(`${path} is not a readable SQLite database. Nothing was changed.`);
-    return { code: 1, outcome: 'refused' };
-  }
-  if (probe.kind === 'version' && probe.version >= MIN_SUPPORTED_SCHEMA) {
-    tidy();
-    log(`${path} is at schema ${probe.version}: migrate is not needed (the server migrates schema ${MIN_SUPPORTED_SCHEMA} and newer itself). Nothing was changed.`);
-    return { code: 0, outcome: 'not-needed', from: probe.version };
-  }
-  if (probe.kind === 'version' && probe.version === 0) {
-    tidy();
-    log(`${path} has no schema_version: not a linksee-memory database this command knows. Nothing was changed.`);
-    return { code: 1, outcome: 'refused' };
-  }
-
   const stamp = stampOf(o.now ?? new Date());
-  const backup = `${path}.pre-migrate-${stamp}`;
-  const rawCopy = probe.kind === 'hot' ? `${backup}-hot` : undefined;
-
-  if (o.dry) {
-    // Read the version and counts without writing. A hot journal cannot be read in place, so a
-    // throwaway copy of the pair is opened instead (SQLite rolls the copy back, not the original).
-    let v = 0; let counts: Record<string, number> = {}; let hasDA = false;
-    let tmp: string | null = null;
-    try {
-      let file = path;
-      if (probe.kind === 'hot') {
-        tmp = mkdtempSync(join(tmpdir(), 'linksee-migrate-dry-'));
-        file = join(tmp, 'memory.db');
-        copyFileSync(path, file);
-        copyFileSync(path + '-journal', file + '-journal');
-      }
-      const ro = new Database(file, { readonly: probe.kind !== 'hot', fileMustExist: true });
-      try {
-        v = readSchemaVersion(ro); counts = rowCounts(ro);
-        hasDA = 'drift_anchors' in counts;
-      } finally { ro.close(); }
-    } finally {
-      if (tmp) rmSync(tmp, { recursive: true, force: true });
-      tidy();
-    }
-    log(`[dry] ${path}: schema ${v}${probe.kind === 'hot' ? ' (after rolling back an unfinished write, read from a temporary copy)' : ''}. Nothing was written.`);
-    if (v >= MIN_SUPPORTED_SCHEMA) {
-      log(`[dry] Only the unfinished write would be rolled back (raw copy first: ${rawCopy}); no migration needed.`);
-      return { code: 0, outcome: 'dry', from: v };
-    }
-    if (rawCopy) log(`[dry] would copy memory.db + memory.db-journal byte for byte to ${rawCopy}(-journal)`);
-    log(`[dry] would back up (VACUUM INTO, then integrity_check) to ${backup}`);
-    log(`[dry] would run, in one transaction (rolled back on any failure):`);
-    for (const s of planFor(v, hasDA)) log(`        • ${s}`);
-    log(`[dry] rows now: ${REPORTED.map((t) => `${t} ${shown(counts, t)}`).join(' · ')}`);
-    log(`[dry] the server is not started and nothing is consolidated or deleted.`);
-    return { code: 0, outcome: 'dry', from: v, before: counts };
-  }
-
-  if (existsSync(backup) || (rawCopy && existsSync(rawCopy))) {
-    log(`${backup} already exists; run again in a second. Nothing was changed.`);
-    return { code: 1, outcome: 'refused' };
-  }
-
-  // 2. hot journal: keep the exact bytes before SQLite rolls the unfinished write back.
-  if (rawCopy) {
-    try {
-      copyFileSync(path, rawCopy, fsc.COPYFILE_EXCL);
-      copyFileSync(path + '-journal', rawCopy + '-journal', fsc.COPYFILE_EXCL);
-    } catch (e) {
-      log(`Could not copy the files before recovery (${(e as Error)?.message ?? e}). Nothing was changed.`);
+  const backupDir = `${path}.pre-migrate-${stamp}`;
+  const work = o.dry ? mkdtempSync(join(tmpdir(), 'linksee-migrate-dry-')) : `${path}.migrating-${stamp}`;
+  if (!o.dry) {
+    if (existsSync(work) || existsSync(backupDir)) {
+      log(`${existsSync(work) ? work : backupDir} already exists; run again in a second. Nothing was changed.`);
       return { code: 1, outcome: 'refused' };
     }
-    log(`Copied memory.db + memory.db-journal as they were to ${rawCopy}(-journal).`);
+    mkdirSync(work);
   }
+  const conns: Database.Database[] = [];
+  const open = (p: string) => { const d = new Database(p, { fileMustExist: true, timeout: 0 }); conns.push(d); return d; };
+  const closeAll = () => { for (const d of conns.splice(0)) { try { if (d.open) d.close(); } catch { /* ignore */ } } };
+  const state0 = liveState(path);
+  /** Say "unchanged" only when it is checked to be true. */
+  const liveNote = () => (liveState(path) === state0
+    ? `${name} and its -wal / -shm / -journal were not changed (all work happened on a copy, now removed).`
+    : `${name} or a sidecar changed during the run — another client is probably using it. This command did not write to them.`);
+  const tag = o.dry ? '[dry] ' : '';
 
-  // 3. the write lock. Readers may stay; another writer makes this fail.
-  const db = new Database(path, { timeout: 2000 });
-  let before: Record<string, number> = {};
-  let from = 0;
   try {
+    // 1. byte copy, no SQLite on the live files
+    const raw = join(work, 'raw.db');
+    for (const ext of ['', '-wal', '-journal']) {
+      if (existsSync(path + ext)) copyFileSync(path + ext, raw + ext, fsc.COPYFILE_EXCL);
+    }
+    if (liveState(path) !== state0) {
+      log(`${name} changed while it was being copied: another client is writing to it. Close every Claude Code / Cursor / other client using linksee-memory and run again. Nothing was changed.`);
+      return { code: 1, outcome: 'refused' };
+    }
+
+    // 2. recover and read the copy
+    const hadJournal = existsSync(raw + '-journal') && statSync(raw + '-journal').size > 0;
+    let rdb!: Database.Database; let from!: number;
     try {
-      db.exec('BEGIN IMMEDIATE');
+      rdb = open(raw);
+      from = readSchemaVersion(rdb);
     } catch (e) {
-      log(`Could not take the write lock (${(e as { code?: string })?.code ?? (e as Error)?.message}). ` +
-        `Close every Claude Code / Cursor / other client using linksee-memory and run again. Nothing was migrated.`);
-      return { code: 1, outcome: 'refused', rawCopy };
+      log(`${path} could not be read as a SQLite database (${(e as { code?: string })?.code ?? (e as Error)?.message}). ${liveNote()}`);
+      return { code: 1, outcome: 'refused' };
     }
-    from = readSchemaVersion(db);
-    if (from >= MIN_SUPPORTED_SCHEMA) {
-      db.exec('COMMIT');
-      log(`The unfinished write was rolled back by SQLite. ${path} is at schema ${from}: no migration needed.`);
-      return { code: 0, outcome: 'recovered', rawCopy, from };
-    }
+    const recovered = hadJournal && !(existsSync(raw + '-journal') && statSync(raw + '-journal').size > 0);
     if (from === 0) {
-      db.exec('ROLLBACK');
-      log(`${path} has no schema_version: not a linksee-memory database this command knows. Nothing was migrated.`);
-      return { code: 1, outcome: 'refused', rawCopy };
+      log(`${path} has no schema_version: not a linksee-memory database this command knows. ${liveNote()}`);
+      return { code: 1, outcome: 'refused' };
     }
-    before = rowCounts(db);
+    if (from >= MIN_SUPPORTED_SCHEMA && !recovered) {
+      log(`${path} is at schema ${from}: migrate is not needed (the server migrates schema ${MIN_SUPPORTED_SCHEMA} and newer itself). Nothing was changed.`);
+      return { code: 0, outcome: 'not-needed', from };
+    }
+    const ic0 = rdb.pragma('integrity_check', { simple: true });
+    if (ic0 !== 'ok') {
+      log(`integrity_check on a copy of ${name} returned ${String(ic0)}: the file is damaged, so it is not migrated. ${liveNote()}`);
+      return { code: 1, outcome: 'refused', from };
+    }
+    const before = rowCounts(rdb);
+    if (recovered) log(`${tag}The copy had an unfinished write (a hot -journal); SQLite rolled it back in the copy.`);
 
-    // 4. consistent backup, taken while this connection holds the write lock.
+    // 3. single-file replica + check
+    const replica = join(work, 'replica.db');
     try {
-      const b = new Database(path, { timeout: 2000, fileMustExist: true });
-      try { b.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`); } finally { b.close(); }
-      const c = new Database(backup, { readonly: true, fileMustExist: true });
+      step('vacuum-into', rdb);
+      rdb.exec(`VACUUM INTO '${replica.replace(/'/g, "''")}'`);
+    } catch (e) {
+      log(`Making a clean copy failed (${(e as Error)?.message ?? e}). ${liveNote()}`);
+      return { code: 1, outcome: 'failed', from };
+    }
+    rdb.close();
+    const rep = open(replica);
+    try {
+      rep.pragma('journal_mode = DELETE'); // the replica stays one file; the server switches to WAL on start
+      rep.pragma('foreign_keys = ON');
+      step('verify-replica', rep);
+      const ic = rep.pragma('integrity_check', { simple: true });
+      if (ic !== 'ok') throw new Error(`integrity_check returned ${String(ic)}`);
+      if (readSchemaVersion(rep) !== from) throw new Error('schema version differs from the original');
+      if (JSON.stringify(rowCounts(rep)) !== JSON.stringify(before)) throw new Error('row counts differ from the original');
+    } catch (e) {
+      log(`The clean copy did not match the original (${(e as Error)?.message ?? e}). ${liveNote()}`);
+      return { code: 1, outcome: 'failed', from };
+    }
+
+    // 4. migrate the replica in one transaction
+    let after: Record<string, number> = before;
+    if (from < MIN_SUPPORTED_SCHEMA) {
       try {
-        const ic = c.pragma('integrity_check', { simple: true });
-        const bc = rowCounts(c);
-        const bv = readSchemaVersion(c);
-        if (ic !== 'ok') throw new Error(`integrity_check on the backup returned ${String(ic)}`);
-        if (bv !== from || JSON.stringify(bc) !== JSON.stringify(before)) throw new Error('the backup does not match the original (schema or row counts)');
-      } finally { c.close(); }
-    } catch (e) {
-      db.exec('ROLLBACK');
-      log(`Backup failed (${(e as Error)?.message ?? e}). Nothing was migrated; memory.db is as it was.`);
-      return { code: 1, outcome: 'failed', backup: existsSync(backup) ? backup : undefined, rawCopy, from };
+        rep.exec('BEGIN IMMEDIATE');
+        runMigrations(rep, { allowLegacy: true, mergeDuplicateEntities: false, onStep: o.onStep });
+        after = rowCounts(rep);
+        const lost = Object.keys(before).filter((t) => (after[t] ?? -1) < before[t]);
+        const to = readSchemaVersion(rep);
+        const qc = rep.pragma('quick_check', { simple: true });
+        if (lost.length) throw new Error(`rows would be lost in: ${lost.map((t) => `${t} ${before[t]}→${after[t] ?? 'gone'}`).join(', ')}`);
+        if (to !== target) throw new Error(`schema ended at ${to}, expected ${target}`);
+        if (qc !== 'ok') throw new Error(`quick_check returned ${String(qc)}`);
+        step('commit', rep);
+        rep.exec('COMMIT');
+      } catch (e) {
+        let rb = '';
+        if (rep.inTransaction) { try { rep.exec('ROLLBACK'); rb = ' (rolled back in the copy)'; } catch { rb = ''; } }
+        log(`Migration failed${rb}: ${(e as Error)?.message ?? e}`);
+        log(liveNote());
+        return { code: 1, outcome: 'failed', before, from };
+      }
+      const fk = rep.pragma('foreign_key_check') as unknown[];
+      if (fk.length) log(`${tag}note: foreign_key_check lists ${fk.length} row(s) that were already orphaned before; kept as they are.`);
     }
-    log(`Backed up to ${backup} (integrity_check ok, same row counts).`);
+    rep.close();
 
-    // 5 + 6. migrate in the open transaction, check, and only then commit.
-    let after: Record<string, number> = {};
+    const outcome = from < MIN_SUPPORTED_SCHEMA ? 'migrated' : 'recovered';
+    const report = () => {
+      for (const t of REPORTED) log(`  ${t.padEnd(14)} ${shown(before, t).padStart(8)} → ${shown(after, t)}`);
+    };
+    if (o.dry) {
+      log(`[dry] ${path}: schema ${from}. Rehearsed on a temporary copy — nothing was written next to ${name}.`);
+      if (from < MIN_SUPPORTED_SCHEMA) {
+        log(`[dry] steps (one transaction, rolled back on any failure):`);
+        for (const s of planFor(from, 'drift_anchors' in before)) log(`        • ${s}`);
+        log(`[dry] rehearsal: schema ${from} → ${target}, no rows lost:`);
+      }
+      report();
+      log(`[dry] a real run would move ${name} and its sidecars into ${backupDir}/ and put the migrated copy in its place.`);
+      log(`[dry] liveness: ${liveState(path) === state0 ? 'live files unchanged' : 'live files CHANGED during the rehearsal (a client is using them)'}.`);
+      return { code: 0, outcome: 'dry', before, after, from, to: from < MIN_SUPPORTED_SCHEMA ? target : from };
+    }
+
+    // 5. swap
+    if (liveState(path) !== state0) {
+      log(`${name} changed while the copy was being migrated: another client is using it. Close every client using linksee-memory and run again. Not swapped; ${name} was not changed by this command.`);
+      return { code: 1, outcome: 'refused', from };
+    }
+    // Writer probe for rollback-journal files without a journal: BEGIN IMMEDIATE takes RESERVED
+    // and fails if another connection holds it; nothing is written (no page changes → no journal).
+    // Skipped for WAL files and when a -journal exists (opening those for writing changes them).
+    if (!existsSync(path + '-wal') && !existsSync(path + '-journal') && !isWalFile(path)) {
+      const p = new Database(path, { fileMustExist: true, timeout: 0 });
+      try { p.exec('BEGIN IMMEDIATE'); p.exec('ROLLBACK'); } catch (e) {
+        p.close();
+        log(`Another client holds ${name} (${(e as { code?: string })?.code ?? (e as Error)?.message}). Close every client using linksee-memory and run again. Not swapped; ${liveNote()}`);
+        return { code: 1, outcome: 'refused', from };
+      }
+      p.close();
+      if (liveState(path) !== state0) {
+        log(`${name} changed during the final check. Not swapped. Run again with every client closed.`);
+        return { code: 1, outcome: 'refused', from };
+      }
+    }
+    mkdirSync(backupDir);
+    const done: string[] = [];
+    const putBack = () => {
+      const stuck: string[] = [];
+      for (const ext of done.reverse()) {
+        try { renameSync(join(backupDir, name + ext), path + ext); } catch { stuck.push(name + ext); }
+      }
+      if (stuck.length === 0) { try { rmdirSync(backupDir); } catch { /* leave the empty folder */ } }
+      return stuck;
+    };
     try {
-      runMigrations(db, { allowLegacy: true, mergeDuplicateEntities: false, onStep: o.onStep });
-      after = rowCounts(db);
-      const lost = Object.keys(before).filter((t) => (after[t] ?? -1) < before[t]);
-      const to = readSchemaVersion(db);
-      const qc = db.pragma('quick_check', { simple: true });
-      if (lost.length) throw new Error(`rows would be lost in: ${lost.map((t) => `${t} ${before[t]}→${after[t] ?? 'gone'}`).join(', ')}`);
-      if (to !== target) throw new Error(`schema ended at ${to}, expected ${target}`);
-      if (qc !== 'ok') throw new Error(`quick_check returned ${String(qc)}`);
-      db.exec('COMMIT');
+      for (const ext of ['', ...SIDECARS]) {
+        if (!existsSync(path + ext)) continue;
+        renameSync(path + ext, join(backupDir, name + ext));
+        done.push(ext);
+      }
+      renameSync(replica, path);
     } catch (e) {
-      if (db.inTransaction) { try { db.exec('ROLLBACK'); } catch { /* the close below rolls back */ } }
-      log(`Migration failed: ${(e as Error)?.message ?? e}`);
-      restoreSteps(path, backup, log);
-      return { code: 1, outcome: 'failed', backup, rawCopy, before, from };
+      const stuck = putBack();
+      log(`Could not swap the files (${(e as { code?: string })?.code ?? (e as Error)?.message}) — on Windows this means another process has ${name} open.`);
+      if (stuck.length) log(`  Could not move back: ${stuck.join(', ')} — they are in ${backupDir}; move them back to ${dirname(path)} by hand.`);
+      else log(`  Everything was moved back. Close every client using linksee-memory and run again.`);
+      return { code: 1, outcome: 'failed', from };
     }
 
-    log(`Migrated ${path}: schema ${from} → ${target}.`);
-    for (const t of REPORTED) log(`  ${t.padEnd(14)} ${shown(before, t).padStart(8)} → ${shown(after, t)}`);
-    log(`The backup stays at ${backup}; delete it yourself once linksee-memory works for you.`);
+    log(from < MIN_SUPPORTED_SCHEMA ? `Migrated ${path}: schema ${from} → ${target}.` : `Recovered ${path} (schema ${from}): the unfinished write was rolled back.`);
+    report();
+    log(`The original files, byte for byte, are in ${backupDir}/. To go back: close every client, move ${name} out of the way, and move the files from that folder back.`);
     log(`Nothing was consolidated or deleted. The server switches the file to WAL on its next start.`);
-    return { code: 0, outcome: 'migrated', backup, rawCopy, before, after, from, to: target };
+    return { code: 0, outcome, backupDir, before, after, from, to: from < MIN_SUPPORTED_SCHEMA ? target : from };
   } finally {
-    if (db.inTransaction) { try { db.exec('ROLLBACK'); } catch { /* ignore */ } }
-    db.close();
+    closeAll();
+    // Whatever happened, the work folder goes (after a swap only the raw copies are left in it).
+    try { rmSync(work, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
 
@@ -261,19 +307,18 @@ function usage(): string {
   return `Usage: ${migrateCommand()} [--dry] [--db <path to memory.db>]
 
 Migrates a memory.db at schema 1–5 (linksee-memory 0.11 and earlier) to the current schema.
-  --dry   only report what would happen; nothing is written
+  --dry   rehearse on a temporary copy; nothing is written next to memory.db
   --db    a memory.db other than ${getDbPath()}
-It backs the file up first (memory.db.pre-migrate-<time>), runs every step in one transaction,
-and rolls back if any step fails or any table would lose rows. It does not start the server.
+It migrates a copy, checks it (no table loses rows, integrity ok), and only then moves the
+original files into memory.db.pre-migrate-<time>/ and the migrated copy into place.
 Close Claude Code / Cursor / other clients using linksee-memory before running it.`;
 }
 
 function main(argv: string[]): number {
   if (argv.includes('--help') || argv.includes('-h')) { console.log(usage()); return 0; }
-  const known = new Set(['--dry', '--db']);
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--db') { i++; continue; }
-    if (!known.has(argv[i])) { console.error(`Unknown argument: ${argv[i]}\n\n${usage()}`); return 1; }
+    if (argv[i] !== '--dry') { console.error(`Unknown argument: ${argv[i]}\n\n${usage()}`); return 1; }
   }
   const di = argv.indexOf('--db');
   if (di >= 0 && !argv[di + 1]) { console.error(`--db needs a path\n\n${usage()}`); return 1; }

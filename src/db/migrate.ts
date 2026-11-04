@@ -29,8 +29,13 @@ export function packageVersion(): string {
  */
 export function migrateCommand(): string {
   const v = packageVersion();
-  return `npx -y linksee-memory${v ? '@' + v : ''} migrate`;
+  // Never fall back to an unpinned command (Codex review of #19): if this version cannot be read,
+  // name the first version that has `migrate`, as a fixed string.
+  return /^\d+\.\d+\.\d+/.test(v) ? `npx -y linksee-memory@${v} migrate` : `npx -y linksee-memory@${MIGRATE_SINCE} migrate`;
 }
+
+/** First version with the `migrate` subcommand. */
+export const MIGRATE_SINCE = '0.17.2';
 
 /**
  * Decide, WITHOUT a writable connection, whether this file may be opened for writing at all.
