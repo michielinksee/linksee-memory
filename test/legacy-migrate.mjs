@@ -40,7 +40,7 @@ const baseEnv = { ...process.env, HOME, USERPROFILE: HOME, LINKSEE_MEMORY_DIR: j
 process.env.HOME = HOME; process.env.USERPROFILE = HOME; process.env.LINKSEE_MEMORY_DIR = baseEnv.LINKSEE_MEMORY_DIR;
 
 const { migrateLegacy, currentSchemaVersion } = await import('../dist/bin/migrate-legacy.js');
-const { pruneRuntimes, defaultSources, tomlCommandStrings } = await import('../dist/bin/runtime.js');
+const { pruneRuntimes, defaultSources, tomlStrings } = await import('../dist/bin/runtime.js');
 const TARGET = String(currentSchemaVersion());
 
 const filesOf = (dir) => readdirSync(dir).sort();
@@ -85,6 +85,7 @@ for (const state of STATES) {
   check(`[${state}] now at schema ${TARGET}`, versionOf(file) === TARGET, versionOf(file));
   check(`[${state}] report shows the four tables`, ['memories', 'entities', 'memory_edges', 'drift_anchors'].every((t) => run.stdout.includes(t)), run.stdout);
   check(`[${state}] nothing consolidated`, /Nothing was consolidated or deleted/.test(run.stdout), run.stdout);
+  check(`[${state}] restore steps printed (current set aside first, never mix)`, /Move the CURRENT memory\.db/.test(run.stdout) && /Never combine/.test(run.stdout), run.stdout);
   {
     const db = new Database(file, { readonly: true });
     const mem = db.prepare(`SELECT content FROM memories ORDER BY id`).all();
@@ -99,7 +100,10 @@ for (const state of STATES) {
   check(`[${state}] one backup folder, no work folder left`, bks.length === 1 && !filesOf(dir).some((f) => /migrating/.test(f)), filesOf(dir).join(','));
   if (bks.length === 1) {
     const bdir = join(dir, bks[0]);
-    const inBackup = Object.fromEntries(filesOf(bdir).map((f) => [f, sha(join(bdir, f))]));
+    const inBackup = Object.fromEntries(filesOf(bdir).filter((f) => f !== 'README.txt').map((f) => [f, sha(join(bdir, f))]));
+    const readme = existsSync(join(bdir, 'README.txt')) ? readFileSync(join(bdir, 'README.txt'), 'utf8') : '';
+    check(`[${state}] backup README.txt lists the files and says: move the current set aside, restore as one set, never mix`,
+      /as one set/.test(readme) && /Move the CURRENT memory\.db and every memory\.db-wal/.test(readme) && /Never combine/.test(readme) && readme.includes('memory.db'), readme.slice(0, 300));
     check(`[${state}] backup = the original files byte for byte (sha256, sidecars included)`, JSON.stringify(inBackup) === JSON.stringify(perFile), `${JSON.stringify(Object.keys(inBackup))} vs ${JSON.stringify(Object.keys(perFile))}`);
   }
   check(`[${state}] live folder now has memory.db alone (no stale -wal/-journal)`, filesOf(dir).filter((f) => LIVE.test(f)).join(',') === 'memory.db', filesOf(dir).join(','));
@@ -134,14 +138,14 @@ const expectLine = {
   'COMMIT fails (deferred foreign key)': /Migration failed \(rolled back in the copy\): .*FOREIGN KEY/i,
 };
 for (const [label, mk] of Object.entries(injections)) {
-  for (const state of label.startsWith('a migrate.ts') ? STATES : ['rollback', 'wal', 'hot']) {
+  for (const state of STATES) {
     const { dir, file } = make(state);
     const listBefore = filesOf(dir).join(','); const shaBefore = liveSha(dir);
     const lines = [];
     const r = migrateLegacy({ dbPath: file, now: STAMP, log: (l) => lines.push(l), onStep: mk(file) });
     check(`[${state}] ${label} → exit 1`, r.code === 1 && r.outcome === 'failed', JSON.stringify(r));
     check(`[${state}] ${label} → says why`, lines.some((l) => expectLine[label].test(l)), lines.join(' | '));
-    check(`[${state}] ${label} → says the live files were not changed`, lines.some((l) => /were not changed \(all work happened on a copy/.test(l)), lines.join(' | '));
+    check(`[${state}] ${label} → says the live files were not changed`, lines.some((l) => /This command did not write to .*memory\.db or its -wal \/ -shm \/ -journal \(the work happened on a copy/.test(l)), lines.join(' | '));
     untouched(`[${state}] ${label}`, dir, shaBefore, listBefore);
   }
 }
@@ -164,6 +168,39 @@ for (const [label, mk] of Object.entries(injections)) {
   holder.stdin.end();
   await new Promise((res) => holder.on('exit', res));
   check('write lock held: version still 5 after the holder let go', versionOf(file) === '5');
+}
+
+// 3b. a rename in the swap fails (explicit injection): put back, or name what could not be put back
+{
+  // 'wal' state: renames are memory.db, -wal, -shm, then the replica. #3 (-shm) fails.
+  const { dir, file } = make('wal');
+  const listBefore = filesOf(dir).join(','); const shaBefore = liveSha(dir);
+  const r = cli(['migrate', '--db', file], { LINKSEE_TEST_FAIL_RENAME: '3' });
+  check('swap rename fails → exit 1, names what it moved back', r.status === 1 && /Moved back: memory\.db, memory\.db-wal/.test(r.stdout), r.stdout + r.stderr);
+  untouched('swap rename fails, all put back', dir, shaBefore, listBefore);
+
+  // #3 fails and the put-back of memory.db (#5, after -wal #4) fails too
+  const r2 = cli(['migrate', '--db', file], { LINKSEE_TEST_FAIL_RENAME: '3,5' });
+  const bk = filesOf(dir).find((f) => /pre-migrate/.test(f));
+  check('put-back fails → exit 1, names memory.db as not moved back, gives the one-set restore steps',
+    r2.status === 1 && /could NOT move back: memory\.db\b/.test(r2.stdout) && /no complete database/.test(r2.stdout) && /Never combine/.test(r2.stdout), r2.stdout + r2.stderr);
+  check('put-back fails → memory.db is in the backup folder with its original bytes', !!bk && existsSync(join(dir, bk, 'memory.db')) && sha(join(dir, bk, 'memory.db')) === JSON.parse(shaBefore)['memory.db'], filesOf(dir).join(','));
+}
+
+// 3c. same second, run twice (Date fixed): the second run is "not needed"; and a backup folder
+//     name that already exists stops the swap without touching anything
+{
+  const { file } = make('rollback');
+  const r1 = migrateLegacy({ dbPath: file, now: STAMP, log: () => {} });
+  const r2 = migrateLegacy({ dbPath: file, now: STAMP, log: () => {} });
+  check('same second twice: first migrates, second is "not needed"', r1.code === 0 && r2.code === 0 && r2.outcome === 'not-needed', JSON.stringify([r1.outcome, r2.outcome]));
+  const { dir: d2, file: f2 } = make('rollback');
+  mkdirSync(`${f2}.pre-migrate-20261104T000000Z`);
+  const listBefore = filesOf(d2).join(','); const shaBefore = liveSha(d2);
+  const lines = [];
+  const r3 = migrateLegacy({ dbPath: f2, now: STAMP, log: (l) => lines.push(l) });
+  check('backup folder name taken → refused, says so', r3.code === 1 && lines.some((l) => /Could not create .*pre-migrate/.test(l)), lines.join(' | '));
+  untouched('backup folder name taken', d2, shaBefore, listBefore);
 }
 
 // 4. schema 4 with duplicate entities: migrated, duplicates kept (not merged), no rows lost
@@ -224,7 +261,7 @@ for (const [label, mk] of Object.entries(injections)) {
   const esc = root('0.15.0').replace(/\\/g, '/').replace(/\//g, '\\/');
   writeFileSync(join(proj, '.claude', 'settings.local.json'), `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node ${esc}\\/dist\\/bin\\/sync-session.js"}]}]}}`);
   // Codex config: a valid one-line args array → 0.14.0
-  const goodToml = `# codex\nmodel = "gpt-5"\n\n[mcp_servers.linksee]\ncommand = "node"\nargs = ["${root('0.14.0').replace(/\\/g, '\\\\')}\\\\dist\\\\mcp\\\\server.js"]\nenv = { LINKSEE_TELEMETRY = "off" }\n`;
+  const goodToml = `# codex\nmodel = "gpt-5"\n\n[mcp_servers.linksee]\ncommand = "node"\nargs = ["${root('0.14.0').replace(/\\/g, '\\\\')}\\\\dist\\\\mcp\\\\server.js"]\nstartup_timeout_ms = 20000\nenabled = true\n`;
   writeFileSync(join(home, '.codex', 'config.toml'), goodToml);
   // another repo only (setup --project there) → 0.16.0
   writeFileSync(join(other, '.claude', 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: `"node" "${root('0.16.0').replace(/\\/g, '/')}/dist/bin/sync-session.js"` }] }] } }));
@@ -234,7 +271,7 @@ for (const [label, mk] of Object.entries(injections)) {
   const all = () => present(...VERS).every(Boolean);
   const run = (extra, yes, scopeConfirmed) => { const lines = []; const r = pruneRuntimes({ memoryDir: mem, sources: [...sources, ...extra], yes, scopeConfirmed, log: (l) => lines.push(l) }); return { r, lines, text: lines.join(' | ') }; };
 
-  check('toml parser reads the args array (escaped backslashes)', tomlCommandStrings(goodToml).strings.some((s) => s.replace(/\\/g, '/').includes('runtime/0.14.0/')) && !tomlCommandStrings(goodToml).error, JSON.stringify(tomlCommandStrings(goodToml)));
+  check('toml reader accepts the plain file and reads the args array (escaped backslashes)', tomlStrings(goodToml).strings.some((s) => s.replace(/\\/g, '/').includes('runtime/0.14.0/')) && !tomlStrings(goodToml).error, JSON.stringify(tomlStrings(goodToml)));
 
   const a = run([otherSrc], false, false);
   check('list: deletes nothing, shows each reference', all() && a.r.code === 0
@@ -263,16 +300,31 @@ for (const [label, mk] of Object.entries(injections)) {
   check('TOML line it cannot read (multi-line array): nothing deleted', all() && g.r.code === 1 && /could not read as TOML \(line 3/.test(g.text), g.text);
   writeFileSync(join(home, '.codex', 'config.toml'), goodToml);
 
-  // deletion that fails → exit 1, not recorded as deleted (Windows: an open file blocks the rename)
-  if (process.platform === 'win32') {
-    const fd = openSync(join(root('0.17.0'), 'package.json'), 'r');
-    const h = run([otherSrc], true, true);
-    closeSync(fd);
-    const ent = h.r.entries.find((x) => x.version === '0.17.0');
-    check('deletion fails (file open) → exit 1, decision delete-failed, folder still there', h.r.code === 1 && ent?.decision === 'delete-failed' && present('0.17.0')[0], h.text);
-  } else {
-    console.log('  skip deletion-failure case (needs Windows file locking)');
+  // TOML the small reader does not accept → could not confirm → nothing deleted (Codex review 2)
+  const tomlCases = {
+    'quoted key with escapes (Codex example)': `[mcp_servers.linksee]\ncommand = "node"\n"ar\\u0067s" = ["${root('0.17.0').replace(/\\/g, '/').replace('runtime/', 'runtime\\u002f')}/dist/mcp/server.js"]\n`,
+    'inline table': `[mcp_servers.linksee]\ncommand = "node"\nenv = { A = "b" }\n`,
+    'bad value on another key': `model = "unterminated\n[mcp_servers.linksee]\ncommand = "node"\n`,
+    'quoted table header': `[mcp_servers."linksee"]\ncommand = "node"\n`,
+  };
+  for (const [label, text] of Object.entries(tomlCases)) {
+    writeFileSync(join(home, '.codex', 'config.toml'), text);
+    const t = run([otherSrc], true, true);
+    check(`TOML ${label}: could not confirm, nothing deleted, exit 1`, all() && t.r.code === 1 && /could not read as TOML/.test(t.text), t.text);
   }
+  check('the Codex example really hides the path from a raw-text search', !tomlCases['quoted key with escapes (Codex example)'].replace(/\\+/g, '/').includes('runtime/0.17.0'));
+  writeFileSync(join(home, '.codex', 'config.toml'), goodToml);
+
+  // deletion that fails (explicit injection; Windows locking is not reliable for this) → exit 1,
+  // not recorded as deleted
+  const pruneCli = (env) => spawnSync(process.execPath, [SERVER, 'runtime', 'prune', '--yes', '--scope-confirmed', '--settings', otherSrc.path], { cwd: proj, encoding: 'utf8', input: '', env: { ...baseEnv, HOME: home, USERPROFILE: home, LINKSEE_MEMORY_DIR: mem, ...env } });
+  const h1 = pruneCli({ LINKSEE_TEST_FAIL_RENAME: '1' });
+  check('deletion fails at the rename → exit 1, "could not delete 0.17.0", folder still there', h1.status === 1 && /could not delete 0\.17\.0/.test(h1.stdout) && !/deleted 0\.17\.0/.test(h1.stdout) && present('0.17.0')[0], h1.stdout + h1.stderr);
+  const h2 = pruneCli({ LINKSEE_TEST_FAIL_RM: '1' });
+  const aside = filesOf(join(mem, 'runtime')).find((n) => n.startsWith('.pruning-0.17.0-'));
+  check('deletion fails at the remove → exit 1, says where it is, not "deleted"', h2.status === 1 && /not fully removed/.test(h2.stdout) && !/deleted 0\.17\.0/.test(h2.stdout) && !!aside, h2.stdout + h2.stderr);
+  if (aside) { rmSync(join(mem, 'runtime', aside), { recursive: true, force: true }); }
+  for (const v of ['0.17.0']) { mkdirSync(join(root(v)), { recursive: true }); writeFileSync(join(root(v), 'package.json'), JSON.stringify({ version: v })); }
 
   // the real thing via the CLI: only the unreferenced version goes
   const r4 = spawnSync(process.execPath, [SERVER, 'runtime', 'prune', '--yes', '--scope-confirmed', '--settings', otherSrc.path], { cwd: proj, encoding: 'utf8', input: '', env: { ...baseEnv, HOME: home, USERPROFILE: home, LINKSEE_MEMORY_DIR: mem } });

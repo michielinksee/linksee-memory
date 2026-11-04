@@ -16,21 +16,25 @@
 // How a file is read (Codex review of #19: no raw-text grep as the only test):
 //   • JSON: parsed; every string (keys and values, at any depth) is checked for runtime/<version>
 //     after normalizing \ → /. Parse failure → could not confirm.
-//   • TOML (~/.codex/config.toml): a minimal line parser. Comments, blank lines and [table]
-//     headers are skipped; every other line must be `key = value`. For `command` / `args` the
-//     value must be a single-line string or array of strings, which is parsed and checked. Any line
-//     it cannot read → could not confirm.
+//   • TOML (~/.codex/config.toml): a deliberately small line reader (Codex second review of #19:
+//     do not be clever). The ONLY lines it accepts are: blank, `# comment`, a `[table]` /
+//     `[[array]]` header of bare keys, and `bare.key = <value>` where the value is one string
+//     ("…" with escapes decoded, or '…'), a one-line array of such strings, a number, or
+//     true/false. Anything else - a quoted key, an inline table, a multi-line array or string, a
+//     date, an unknown form - makes the whole file "could not confirm". Every string it read
+//     (whatever the key) is checked for a runtime path.
 //   • In both, the raw text is ALSO searched (a match there only keeps a version, never deletes one).
 // A default file that does not exist (ENOENT) references nothing. Anything else that cannot be
 // confirmed → nothing is deleted, the reason is printed, exit 1.
 // Never touched: .tmp-* (an install in progress), *.old-* (kept from a failed same-version swap),
 // any name that is not a version, and the version this command runs from.
 
-import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirBytes, formatBytes } from '../lib/hook-runtime.js';
+import { renameGuarded, rmGuarded } from '../lib/test-faults.js';
 
 export type SettingsSource = { path: string; explicit: boolean };
 export type RuntimeEntry = {
@@ -94,40 +98,52 @@ function tomlString(s: string, i: number): [string, number] | null {
   return null;
 }
 
-/** Minimal TOML reader for the lines that can hold a command. Returns strings, or an error. */
-export function tomlCommandStrings(text: string): { strings: string[]; error?: string } {
+const BARE = '[A-Za-z0-9_-]+(?:\\s*\\.\\s*[A-Za-z0-9_-]+)*';
+const TOML_HEADER = new RegExp(`^\\[\\[?\\s*${BARE}\\s*\\]\\]?\\s*(#.*)?$`);
+const TOML_KV = new RegExp(`^(${BARE})\\s*=\\s*(.*)$`);
+const TOML_SCALAR = /^(?:true|false|[+-]?(?:0|[1-9](?:_?\d)*)(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d+)?)/;
+
+/**
+ * Strict, small TOML line reader. Returns every string value it read, or an error naming the first
+ * line it does not accept (then the caller treats the file as "could not confirm").
+ */
+export function tomlStrings(text: string): { strings: string[]; error?: string } {
   const strings: string[] = [];
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   for (let n = 0; n < lines.length; n++) {
     const line = lines[n].trim();
+    const bad = (why: string) => ({ strings, error: `line ${n + 1}: ${why}` });
     if (line === '' || line.startsWith('#')) continue;
-    if (/^\[\[?[^\]]+\]\]?\s*(#.*)?$/.test(line)) continue;
-    const m = line.match(/^("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_.-]+(?:\s*\.\s*[A-Za-z0-9_-]+)*)\s*=\s*(.*)$/);
-    if (!m) return { strings, error: `line ${n + 1} is not \`key = value\`` };
-    const key = m[1].replace(/^["']|["']$/g, '').split('.').pop()!.trim();
+    if (line.startsWith('[')) {
+      if (TOML_HEADER.test(line)) continue;
+      return bad('not a [table] header of bare keys');
+    }
+    const m = line.match(TOML_KV);
+    if (!m) return bad('not `bare_key = value` (quoted keys are not read)');
     const rest = m[2];
-    if (rest === '') return { strings, error: `line ${n + 1} has no value` };
-    if (key !== 'command' && key !== 'args') continue; // other keys: the raw-text check still applies
     let i = 0;
-    const skip = () => { while (i < rest.length && /\s/.test(rest[i])) i++; };
-    const tail = () => { skip(); return i >= rest.length || rest[i] === '#'; };
-    if (rest[0] === '[') {
+    const skip = () => { while (i < rest.length && (rest[i] === ' ' || rest[i] === '\t')) i++; };
+    const endOk = () => { skip(); return i >= rest.length || rest[i] === '#'; };
+    if (rest[0] === '"' || rest[0] === "'") {
+      const t = tomlString(rest, 0);
+      if (!t) return bad('a string it cannot read (multi-line or unterminated)');
+      strings.push(t[0]); i = t[1];
+    } else if (rest[0] === '[') {
       i = 1; skip();
       while (rest[i] !== ']') {
         const t = tomlString(rest, i);
-        if (!t) return { strings, error: `line ${n + 1}: ${key} is not a one-line array of strings` };
+        if (!t) return bad('an array that is not one line of strings');
         strings.push(t[0]); i = t[1]; skip();
         if (rest[i] === ',') { i++; skip(); continue; }
-        if (rest[i] !== ']') return { strings, error: `line ${n + 1}: ${key} is not a one-line array of strings` };
+        if (rest[i] !== ']') return bad('an array that is not one line of strings');
       }
       i++;
-      if (!tail()) return { strings, error: `line ${n + 1}: unexpected text after ${key}` };
     } else {
-      const t = tomlString(rest, 0);
-      if (!t) return { strings, error: `line ${n + 1}: ${key} is not a one-line string` };
-      strings.push(t[0]); i = t[1];
-      if (!tail()) return { strings, error: `line ${n + 1}: unexpected text after ${key}` };
+      const sm = rest.match(TOML_SCALAR);
+      if (!sm) return bad('a value type it does not read (inline table, date, ...)');
+      i = sm[0].length;
     }
+    if (!endOk()) return bad('unexpected text after the value');
   }
   return { strings };
 }
@@ -148,7 +164,7 @@ export function readSources(sources: SettingsSource[]): { texts: Array<{ path: s
     }
     const strings: string[] = [raw];
     if (/\.toml$/i.test(s.path)) {
-      const t = tomlCommandStrings(raw);
+      const t = tomlStrings(raw);
       if (t.error) { problems.push(`${s.path}: could not read as TOML (${t.error})`); continue; }
       strings.push(...t.strings);
     } else {
@@ -240,14 +256,14 @@ export function pruneRuntimes(o: PruneOpts): { code: 0 | 1; entries: RuntimeEntr
       // name), then remove the renamed folder.
       const aside = join(base, `.pruning-${e.version}-${process.pid}`);
       try {
-        renameSync(e.dir, aside);
+        renameGuarded(e.dir, aside);
       } catch (err) {
         e.decision = 'delete-failed'; e.reason = (err as Error)?.message; code = 1;
         log(`  could not delete ${e.version} (${e.reason}); left as it was`);
         continue;
       }
       try {
-        rmSync(aside, { recursive: true, force: true });
+        rmGuarded(aside, { recursive: true, force: true });
         if (existsSync(aside)) throw new Error('folder still there');
       } catch (err) {
         e.decision = 'delete-failed'; e.reason = `moved to ${aside} but not fully removed (${(err as Error)?.message})`; code = 1;

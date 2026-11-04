@@ -5,35 +5,44 @@
 //   npx -y linksee-memory@<version> migrate --dry   # full rehearsal on a temporary copy
 //   npx -y linksee-memory@<version> migrate         # migrate a copy, then swap it in
 //
-// The live files (memory.db and its -wal / -shm / -journal) are never opened for writing and never
-// changed until the final swap (Codex review of #19: a writable connection on them recovers a hot
-// journal on open and checkpoints a WAL on close, so "rolled back" could not mean "unchanged").
+// EVERY CLIENT MUST BE CLOSED FOR THE WHOLE RUN. Nothing here is a lock: size/mtime checks and the
+// writer probe below only catch a client that is visibly active. A WAL-mode file is never probed,
+// so an idle client that keeps it open is detected only on Windows (the rename is refused).
 //
-//   1. copy memory.db, -wal, -journal byte for byte into <memory.db>.migrating-<ts>/ (plain file
-//      copy, no SQLite). If any live file's size or mtime changed during the copy → stop.
+// The live files (memory.db and its -wal / -shm / -journal) are not written by this command until
+// the final swap (Codex review of #19: a writable connection on them recovers a hot journal on
+// open and checkpoints a WAL on close). One exception, which writes nothing: step 5's probe.
+//
+//   0. free space where the work happens must be >= 3 x (memory.db + sidecars); unknown -> stop.
+//   1. copy memory.db, -wal, -journal byte for byte into <memory.db>.migrating-<ts>-<pid>/ (plain
+//      file copy, no SQLite). If any live file's size or mtime changed during the copy -> stop.
 //   2. open the COPY: SQLite recovers it (rolls back a hot journal / reads the WAL) there.
-//      Read its schema; integrity_check must be ok. schema ≥ 6 → "not needed" (unless the copy
-//      had an unfinished write to roll back — then it is recovered and swapped like a migration).
+//      Read its schema; integrity_check must be ok. schema >= 6 -> "not needed" (unless the copy
+//      had an unfinished write to roll back - then it is recovered and swapped like a migration).
 //   3. VACUUM INTO a single-file replica; check it: integrity_check ok, same schema, same rows.
-//   4. migrate the replica in one transaction (migrate.ts steps 5→6→…→16). Commit only if no table
-//      lost rows, schema = current, quick_check = ok. Any failure → the work folder is removed;
-//      the live files were not touched.
-//   5. swap: live files unchanged since step 1? (size + mtime), no other writer (rollback-journal
-//      files: a writable BEGIN IMMEDIATE probe that writes nothing), then move memory.db and its
-//      sidecars into <memory.db>.pre-migrate-<ts>/ (that folder IS the backup, byte for byte) and
-//      move the replica in. A failed rename puts back what was already moved.
+//   4. migrate the replica in one transaction (migrate.ts steps 5->6->...->16). Commit only if no
+//      table lost rows, schema = current, quick_check = ok. Any failure -> stop; the live files
+//      were not written to.
+//   5. swap: live size + mtime unchanged since step 1; for a rollback-journal file with no -journal
+//      / -wal, a writable connection tries BEGIN IMMEDIATE then ROLLBACK (writes nothing; fails if
+//      another connection holds a write lock) and is closed again. Then <memory.db>.pre-migrate-<ts>/
+//      is created with a README.txt, memory.db and its sidecars are renamed into it (the backup,
+//      byte for byte, one set) and the replica is renamed into place. If a rename fails it tries to
+//      put back what was already moved and names anything it could not.
+//   The work folder is removed at the end; if that fails it says so.
 // It never starts the server, consolidates, merges duplicate entities or deletes rows.
 
 import Database from 'better-sqlite3';
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync,
-  renameSync, rmSync, rmdirSync, statSync, constants as fsc,
+  rmSync, rmdirSync, statSync, statfsSync, writeFileSync, constants as fsc,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getDbPath, readSchemaVersion, runMigrations, MIN_SUPPORTED_SCHEMA, DbRefusedError, migrateCommand } from '../db/migrate.js';
 import { isNativeLoadError, NATIVE_HINT } from '../lib/native-hint.js';
+import { renameGuarded, rmGuarded } from '../lib/test-faults.js';
 
 export type MigrateLegacyOpts = {
   dbPath: string;
@@ -54,6 +63,8 @@ export type MigrateLegacyResult = {
   after?: Record<string, number>;
   from?: number;
   to?: number;
+  /** Set when the work folder could not be removed. */
+  workLeft?: string;
 };
 
 /** The four tables the report shows. Every table is checked; these are the ones people know. */
@@ -91,6 +102,18 @@ export function planFor(v: number, hasDriftAnchors: boolean): string[] {
   return s;
 }
 
+/** How to go back to a backup set - always as one set, never mixing generations. */
+export function restoreSteps(path: string, backupDir: string): string[] {
+  const name = basename(path);
+  return [
+    `To go back to the files in ${backupDir}/:`,
+    `  1. Close every Claude Code / Cursor / Codex / other client using linksee-memory.`,
+    `  2. Move the CURRENT ${name} and every ${name}-wal / ${name}-shm / ${name}-journal next to it into a new, separate folder, all of them together, as one set.`,
+    `  3. Move ALL the files from ${backupDir}/ (${name} and any -wal / -shm / -journal) back to ${dirname(path)}, as one set.`,
+    `  Never combine a ${name} from one set with a -wal / -shm / -journal from the other: SQLite would read them as one database and can corrupt it.`,
+  ];
+}
+
 function stampOf(d: Date): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
 }
@@ -110,6 +133,19 @@ function isWalFile(path: string): boolean {
 
 export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
   const log = o.log ?? ((l: string) => console.log(l));
+  const ctx: { work?: string } = {};
+  const r = migrateInner(o, log, ctx);
+  if (ctx.work && existsSync(ctx.work)) {
+    // The work folder goes in every case (after a swap only the raw copies are left in it).
+    try { rmGuarded(ctx.work, { recursive: true, force: true }); } catch (e) {
+      log(`Could not remove the work folder ${ctx.work} (${(e as Error)?.message ?? e}); delete it by hand. It holds copies only.`);
+    }
+    if (existsSync(ctx.work)) r.workLeft = ctx.work;
+  }
+  return r;
+}
+
+function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { work?: string }): MigrateLegacyResult {
   const path = resolve(o.dbPath);
   const name = basename(path);
   const target = currentSchemaVersion();
@@ -120,25 +156,40 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
     return { code: 0, outcome: 'missing' };
   }
   const stamp = stampOf(o.now ?? new Date());
+  // 0. free space: the raw copy and the replica each need about the size of the live set.
+  const liveBytes = ['', ...SIDECARS].reduce((n, ext) => { try { return n + statSync(path + ext).size; } catch { return n; } }, 0);
+  const workParent = o.dry ? tmpdir() : dirname(path);
+  try {
+    const fs = statfsSync(workParent);
+    const free = Number(fs.bavail) * Number(fs.bsize);
+    if (free < 3 * liveBytes) {
+      log(`Not enough free space in ${workParent}: ${Math.round(free / 1048576)} MB free, need at least ${Math.ceil((3 * liveBytes) / 1048576)} MB (3 x ${name} and its sidecars). This command did not write to ${path}.`);
+      return { code: 1, outcome: 'refused' };
+    }
+  } catch (e) {
+    log(`Could not check the free space in ${workParent} (${(e as Error)?.message ?? e}). This command did not write to ${path}.`);
+    return { code: 1, outcome: 'refused' };
+  }
   const backupDir = `${path}.pre-migrate-${stamp}`;
   // The work folder name carries the pid so two runs never share it; the backup folder name is
   // checked only at the swap (a run that ends "not needed" must not be refused by an earlier backup).
   const work = o.dry ? mkdtempSync(join(tmpdir(), 'linksee-migrate-dry-')) : `${path}.migrating-${stamp}-${process.pid}`;
   if (!o.dry) {
     if (existsSync(work)) {
-      log(`${work} already exists; run again in a second. Nothing was changed.`);
+      log(`${work} already exists; run again in a second. This command did not write to ${path}.`);
       return { code: 1, outcome: 'refused' };
     }
     mkdirSync(work);
   }
+  ctx.work = work;
   const conns: Database.Database[] = [];
   const open = (p: string) => { const d = new Database(p, { fileMustExist: true, timeout: 0 }); conns.push(d); return d; };
   const closeAll = () => { for (const d of conns.splice(0)) { try { if (d.open) d.close(); } catch { /* ignore */ } } };
   const state0 = liveState(path);
   /** Say "unchanged" only when it is checked to be true. */
   const liveNote = () => (liveState(path) === state0
-    ? `${name} and its -wal / -shm / -journal were not changed (all work happened on a copy, now removed).`
-    : `${name} or a sidecar changed during the run — another client is probably using it. This command did not write to them.`);
+    ? `This command did not write to ${path} or its -wal / -shm / -journal (the work happened on a copy in ${work}).`
+    : `This command did not write to ${path} or its sidecars, but they changed during the run: another client is using them.`);
   const tag = o.dry ? '[dry] ' : '';
 
   try {
@@ -148,7 +199,7 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
       if (existsSync(path + ext)) copyFileSync(path + ext, raw + ext, fsc.COPYFILE_EXCL);
     }
     if (liveState(path) !== state0) {
-      log(`${name} changed while it was being copied: another client is writing to it. Close every Claude Code / Cursor / other client using linksee-memory and run again. Nothing was changed.`);
+      log(`${name} changed while it was being copied: another client is writing to it. Close every Claude Code / Cursor / other client using linksee-memory and run again. This command did not write to ${path}.`);
       return { code: 1, outcome: 'refused' };
     }
 
@@ -168,7 +219,7 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
       return { code: 1, outcome: 'refused' };
     }
     if (from >= MIN_SUPPORTED_SCHEMA && !recovered) {
-      log(`${path} is at schema ${from}: migrate is not needed (the server migrates schema ${MIN_SUPPORTED_SCHEMA} and newer itself). Nothing was changed.`);
+      log(`${path} is at schema ${from}: migrate is not needed (the server migrates schema ${MIN_SUPPORTED_SCHEMA} and newer itself). This command did not write to ${path}.`);
       return { code: 0, outcome: 'not-needed', from };
     }
     const ic0 = rdb.pragma('integrity_check', { simple: true });
@@ -268,43 +319,62 @@ export function migrateLegacy(o: MigrateLegacyOpts): MigrateLegacyResult {
         return { code: 1, outcome: 'refused', from };
       }
     }
-    try { mkdirSync(backupDir); } catch (e) {
+    const readme = join(backupDir, 'README.txt');
+    let created = false; // only a folder this run created may be removed again
+    try {
+      mkdirSync(backupDir);
+      created = true;
+      writeFileSync(readme, [
+        `linksee-memory migrate (${stamp}) moved the original files here, unchanged, as one set:`,
+        `  ${['', ...SIDECARS].filter((ext) => existsSync(path + ext)).map((ext) => name + ext).join(', ')} (from ${dirname(path)})`,
+        `They were at schema ${from}; the migrated database (schema ${from < MIN_SUPPORTED_SCHEMA ? target : from}) took their place.`,
+        '',
+        ...restoreSteps(path, backupDir),
+        '',
+      ].join('\n'));
+    } catch (e) {
+      if (created) { try { rmSync(backupDir, { recursive: true, force: true }); } catch { /* left empty or with README.txt */ } }
       log(`Could not create ${backupDir} (${(e as { code?: string })?.code ?? (e as Error)?.message}); run again in a second. Not swapped; ${liveNote()}`);
       return { code: 1, outcome: 'refused', from };
     }
     const done: string[] = [];
     const putBack = () => {
       const stuck: string[] = [];
-      for (const ext of done.reverse()) {
-        try { renameSync(join(backupDir, name + ext), path + ext); } catch { stuck.push(name + ext); }
+      for (const ext of done.slice().reverse()) {
+        try { renameGuarded(join(backupDir, name + ext), path + ext); } catch { stuck.push(name + ext); }
       }
-      if (stuck.length === 0) { try { rmdirSync(backupDir); } catch { /* leave the empty folder */ } }
+      if (stuck.length === 0) { try { rmSync(readme, { force: true }); rmdirSync(backupDir); } catch { /* leave the folder */ } }
       return stuck;
     };
     try {
       for (const ext of ['', ...SIDECARS]) {
         if (!existsSync(path + ext)) continue;
-        renameSync(path + ext, join(backupDir, name + ext));
+        renameGuarded(path + ext, join(backupDir, name + ext));
         done.push(ext);
       }
-      renameSync(replica, path);
+      renameGuarded(replica, path);
     } catch (e) {
+      const moved = done.map((ext) => name + ext);
       const stuck = putBack();
-      log(`Could not swap the files (${(e as { code?: string })?.code ?? (e as Error)?.message}) — on Windows this means another process has ${name} open.`);
-      if (stuck.length) log(`  Could not move back: ${stuck.join(', ')} — they are in ${backupDir}; move them back to ${dirname(path)} by hand.`);
-      else log(`  Everything was moved back. Close every client using linksee-memory and run again.`);
+      log(`Could not swap the files (${(e as { code?: string })?.code ?? (e as Error)?.message}); on Windows this usually means another process has ${name} open.`);
+      if (stuck.length) {
+        log(`  Tried to move back ${moved.join(', ')}; could NOT move back: ${stuck.join(', ')}. They are in ${backupDir}/.`);
+        log(`  ${dirname(path)} now has no complete database. Before anything opens it:`);
+        for (const l of restoreSteps(path, backupDir)) log(`  ${l}`);
+      } else {
+        log(`  Moved back: ${moved.length ? moved.join(', ') : '(nothing had been moved)'}. Close every client using linksee-memory and run again.`);
+      }
       return { code: 1, outcome: 'failed', from };
     }
 
     log(from < MIN_SUPPORTED_SCHEMA ? `Migrated ${path}: schema ${from} → ${target}.` : `Recovered ${path} (schema ${from}): the unfinished write was rolled back.`);
     report();
-    log(`The original files, byte for byte, are in ${backupDir}/. To go back: close every client, move ${name} out of the way, and move the files from that folder back.`);
+    log(`The original files, byte for byte and as one set, are in ${backupDir}/ (see README.txt there).`);
+    for (const l of restoreSteps(path, backupDir)) log(l);
     log(`Nothing was consolidated or deleted. The server switches the file to WAL on its next start.`);
     return { code: 0, outcome, backupDir, before, after, from, to: from < MIN_SUPPORTED_SCHEMA ? target : from };
   } finally {
-    closeAll();
-    // Whatever happened, the work folder goes (after a swap only the raw copies are left in it).
-    try { rmSync(work, { recursive: true, force: true }); } catch { /* ignore */ }
+    closeAll(); // the work folder itself is removed by migrateLegacy()
   }
 }
 
@@ -314,9 +384,10 @@ function usage(): string {
 Migrates a memory.db at schema 1–5 (linksee-memory 0.11 and earlier) to the current schema.
   --dry   rehearse on a temporary copy; nothing is written next to memory.db
   --db    a memory.db other than ${getDbPath()}
+Close every Claude Code / Cursor / Codex / other client using linksee-memory first, and keep them
+closed until it finishes: an idle client on a WAL-mode file cannot be detected (except on Windows).
 It migrates a copy, checks it (no table loses rows, integrity ok), and only then moves the
-original files into memory.db.pre-migrate-<time>/ and the migrated copy into place.
-Close Claude Code / Cursor / other clients using linksee-memory before running it.`;
+original files into memory.db.pre-migrate-<time>/ (with a README.txt) and the migrated copy into place.`;
 }
 
 function main(argv: string[]): number {
