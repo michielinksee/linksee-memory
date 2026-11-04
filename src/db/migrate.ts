@@ -1,10 +1,11 @@
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, renameSync, existsSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeEntityName } from '../lib/normalize.js';
+import { isNativeLoadError } from '../lib/native-hint.js';
 
 const DEFAULT_DB_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const DB_PATH = join(DEFAULT_DB_DIR, 'memory.db');
@@ -13,10 +14,67 @@ export function getDbPath(): string {
   return DB_PATH;
 }
 
+/**
+ * Decide, WITHOUT a writable connection, whether this file may be opened for writing at all.
+ * (0.17.1, Codex re-review of #15.) A writable connection that is the last one to close
+ * checkpoints a leftover WAL into memory.db and deletes it, and rolls back a hot journal — both
+ * are writes to a file we are about to refuse. So the schema is read through a read-only
+ * connection first (SQLITE_OPEN_READONLY: no checkpoint, no rollback, memory.db and -wal untouched).
+ *   • schema 1–5                 → LegacySchemaError
+ *   • a hot rollback journal     → HotJournalError (it cannot be read without rolling back)
+ *   • not a DB                   → return; the normal open's corruption path moves it aside
+ *   • native addon failed        → rethrown as is
+ *   • anything else (busy, locked, unreadable) → PrecheckError: could not check, so no writing
+ * When the file is refused, the -wal/-shm that the read-only open itself created are removed
+ * again, so the folder is left as it was.
+ */
+function precheckBeforeWrite(path: string): void {
+  if (!existsSync(path)) return; // new DB: nothing to protect, create it
+  const had = { wal: existsSync(path + '-wal'), shm: existsSync(path + '-shm') };
+  // Remove only what the read-only open itself added: a -wal that was absent and is still empty,
+  // and a -shm that was absent (e.g. a leftover -wal with no -shm — the reader builds one).
+  // Known limit (0.17.2): if another process opens the file in the same instant, the -shm deleted
+  // here may already be in use by it. The tests check a single process only, not concurrency.
+  const tidy = () => {
+    try {
+      if (!had.wal && existsSync(path + '-wal') && statSync(path + '-wal').size === 0) unlinkSync(path + '-wal');
+      if (!had.shm && existsSync(path + '-shm')) unlinkSync(path + '-shm');
+    } catch { /* leave them; memory.db itself is untouched either way */ }
+  };
+  let v = 0;
+  try {
+    const ro = new Database(path, { readonly: true, fileMustExist: true });
+    try { v = readSchemaVersion(ro); } finally { ro.close(); }
+  } catch (e) {
+    const code = (e as { code?: string })?.code ?? '';
+    const msg = (e as Error)?.message ?? String(e);
+    // The file vanished between the check and the open: a new DB, as above.
+    if (!existsSync(path) && (code === 'SQLITE_CANTOPEN' || code === 'ENOENT' || /unable to open|does not exist/i.test(msg))) return;
+    // The native addon itself failed: let it surface as such (the hooks turn it into one line).
+    if (isNativeLoadError(e)) throw e;
+    // Not a database at all: the normal open's corruption path moves it aside (nothing lost).
+    if (code === 'SQLITE_NOTADB' || code === 'SQLITE_CORRUPT' || /not a database|malformed|disk image/i.test(msg)) return;
+    tidy();
+    if (code === 'SQLITE_READONLY_ROLLBACK') throw new HotJournalError(path);
+    // Anything else (SQLITE_BUSY, locked, permission, I/O): we could not check it, so we do not
+    // write to it either — fail closed (0.17.1, Codex third review of #15).
+    throw new PrecheckError(path, code || msg.split('\n')[0]);
+  }
+  if (v > 0 && v < MIN_SUPPORTED_SCHEMA) {
+    tidy();
+    throw new LegacySchemaError(v, path);
+  }
+}
+
 function openAt(path: string): Database.Database {
+  precheckBeforeWrite(path);
   const db = new Database(path);
   try {
-    db.pragma('journal_mode = WAL'); // first real read of the file header — throws if it isn't a DB
+    // Second line (the read-only precheck is the real gate): refuse before the journal-mode pragma.
+    // This is also the first real read of the file — it throws if the file isn't a DB.
+    const v = readSchemaVersion(db);
+    if (v > 0 && v < MIN_SUPPORTED_SCHEMA) throw new LegacySchemaError(v, path);
+    db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     return db;
   } catch (e) {
@@ -49,6 +107,80 @@ export function openDb(): Database.Database {
   }
 }
 
+/** Oldest schema this version migrates in place. Older files are refused before any write. */
+export const MIN_SUPPORTED_SCHEMA = 6;
+
+/** Base class: openDb() refused this file without writing to it. The message says what to do. */
+export class DbRefusedError extends Error {}
+
+/**
+ * Thrown for a schema older than MIN_SUPPORTED_SCHEMA (a DB last opened by a 2026-05-or-earlier
+ * version). Raised by openDb() from a read-only connection, before any writable connection exists,
+ * and again by runMigrations() as a second line.
+ *
+ * No old version is recommended as a stepping stone: 0.8.0–0.17.0 stop on `no such table:
+ * drift_anchors` after partly altering the file, and 0.7.2 has no subcommands — `npx
+ * linksee-memory@0.7.2 <anything>` starts its MCP server, whose start-up consolidate can delete
+ * original rows (Codex review of PR #15). A migration command for these files is 0.17.2 work.
+ */
+export class LegacySchemaError extends DbRefusedError {
+  readonly schemaVersion: number;
+  constructor(schemaVersion: number, dbPath: string) {
+    super(
+      `[linksee-memory] ${dbPath} is at schema ${schemaVersion}; this version migrates schema ${MIN_SUPPORTED_SCHEMA} and newer only. ` +
+      `Stopped before writing anything to the file.
+\n` +
+      `  1. Close every Claude Code / Cursor / other client using linksee-memory.
+\n` +
+      `  2. Back up the folder that holds memory.db (copy memory.db and any memory.db-wal / -shm / -journal) and keep the copy.
+\n` +
+      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.
+\n` +
+      `A migration command for this schema is planned for 0.17.2. To start fresh instead, point LINKSEE_MEMORY_DIR at an empty folder.`,
+    );
+    this.name = 'LegacySchemaError';
+    this.schemaVersion = schemaVersion;
+  }
+}
+
+/** The read-only check could not run (busy, locked, unreadable): refused rather than guessed. */
+export class PrecheckError extends DbRefusedError {
+  readonly reason: string;
+  constructor(dbPath: string, reason: string) {
+    super(
+      `[linksee-memory] could not check ${dbPath} before opening it for writing (${reason}). ` +
+      `Stopped before writing anything. Another client may have it open or locked: close other ` +
+      `Claude Code / Cursor / linksee-memory processes and try again.`,
+    );
+    this.name = 'PrecheckError';
+    this.reason = reason;
+  }
+}
+
+/** A rollback journal left by an interrupted write: it cannot be read without being rolled back. */
+export class HotJournalError extends DbRefusedError {
+  constructor(dbPath: string) {
+    super(
+      `[linksee-memory] ${dbPath} has an unfinished write from an interrupted process (memory.db-journal), ` +
+      `so it cannot be checked without changing it. Stopped before writing anything.
+\n` +
+      `  Back up the folder that holds memory.db (all memory.db* files) before anything else opens it. ` +
+      `A recovery command is planned for 0.17.2.`,
+    );
+    this.name = 'HotJournalError';
+  }
+}
+
+/** Read meta.schema_version without writing (0 when the table or row is absent). */
+export function readSchemaVersion(db: Database.Database): number {
+  const metaTable = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+  ).get() as { name?: string } | undefined;
+  if (!metaTable?.name) return 0;
+  const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+  return row ? Number(row.value) || 0 : 0;
+}
+
 export function runMigrations(db: Database.Database): void {
   const __filename = fileURLToPath(import.meta.url);
   const schemaPath = join(dirname(__filename), 'schema.sql');
@@ -56,13 +188,15 @@ export function runMigrations(db: Database.Database): void {
 
   // Safely read current schema version. On a fresh DB the meta table doesn't
   // exist yet, which is fine — treat that as "version 0, full schema apply".
-  let currentVersion = 0;
-  const metaTable = db.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
-  ).get() as { name?: string } | undefined;
-  if (metaTable?.name) {
-    const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
-    if (versionRow) currentVersion = Number(versionRow.value) || 0;
+  const currentVersion = readSchemaVersion(db);
+
+  // 0.17.1 (L-1-106 / audit F3): refuse schema 1–5 BEFORE any write. Their path through here
+  // (v5 → v6 generated columns, then the v5 entity merge running after the version has already
+  // been bumped to 16, with no transaction around it) can leave a half-migrated file. A safe,
+  // tested migration is 0.17.2 work. openDb() already refused these before any write; this is
+  // the second line for callers that hand in their own connection.
+  if (currentVersion > 0 && currentVersion < MIN_SUPPORTED_SCHEMA) {
+    throw new LegacySchemaError(currentVersion, getDbPath());
   }
 
   // v3 → v4: rebuild memories_fts with trigram tokenizer for JP/CJK support.
@@ -132,7 +266,14 @@ export function runMigrations(db: Database.Database): void {
   // detector/dashboard (which read the original columns + status active/retired) are unaffected.
   // `lifecycle` carries the rich state; `status` stays the coarse scan-gate. New tables
   // (reality_events, memory_write_candidates) are created by db.exec(sql) below (CREATE IF NOT EXISTS).
-  if (currentVersion > 0 && currentVersion < 9) {
+  // 0.17.1 (L-1-106 / audit F3): drift_anchors only exists from v8 on. On an older DB the table is
+  // missing, PRAGMA table_info returns nothing, and every ALTER below threw "no such table" — so
+  // any pre-0.12 DB could not start. If the table is absent, skip: db.exec(sql) below creates it
+  // with all of these columns.
+  const hasDriftAnchors = !!db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='drift_anchors'"
+  ).get();
+  if (currentVersion > 0 && currentVersion < 9 && hasDriftAnchors) {
     const have = new Set(
       (db.prepare('PRAGMA table_info(drift_anchors)').all() as Array<{ name: string }>).map((c) => c.name)
     );

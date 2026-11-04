@@ -16,7 +16,9 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isTelemetryEnabled, buildPayload, sendTelemetry } from '../lib/telemetry.js';
-import Database from 'better-sqlite3';
+import { NATIVE_HINT, isNativeLoadError } from '../lib/native-hint.js';
+// better-sqlite3 is imported dynamically below, so a broken native addon goes through the same
+// one-line hint as everything else instead of failing at module load (Codex third review of #15).
 
 const LOG_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const LOG_FILE = join(LOG_DIR, 'hook.log');
@@ -90,6 +92,9 @@ async function main(): Promise<void> {
     process.exit(0);
   } else if (r.status !== 0) {
     log(`importer exited ${r.status} (session=${sessionId}, ${elapsed}ms): ${(r.stderr || '').slice(0, 500)}`);
+    // The native addon loads at `new Database()` inside the importer; after a Node major upgrade
+    // that is where it fails. Say so once — still exit 0, the Stop hook never blocks.
+    if (isNativeLoadError(r.stderr || '')) process.stderr.write(`${NATIVE_HINT}\n`);
     process.exit(0);
   }
 
@@ -119,6 +124,7 @@ async function main(): Promise<void> {
       const dbDir = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
       const dbPath = join(dbDir, 'memory.db');
       if (existsSync(dbPath)) {
+        const { default: Database } = await import('better-sqlite3');
         const db = new Database(dbPath, { readonly: true });
         try {
           const payload = buildPayload(db, sessionId, { mcpServersInUse: mcpServers });
@@ -133,6 +139,7 @@ async function main(): Promise<void> {
       }
     } catch (e: any) {
       log(`telemetry: error (non-fatal): ${e?.message ?? e}`);
+      if (isNativeLoadError(e)) process.stderr.write(`${NATIVE_HINT}\n`);
     }
   }
 

@@ -252,3 +252,17 @@ export function consolidate(
 
   return result;
 }
+
+/**
+ * Should the MCP server run consolidate on its own at start-up? (0.17.1, L-1-106 / audit F1)
+ *
+ * No, unless the user asked: consolidate deletes the original rows (keeping a 3 × 200-char
+ * summary) and their edges, so it must not run without an explicit opt-in.
+ * Opt in with LINKSEE_AUTO_CONSOLIDATE=1|true|on|weekly, or `--auto-consolidate` on the server
+ * command line. The weekly gate inside the server still applies once enabled.
+ */
+export function autoConsolidateEnabled(env: Record<string, string | undefined>, argv: readonly string[]): boolean {
+  if (argv.includes('--auto-consolidate')) return true;
+  const v = (env.LINKSEE_AUTO_CONSOLIDATE ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes' || v === 'weekly';
+}

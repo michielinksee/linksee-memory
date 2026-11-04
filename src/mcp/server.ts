@@ -15,11 +15,11 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { openDb, runMigrations } from '../db/migrate.js';
+import { openDb, runMigrations, DbRefusedError } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
-import { consolidate as runConsolidate } from '../lib/consolidate.js';
+import { consolidate as runConsolidate, autoConsolidateEnabled } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
 import { inferAltitude, inferType, inferState } from '../lib/session-extractor.js';
 import { normalizeEntityName } from '../lib/normalize.js';
@@ -84,8 +84,19 @@ if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand))
   process.exit(r.status ?? (r.signal ? 1 : 0));
 }
 
-const db = openDb();
-runMigrations(db);
+let db!: ReturnType<typeof openDb>;
+try {
+  db = openDb();
+  runMigrations(db);
+} catch (e) {
+  // A pre-June-2026 DB (schema < 6) is refused before any write; print what to do
+  // instead of a stack trace. MCP clients show the server's stderr in their logs.
+  if (e instanceof DbRefusedError) {
+    process.stderr.write(`${e.message}\n`);
+    process.exit(1);
+  }
+  throw e;
+}
 
 // Distill triage runs on EVERY start, before the first request. It is one indexed scan and a
 // handful of JSON rewrites — cheap — and 0.16.0 had tucked it inside the auto-consolidate block
@@ -97,8 +108,15 @@ try {
   }
 } catch { /* never block startup */ }
 
-// Auto-maintenance: consolidate stale memories on startup (non-blocking)
-setTimeout(() => {
+// Auto-maintenance: consolidate stale memories on startup (non-blocking).
+//
+// OFF by default since 0.17.1 (L-1-106 / audit F1): consolidate deletes the original rows after
+// writing a summary that keeps only the top 3 × 200 characters, ignores thread_id, and cascades
+// away their edges — reasons and history lost with no action from the user. It now runs only
+// when asked: LINKSEE_AUTO_CONSOLIDATE=1 (or `--auto-consolidate` on the server command line).
+// There is no `consolidate` tool (merged away in 0.7.0). Rows already removed by earlier versions
+// are not restored.
+if (autoConsolidateEnabled(process.env, process.argv.slice(2))) setTimeout(() => {
   try {
     let shouldRun = true;
     try {
@@ -2247,7 +2265,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           forget: 'remember({ forget: true, memory_id: <id> })',
           list_entities: 'recall() with no params',
           recall_file: 'recall({ path: "<file_path>" })',
-          consolidate: 'Auto-runs on server startup. No manual call needed.',
+          consolidate: 'No longer a tool, and since 0.17.1 it does not run on server start either (it deletes the original rows). Opt in on the server with LINKSEE_AUTO_CONSOLIDATE=1 if you want the old weekly start-up run.',
         };
         if (name in migrations) {
           throw new Error(`Tool "${name}" was merged in v0.7.0. Migration: ${migrations[name]}`);

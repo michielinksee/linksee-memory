@@ -254,7 +254,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
 
 Anchors with `affects` globs fire only on matching paths; an unscoped anchor fires on its own `detect_terms` / `violation_signal`. Nothing is ever **blocked** unless you explicitly hardened it (`resolve_drift(action:'harden')`) — everything else re-injects the decision as context.
 
-To wire it by hand instead, drop this block into `.claude/settings.json` (project root, or `~/.claude/settings.json` for every repo) — it points at the globally-installed `linksee-memory-guard` bin, so no build step is needed:
+To wire it by hand instead, drop this block into `.claude/settings.json` (project root, or `~/.claude/settings.json` for every repo). The `npx -y` form below needs no install, but costs several seconds per call (7.4–8.6 s measured on Windows, close to the 8 s `PreToolUse` timeout — a timed-out guard simply does not fire). `setup` writes a direct `node` call instead; you can do the same with `"<path to node>" "<package>/dist/bin/guard-hook.js"` (paths quoted; Claude Code runs hooks through cmd.exe on Windows and sh elsewhere, and a path containing `$`, a backtick, `%` or `"` cannot be quoted safely — setup keeps the npx form for those):
 
 ```json
 {
@@ -279,7 +279,7 @@ To wire it by hand instead, drop this block into `.claude/settings.json` (projec
 }
 ```
 
-It's **project-scoped on purpose** — the guard enforces *this* repo's decisions, and you opt in per project rather than letting it deny tool calls everywhere (the Stop hook from setup, by contrast, is user-global). Declare what it should watch with `declare_anchor(...)`; set `card_policy.gate_mode:'hard'` on an anchor to make a contradiction **block** instead of just warn (the soft default only re-injects). Anchors that are stale (`at_risk`), superseded, or card-disabled never gate.
+Where it applies is the settings file it lives in: `~/.claude/settings.json` (what `setup` writes) covers every repo; a project's `.claude/settings.json` (`setup --project-guard`) covers that repo only. Declare what it should watch with `declare_anchor(...)`; set `card_policy.gate_mode:'hard'` on an anchor to make a contradiction **block** instead of just warn (the soft default only re-injects). Anchors that are stale (`at_risk`), superseded, or card-disabled never gate.
 
 > Developing linksee-memory itself? The repo dogfoods the guard via a (gitignored) `.claude/settings.json` that points at the local build (`node ${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js`) so it runs against your uncommitted changes. End-user projects should use the published `npx -y linksee-memory guard` form above.
 
@@ -329,7 +329,7 @@ It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and
                   Returns match_reasons explaining each hit
 ```
 
-Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories are auto-consolidated into `learning` entries on server startup.
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories can be consolidated into `learning` entries, but only if you opt in (`LINKSEE_AUTO_CONSOLIDATE=1` on the server — it deletes the originals; off by default since 0.17.1).
 
 ---
 
@@ -340,13 +340,39 @@ Every memory is tagged with **exactly one layer**. `caveat`-layer entries are pr
 npx -y linksee-memory setup
 ```
 
-This does everything:
-1. Registers the MCP server with Claude Code
+This sets up **Claude Code**:
+1. Registers the MCP server (`claude mcp add -s user linksee -- npx -y linksee-memory`)
 2. Installs the agent skill (teaches the agent when to recall/remember)
-3. Configures auto-capture (every session saved to your local brain)
-4. Offers to wire the [re-injection guard](#reinjection-guard) into this project (pre-action decision enforcement)
+3. Configures auto-capture — a `Stop` hook, so every session is saved to your local memory
+4. Wires the [re-injection guard](#reinjection-guard) for every repo (`--project-guard` for this repo only, `--no-guard` to skip)
 
-Restart Claude Code, then just chat normally. Add **"Use Linksee"** to any prompt to trigger memory recall.
+**What is shared, and what is Claude Code only.** The memory itself (the MCP tools `remember` / `recall` / …) works from any MCP client — Claude Code, Cursor, Windsurf, OpenAI Codex, Gemini CLI — and they all use the same `~/.linksee-memory/memory.db`. Auto-capture and the guard are Claude Code hooks: other clients save and recall only when the agent calls the tools.
+
+**Using Codex too?** One line registers the same memory there:
+
+```bash
+codex mcp add linksee -- npx -y linksee-memory
+```
+
+(Cursor, Windsurf and Gemini CLI: see [Other editors / CLIs](#other-editors--clis).)
+
+**Try it — one round trip.** A new install has an empty memory, so "how did we solve this before?" has nothing to find yet. Instead:
+1. In Claude Code, say: *"Remember: in this repo we decided to use X, because Y."*
+2. Open a **new** session and ask: *"What did we decide about X?"*
+
+Add **"Use Linksee"** to any prompt to force a recall.
+
+**What setup writes, and how to undo it.**
+
+| File | What |
+|---|---|
+| `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
+| `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
+| `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, you can delete old ones by hand, and `linksee-memory runtime prune` is planned for 0.17.2. If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
+
+Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the hooks print one line saying so and let the action through).
 
 ### Manual setup (if you prefer step-by-step)
 
@@ -388,7 +414,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-Each turn end takes ~100 ms. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
+This `npx -y` form works anywhere, but every call starts npm and checks the registry: on the author's Windows machine one call took 7.4–8.6 s (3 runs, warm cache). `setup` writes a direct call instead — `"<path to node>" "<package>/dist/bin/sync-session.js" --linksee-managed` — which took 0.20–0.27 s on the same machine. Your numbers will differ; measure with your own hook log. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
 
 </details>
 
@@ -501,9 +527,11 @@ Default: `~/.linksee-memory/memory.db`. Override with `LINKSEE_MEMORY_DIR` env v
 # 1. Remove the MCP server registration
 claude mcp remove linksee
 
-# 2. Remove the hooks from settings.json (edit the file, delete the linksee entries):
-#    ~/.claude/settings.json          → the Stop hook running "npx -y linksee-memory sync"
-#    <project>/.claude/settings.json  → the SessionStart/PreToolUse hooks running "npx -y linksee-memory guard"
+# 2. Remove the hooks from settings.json (edit the file, delete the linksee entries),
+#    or copy back the settings.json.bak-<timestamp> that setup left next to it:
+#    ~/.claude/settings.json          → the Stop hook (…sync-session.js, or "npx -y linksee-memory sync")
+#                                       and the SessionStart/PreToolUse hooks (…guard-hook.js, or "npx -y linksee-memory guard")
+#    <project>/.claude/settings.json  → the same guard hooks, if you used --project-guard
 
 # 3. Remove the installed skill and all local memory (optional)
 rm -rf ~/.claude/skills/linksee-memory
@@ -541,7 +569,7 @@ Nothing ever leaves your machine, so step 3 fully erases everything Linksee stor
 | Feature | Detail |
 |---|---|
 | **3-tool unified surface** | 8 tools → 3: `remember` (create + update + delete), `recall` (search + file history + overview), `read_smart` (token-saving reads). Fewer tools = better cross-LLM consistency. Follows Context7's proven pattern. |
-| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. |
+| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. *(Off by default since 0.17.1 — opt in with `LINKSEE_AUTO_CONSOLIDATE=1`.)* |
 | **Deprecation guidance** | Old tool names (`forget`, `recall_file`, etc.) return specific migration examples instead of silent failures. |
 | **"Use Linksee Memory" trigger** | Add "Use Linksee Memory" to any prompt to force memory recall — same adoption pattern as Context7. |
 | **Claude Code Plugin** | `claude plugin add -- linksee-memory` — ships MCP server + auto-invocation skill in one install. |
@@ -640,7 +668,7 @@ The conversation↔file linkage is the key. Every file edit captured by the Stop
 ## Roadmap
 
 - ✅ 3-tool unified surface (remember / recall / read_smart) — v0.7.0
-- ✅ Auto-consolidate on server startup — v0.7.0
+- ✅ Auto-consolidate on server startup — v0.7.0 (opt-in since 0.17.1)
 - ✅ Claude Code Plugin (`claude plugin add -- linksee-memory`)
 - ✅ Five MCP Blocks (Tools + Resources + Prompts + Sampling + Roots + Elicitation)
 - ✅ Stop-hook auto-capture for Claude Code
@@ -829,9 +857,7 @@ Or delete individual memories via `remember({ forget: true, memory_id: <id> })`.
 <details>
 <summary><b>DB is getting large (>100 MB). How do I trim it?</b></summary>
 
-Consolidation runs automatically on server startup (7-day threshold). It clusters old cold memories into compressed learning-layer summaries. Caveat and active-goal layers are always preserved.
-
-If you want to force a manual consolidation, restart the MCP server — auto-consolidate triggers on every startup.
+Since 0.17.1 nothing is consolidated automatically: consolidation deletes the original rows (keeping a short summary), so it runs only if you start the server with `LINKSEE_AUTO_CONSOLIDATE=1` (then at most weekly, 7-day threshold). When enabled it clusters old cold memories into compressed learning-layer summaries and deletes the originals; caveat and active-goal layers are always preserved. Back up `~/.linksee-memory/` before turning it on. There is no `consolidate` tool to call.
 </details>
 
 ## FAQ
@@ -861,7 +887,7 @@ Three axes:
 Claude Code's auto-memory is Claude-only (doesn't help if you switch to Cursor, OpenAI Codex, or Gemini CLI) and stores flat markdown with no structure. linksee-memory is the same local-first principle but:
 - Works across Claude Code, Cursor, OpenAI Codex, Gemini CLI (shared SQLite)
 - Structured 6-layer format makes recall explainable
-- Auto-consolidation compresses cold memories on startup; caveats are permanently protected
+- Consolidation of cold memories is opt-in (`LINKSEE_AUTO_CONSOLIDATE=1`, deletes originals); caveats are permanently protected
 </details>
 
 <details>
@@ -886,7 +912,7 @@ The default is no sync — the SQLite file lives at `~/.linksee-memory/memory.db
 
 Two mechanisms:
 1. **Ebbinghaus forgetting**: cold low-importance memories decay naturally, eligible for auto-forget sweeps. `caveat` layer and memories with `importance ≥ 0.9` are always protected.
-2. **Auto-consolidation**: runs on every server startup (7-day threshold). Compresses clusters of cold low-importance memories by entity into a single `learning`-layer summary, then deletes the originals. No manual scheduling needed.
+2. **Consolidation (opt-in)**: off by default since 0.17.1. With `LINKSEE_AUTO_CONSOLIDATE=1` on the server it runs at start-up at most weekly (7-day threshold), compressing clusters of cold low-importance memories by entity into a single `learning`-layer summary and deleting the originals.
 
 In practice a solo developer hits ~100MB after 6 months of heavy use. A year-old DB I tested with 80K memories still recalls in <10ms.
 </details>
@@ -925,164 +951,7 @@ After install, in a new Claude session ask: *"Can you remember that I prefer Typ
 
 ## Changelog
 
-### v0.11.3 — Robustness + MCP hygiene (2026-06-16)
-
-- **Corrupt-database recovery:** if `~/.linksee-memory/memory.db` is unreadable, linksee preserves it as `memory.db.corrupt-<timestamp>` and starts a fresh one (with a clear message) instead of crashing with a raw SQLite error. Old memories stay recoverable in the backup.
-- **`recall` tool description** no longer suggests editing your system prompt — cleaner MCP citizenship.
-
-### v0.11.2 — More cold-start hardening (2026-06-16)
-
-- **`stats` works on a fresh database** instead of crashing with `no such table` — it ensures the schema exists first (it may be the first command a new user runs).
-- **`map --help`** prints usage instead of trying to import a map.
-
-### v0.11.1 — Cold-start fixes (2026-06-16)
-
-- **Run any CLI through the package name:** `npx -y linksee-memory setup` (and `map`, `sync`, `guard`, `stats`, `import`, `install-skill`). A fresh user couldn't reach the standalone bins (`linksee-memory-setup`, …) via `npx` — npx resolves package names, not sibling bin names — so the one-command install 404'd. The main bin now dispatches subcommands; the standalone bins remain as aliases.
-- **`map` exits gracefully** with a next-step message when there's no `map.yaml` yet (was a raw stack trace — the exact state of a first-time user).
-- **serverInfo** now reports the real package version (was pinned to an old string).
-
-### v0.11.0 — The Map: `where_am_i` + `linksee-memory map` (2026-06-15)
-
-**Memory is the entry point; the product map is the new surface.** Drift detection grows up from individual anchors into a whole-product map you navigate from the CLI.
-
-- **`where_am_i`** (11th MCP tool) — locate the current topic/file on the Current Truth Map and get its blast radius. Call it with no args to auto-locate from your recent edits.
-- **`linksee-memory map`** CLI — `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. A `map.yaml` (git source of truth) describes how value reaches your user; the reconciler checks it against your code with file:line evidence. Bilingual: add `--lang ja`.
-- Graded blast radius (`must fix together` / `should align` / `fyi`), declared-vs-reality verdicts, and an anti-graveyard guard for accounted-for drift.
-- Per-project keys so the Map handles many projects at once.
-
-### v0.8.0 — Drift Detection MCP Tools (2026-06-08)
-
-**3 tools → 7 tools.** The biggest update since launch — agents can now detect, query, and resolve intent ↔ reality drift.
-
-**New tools:**
-- **`drift_status`** — returns the truth map with 4-species classification and per-node drift state
-- **`check_decision`** — deep-dive into a single anchor: state, edges, pending candidates
-- **`declare_anchor`** — record a decision/constraint/prohibition as a truth-map node (with v9 ProjectCoreNode fields)
-- **`resolve_drift`** — close the feedback loop: fix / supersede / acknowledge / dismiss
-
-**New engine module:**
-- **`truth-engine.ts`** — state derivation logic migrated from the dashboard into the MCP engine. Any MCP client can now query drift status without a dashboard.
-- **Resolution priority fix**: when multiple resolutions reference the same anchor, the most recent one wins (by `resolved_at` timestamp). Prevents a stale acknowledge from shadowing a newer fix.
-- **4-species classification**: nodes classified by `decision_mode` into hypothesis / constraint / commitment / source_of_truth with display format guidance.
-
-No breaking changes to existing memory tools. All 3 memory tools (remember, recall, read_smart) are unchanged.
-
-### v0.7.2 — Recall ergonomics + auto-edge detection + classifier precision (2026-05-30)
-
-Quality pass on v0.7.0 / v0.7.1 — sharper day-to-day agent UX and cleaner data for the dashboard:
-
-- **`recall` token discipline**: drops the redundant `content_raw` from the response (parsed `content` was already there — it was a 2× duplicate), and actually enforces `max_tokens` by greedy assembly that measures real serialized size (was a flat ~100 tok/memory estimate). Adds `approx_tokens` to the response so the agent can see its budget usage. The same query that previously returned ~15,800 tokens for a 1200 budget now stays inside it.
-- **`recall` precision**: near-duplicate memories — same entity + near-identical core text, e.g. the same message captured under both `goal` and `learning` — collapse to one in the result set. Composite weights adapt to query specificity: multi-term queries weight relevance higher so off-topic-but-pinned memories don't crowd narrow recalls.
-- **Capture dedup (write side)**: `session-extractor` now produces AT MOST one memory per user turn, with priority `goal[first_intent] > caveat > decision > context`. A first-intent message containing decision words (e.g. "決めた" / "これで進めよう") is no longer double-saved as both `goal` and `learning`.
-- **`memory_edges` auto-detection**: the previously-empty `memory_edges` table is now populated during the sleep-mode consolidation sweep. `detectMemoryEdges()` links a later DECISION memory to the most-recent earlier same-topic decision within an entity (chain, not clique) so the dashboard can render Pivot Chains. The default relation is `extends` — a same-topic later decision builds on, but does NOT deactivate, the earlier one. Explicit reversal markers (やめる / revert / instead of) produce `contradicts`; explicit replacement markers (の代わり / replaces / deprecate) produce `supersedes`. Prevents silent deactivation of still-valid decisions.
-- **`inferType` / `inferState` precision**: chitchat acknowledgements ("そうだね" / "ありがとう"), pasted terminal/git/email content, and meta-noise no longer classify as `decision` — they return `note` / `open` before pattern matching. The learning-layer default → `decision` is gated by this guard. Real decisions (採用 / 決めた, even after an acknowledgement opener) survive.
-
-No schema migration, no breaking API changes. Existing rows keep their stored content; the classifier improvements apply to new captures going forward.
-
-### v0.7.1 — Review fixes (2026-05-29)
-
-Based on Opus 4.7 design review of v0.7.0:
-
-- **P0 — Required params guidance**: `remember` tool description now includes "REQUIRED PARAMS BY MODE" section so LLMs know exactly which fields are needed for create vs update vs delete.
-- **P0 — Migration guidance**: Deprecated tool names (`forget`, `recall_file`, etc.) now return specific migration examples instead of generic errors.
-- **P1 — recall path+query merge**: When both `path` and `query` are provided to `recall`, results from file history and memory search are merged into a single response.
-- **P2 — Auto-consolidate safety**: Table existence check via `sqlite_master` before querying `consolidations` table, preventing errors on fresh databases.
-
-### v0.7.0 — 3-Tool Unified Surface (2026-05-29)
-
-**8 tools → 3 tools.** Following Context7's proven pattern of fewer tools = better cross-LLM consistency.
-
-**Breaking change**: The following tools are removed from the MCP surface. Calling them returns a migration guide:
-
-| Old tool | New equivalent |
-|---|---|
-| `forget` | `remember({ forget: true, memory_id: <id> })` |
-| `update_memory` | `remember({ memory_id: <id>, content: "..." })` |
-| `recall_file` | `recall({ path: "server.ts" })` |
-| `list_entities` | `recall({})` (no params = entity overview) |
-| `consolidate` | Auto-runs on server startup (7-day threshold) |
-
-**New unified tools:**
-- **`remember`** — create + update + delete in one tool. Mode is inferred from params.
-- **`recall`** — search + file history + overview in one tool. Mode is inferred from params.
-- **`read_smart`** — unchanged.
-
-**Other changes:**
-- Auto-consolidate on server startup (non-blocking `setTimeout`, 7-day threshold, `sqlite_master` safety check)
-- Claude Code Plugin bundle (`claude plugin add -- linksee-memory`)
-- Deprecation errors include specific migration examples
-
-All internal handler functions are preserved — this is a surface change, not a logic rewrite.
-
-### v0.2.0 — English-first launch readiness (2026-04-20)
-
-Prepares the package for a broader (primarily English-speaking) audience on Reddit, Hacker News, and Anthropic Discord. No breaking API changes.
-
-- **Bilingualized `SKILL.md`** (auto-invocation skill). The bundled skill that `linksee-memory-install-skill` copies into `~/.claude/skills/linksee-memory/SKILL.md` was Japanese-first; it is now English-primary with Japanese trigger phrases preserved inline. English speakers now get the skill firing on natural English phrases ("how did we solve this before?", "same error again", "remember this") in addition to the existing JP triggers.
-- **Install-skill CLI output is bilingual**: example test phrases shown after installation include both English and Japanese.
-- **Session-extractor EN coverage** (`linksee-memory-import`): expanded regex patterns for decisions, failures, and caveats so English Claude Code session logs get auto-tagged correctly. Additions include `let's go`, `pivot`, `switch to`, `settled on`, `approved`, `doesn't work`, `stuck`, `same error again`, `hit an error`, `debug`, `broke`, `revert`.
-- **Clearer caveat-forget error hint**: the previous message said "lower importance below 0.9 first, then forget" which was misleading — caveat-layer memories are permanently protected regardless of importance. The hint now correctly distinguishes layer-protection from pin-protection.
-- **README rework** for launch readiness: added a "See it in action" before/after scenario, ASCII 6-layer diagram, MCP Official Registry + Glama score badges, landing-page link, and an 8-item FAQ covering questions that surface during public launches.
-- Internal: SKILL.md now documents pairing with KanseiLink skill as an English workflow example.
-
-No code changes to the MCP protocol surface; all existing MCP clients continue to work unchanged.
-
-### v0.1.1 — Pin threshold tweak (2026-04-19)
-
-Based on real-world feedback that `importance=0.95` memories were not
-being treated as pinned despite intent.
-
-- **Pin threshold lowered from `>= 1.0` to `>= 0.9`.** Memories with
-  `importance >= 0.9` are now exempt from the auto-forget sweep and
-  surface `pinned: true` in `recall` and `remember` responses. This
-  matches the natural mental model ("0.9 = high importance = should
-  survive cleanup") without requiring exact `1.0`.
-- All existing memories with `importance >= 0.9` (including older ones
-  set to `0.9` or `0.95`) become pinned automatically — no migration
-  needed.
-- Updated tool descriptions and error messages to reflect the new
-  threshold.
-
-### v0.1.0 — Major UX update (2026-04-18)
-
-Based on one week of dogfooding, here's what changed:
-
-**New tools**
-- `update_memory` — atomic edit with preserved `memory_id`. Solves the "forget+remember breaks session_file_edits links" bug.
-- `list_entities` — fast "what do I know about?" primitive for session init. Supports `kind`/`min_memories` filters and returns layer breakdown.
-- `npx -y linksee-memory stats` — local DB summary CLI.
-
-**`recall` enhancements**
-- `match_reasons` array on each memory: e.g. `["content_match_fts", "heat:hot", "pinned"]`.
-- `score_breakdown` with per-dimension scores (relevance / heat / momentum / importance).
-- Pagination via `offset` / `has_more` / `stopped_by`.
-- `limit` parameter (hard cap, complements `max_tokens` budget).
-- `band` filter to request only hot/warm/cold/frozen memories.
-- `mark_accessed=false` for preview queries that shouldn't bump heat.
-- **Layer aliases**: `decisions` → `learning`, `warnings` → `caveat`, `how` → `implementation`, etc.
-- **Fix**: opportunistic refresh of stale entity momentum scores. Entities recalled >1 h after last remember() no longer return stale momentum.
-
-**`remember` enhancements**
-- Quality check: rejects pasted assistant output / CI logs / stack traces unless `force=true`.
-- `importance=1.0` now implicitly pins the memory (survives auto-forget).
-- Layer aliases accepted.
-
-**`forget` changes**
-- Pinned memories (importance=1.0) now preserved alongside caveat-layer memories.
-- Clear error response when attempting to delete a protected or missing memory.
-- dry-run now includes `sample_ids_to_drop`.
-
-**`consolidate` changes**
-- `dry_run: true` preview mode — reports cluster count + candidates without writing.
-
-**Infra**
-- Fixed fresh-DB migration bug (was querying `meta` table before it existed).
-- Bumped to Node 20+ for structured language feature usage.
-
-All changes are **backward compatible** — existing integrations continue to work. Server.ts version banner now reports `v0.1.0`.
-
-### Older versions
-See [GitHub Releases](https://github.com/michielinksee/linksee-memory/releases).
+See [CHANGELOG.md](./CHANGELOG.md) for every release, and [GitHub Releases](https://github.com/michielinksee/linksee-memory/releases).
 
 ## License
 

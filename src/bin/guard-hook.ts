@@ -15,8 +15,19 @@
 //                    "args": ["${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js"], "timeout": 8 } ] } ] } }
 
 import { pathToFileURL } from 'node:url';
-import { openDb, runMigrations } from '../db/migrate.js';
-import { gateAction, buildBootDigest } from '../lib/guard.js';
+import { NATIVE_HINT, isNativeLoadError, hookLog } from '../lib/native-hint.js';
+// The DB layer is imported dynamically, and opening the DB is wrapped, so that a native-addon
+// failure (better-sqlite3 loads its .node at `new Database()`, e.g. after a Node major upgrade)
+// is reported as ONE stderr line instead of a silent exit (0.17.1, Codex reviews of #15).
+type MigrateMod = typeof import('../db/migrate.js');
+type GuardMod = typeof import('../lib/guard.js');
+
+/** Fail open (exit 0). Native-load failures say so once on stderr; anything else goes to hook.log only. */
+function bail(where: string, e: unknown): never {
+  if (isNativeLoadError(e)) process.stderr.write(`${NATIVE_HINT}\n`);
+  hookLog(`guard: ${where}: ${String((e as Error)?.message ?? e).split('\n')[0]}`);
+  process.exit(0);
+}
 
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
@@ -40,13 +51,22 @@ async function main(): Promise<void> {
   }
   if (!ev || typeof ev !== 'object') process.exit(0);
 
+  let openDb: MigrateMod['openDb'], runMigrations: MigrateMod['runMigrations'];
+  let gateAction: GuardMod['gateAction'], buildBootDigest: GuardMod['buildBootDigest'];
+  try {
+    ({ openDb, runMigrations } = await import('../db/migrate.js'));
+    ({ gateAction, buildBootDigest } = await import('../lib/guard.js'));
+  } catch (e) {
+    bail('import', e);
+  }
+
   let db;
   try {
     db = openDb();
     db.pragma('busy_timeout = 2000'); // MCP server may hold a write lock; wait briefly, else fail-open
     runMigrations(db); // ensures injection_log exists even when run standalone
-  } catch {
-    process.exit(0); // can't open DB → never block
+  } catch (e) {
+    bail('open', e); // can't open DB → never block
   }
 
   try {

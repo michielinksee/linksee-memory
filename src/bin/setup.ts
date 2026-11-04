@@ -37,11 +37,14 @@
 
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import { GUARD_COMMAND, guardFullyWired, wireGuard, syncWiredFor, type ClaudeSettings } from '../lib/guard-wiring.js';
+import Database from 'better-sqlite3';
+import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, unmanagedLinkseeHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
+import { resolveHookRuntime, formatBytes } from '../lib/hook-runtime.js';
+import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -63,7 +66,12 @@ What it does:
   1. Registers linksee-memory MCP server with Claude Code
   2. Installs SKILL.md (teaches the agent when to recall/remember)
   3. Configures Stop hook (auto-captures every session)
-  4. Offers to wire the re-injection guard into THIS project's .claude/settings.json
+  4. Wires the re-injection guard into ~/.claude/settings.json (every repo)
+     --project-guard: this repo only · --no-guard: skip
+
+Writes ~/.claude/settings.json (one settings.json.bak-<timestamp> kept before changing it),
+~/.claude/skills/linksee-memory/SKILL.md, and — when run through npx — a pinned copy under
+~/.linksee-memory/runtime/<version>/ that the hooks call with node directly.
 
 After setup, just chat with Claude Code normally.
 Add "Use Linksee" to any prompt to trigger memory recall.`);
@@ -81,13 +89,16 @@ const SKILL_SRC = join(dirname(__filename), '..', 'skill', 'SKILL.md');
 
 const SERVER_NAME = 'linksee';
 const MCP_COMMAND = `claude mcp add -s user ${SERVER_NAME} -- npx -y linksee-memory`;
-// Subcommand form (npx -y linksee-memory <sub>) so the hooks resolve for a cold user —
-// npx can resolve the package name, but not sibling bin names like linksee-memory-sync.
-const HOOK_COMMAND = 'npx -y linksee-memory sync';
-
-// Re-injection guard: command + merge rules live in lib/guard-wiring.ts (shared with the tests).
-// It points at the globally-installed bin rather than a dist path, so it ships without a build
-// step, and the shell form is resolved at run time so it survives npx-cache eviction.
+// Hook commands (0.17.1, L-1-106): `"<node>" "<package>/dist/bin/<bin>.js"` — node called directly,
+// not `npx -y linksee-memory <sub>` (6–9 s per call vs the 8 s PreToolUse timeout). When setup runs
+// from npx's temporary cache, lib/hook-runtime.ts installs this version under
+// <memory dir>/runtime/<version> (npm install, once) and the hooks point there; if that fails it
+// keeps the npx form and says so.
+// Merge / replace rules live in lib/guard-wiring.ts (shared with the tests).
+const PACKAGE_ROOT = join(dirname(__filename), '..', '..');
+const PACKAGE_VERSION = (() => {
+  try { return String(JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version); } catch { return 'unknown'; }
+})();
 const PROJECT_DIR = process.cwd();
 const PROJECT_CLAUDE_DIR = join(PROJECT_DIR, '.claude');
 const PROJECT_SETTINGS_PATH = join(PROJECT_CLAUDE_DIR, 'settings.json');
@@ -118,7 +129,7 @@ try {
   for (const confFile of [SETTINGS_PATH, join(HOME, '.claude.json')]) {
     if (!existsSync(confFile)) continue;
     try {
-      const conf = JSON.parse(readFileSync(confFile, 'utf8'));
+      const conf = JSON.parse(stripBom(readFileSync(confFile, 'utf8')));
       if (conf?.mcpServers?.[SERVER_NAME]) {
         mcpAlreadyRegistered = true;
         break;
@@ -206,6 +217,32 @@ console.log('');
 
 console.log(`${BOLD}[3/4]${RESET} Configuring auto-capture hook...`);
 
+const runtime = resolveHookRuntime({
+  packageRoot: PACKAGE_ROOT,
+  nodePath: process.execPath,
+  memoryDir: TELEMETRY_DIR,
+  version: PACKAGE_VERSION,
+  dryRun,
+  // For testing an unpublished build: what to npm-install instead of linksee-memory@<version>.
+  spec: process.env.LINKSEE_RUNTIME_SPEC || undefined,
+});
+const HOOK_COMMANDS = runtime.commands;
+const HOOK_COMMAND = HOOK_COMMANDS.sync;
+if (runtime.mode === 'npx') {
+  console.log(`  ${SKIP} Hooks use npx (slower, ~6–9 s per call): ${runtime.note ?? ''}`);
+} else {
+  console.log(`  ${DIM}Hooks call node directly: ${runtime.root}${runtime.note ? ` (${runtime.note})` : ''}${RESET}`);
+}
+
+// Hooks that run our scripts but were wired by hand (wrappers, unquoted paths, exec form) are
+// never rewritten; list them at the end so the user can update them if they want to.
+function handWiredNotice(path: string): void {
+  const r = readSettingsFile(path);
+  if (!r.ok) return;
+  for (const c of unmanagedLinkseeHooks(r.settings as ClaudeSettings)) handWired.add(`${c}   (${path})`);
+}
+const handWired = new Set<string>();
+
 interface SettingsJson {
   hooks?: {
     Stop?: Array<{
@@ -217,39 +254,51 @@ interface SettingsJson {
   [key: string]: unknown;
 }
 
-let settings: SettingsJson = {};
-if (existsSync(SETTINGS_PATH)) {
+/** writeSettingsFile that reports instead of throwing (a failed write leaves the file as it was). */
+function safeWrite(path: string, settings: Record<string, unknown>): { backup?: string } | null {
   try {
-    settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'));
-  } catch {
-    console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH}`);
-    settings = {};
+    return writeSettingsFile(path, settings);
+  } catch (e) {
+    console.log(`  ${FAIL} Could not write ${path} (${(e as Error)?.message ?? e}) — left as it was`);
+    return null;
   }
 }
 
-// Check if hook already exists
-const stopHooks = settings?.hooks?.Stop ?? [];
-// Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
-// path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
-const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
-
-if (alreadyHooked) {
-  console.log(`  ${SKIP} Stop hook already configured`);
-} else if (dryRun) {
-  console.log(`  ${DIM}[dry-run] Would add Stop hook to ${SETTINGS_PATH}${RESET}`);
+// Same protection as the guard step below (lib/settings-file.ts): BOM stripped, an unparseable
+// file is left untouched, one .bak before the first write, temp file + rename.
+const stopRead = readSettingsFile(SETTINGS_PATH);
+if (!stopRead.ok) {
+  console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH} (${stopRead.reason}) — left untouched`);
+  console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
-  // Add hook
-  if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks.Stop) settings.hooks.Stop = [];
+  const settings = stopRead.settings as SettingsJson;
+  // Swap the Stop hook forms setup wrote (the exact 0.17.0 npx string, or our marked direct form).
+  // Only the sync kind here: the guard hooks are step 4's, after its --no-guard check.
+  const replaced = rewireLegacyHooks(settings as ClaudeSettings, HOOK_COMMANDS, ['sync']).replaced;
+  // Recognise every shape the sync hook has been wired in (npx subcommand, global bin, dist
+  // path, exec form) — a narrower probe appended a second copy, see lib/guard-wiring.ts.
+  const alreadyHooked = syncWiredFor(settings as ClaudeSettings, 'Stop');
 
-  settings.hooks.Stop.push({
-    matcher: '',
-    hooks: [{ type: 'command', command: HOOK_COMMAND }],
-  });
-
-  mkdirSync(CLAUDE_DIR, { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8');
-  console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
+  if (alreadyHooked && replaced.length === 0) {
+    console.log(`  ${SKIP} Stop hook already configured`);
+  } else if (dryRun) {
+    console.log(`  ${DIM}[dry-run] Would ${alreadyHooked ? 'switch the npx hooks to direct node calls in' : 'add Stop hook to'} ${SETTINGS_PATH}${RESET}`);
+  } else {
+    if (!alreadyHooked) {
+      if (!settings.hooks) settings.hooks = {};
+      if (!settings.hooks.Stop) settings.hooks.Stop = [];
+      settings.hooks.Stop.push({
+        matcher: '',
+        hooks: [{ type: 'command', command: HOOK_COMMAND }],
+      });
+    }
+    const w = safeWrite(SETTINGS_PATH, settings);
+    if (w) {
+      if (replaced.length) console.log(`  ${CHECK} Repointed ${replaced.length} hook(s) to ${HOOK_COMMANDS.sync.startsWith('npx') ? 'npx' : 'a direct node call'} → ${SETTINGS_PATH}`);
+      if (!alreadyHooked) console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
+      if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
+    }
+  }
 }
 console.log('');
 
@@ -282,22 +331,26 @@ async function configureGuard(): Promise<boolean> {
     return false;
   }
 
-  let settings: ClaudeSettings = {};
-  if (existsSync(targetPath)) {
-    try {
-      // Strip a leading BOM (U+FEFF) — Windows editors (Notepad) emit UTF-8+BOM, which JSON.parse rejects.
-      const raw = readFileSync(targetPath, 'utf8');
-      settings = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
-    } catch {
-      // Never clobber a file we can't parse — the user may have hand-authored it.
-      console.log(`  ${FAIL} Could not parse ${targetPath} — left untouched`);
-      console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
-      return false;
-    }
+  // BOM stripped; never clobber a file we can't parse — the user may have hand-authored it.
+  const read = readSettingsFile(targetPath);
+  if (!read.ok) {
+    console.log(`  ${FAIL} Could not parse ${targetPath} (${read.reason}) — left untouched`);
+    console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
+    return false;
   }
+  const settings = read.settings as ClaudeSettings;
 
-  if (guardFullyWired(settings)) {
+  // Known npx forms → direct node call (exact matches only; see lib/guard-wiring.ts).
+  const { replaced } = rewireLegacyHooks(settings, HOOK_COMMANDS, ['guard']);
+  if (guardFullyWired(settings) && replaced.length === 0) {
     console.log(`  ${SKIP} Guard already wired in ${targetPath}`);
+    return true;
+  }
+  if (guardFullyWired(settings) && !dryRun) {
+    const w = safeWrite(targetPath, settings);
+    if (!w) return false;
+    console.log(`  ${CHECK} Repointed ${replaced.length} guard hook(s) → ${targetPath}`);
+    if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
     return true;
   }
 
@@ -320,11 +373,12 @@ async function configureGuard(): Promise<boolean> {
   }
 
   // Merge, don't replace (see lib/guard-wiring.ts for the rules it holds to).
-  wireGuard(settings);
+  wireGuard(settings, HOOK_COMMANDS.guard);
 
-  mkdirSync(targetDir, { recursive: true });
-  writeFileSync(targetPath, JSON.stringify(settings, null, 2), 'utf8');
+  const w = safeWrite(targetPath, settings);
+  if (!w) return false;
   console.log(`  ${CHECK} Guard wired → ${targetPath} ${DIM}(${scopeLabel})${RESET}`);
+  if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
   if (!projectGuard) {
     console.log(`  ${DIM}Active in every repo. Scope an anchor with \`affects\` globs to limit where it fires;`);
     console.log(`  --no-guard to skip, --project-guard for this repo only.${RESET}`);
@@ -336,6 +390,23 @@ const guardConfigured = await configureGuard();
 console.log('');
 
 // ── Telemetry consent (opt-in, anonymous, off unless you agree) ──────────
+/** True when there is no memory yet (or it cannot be read) — used only to pick the first-try text. */
+function memoryIsEmpty(): boolean {
+  const dbPath = join(TELEMETRY_DIR, 'memory.db');
+  if (!existsSync(dbPath)) return true;
+  try {
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS c FROM memories').get() as { c: number } | undefined;
+      return !row || row.c === 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return true;
+  }
+}
+
 async function configureTelemetryConsent(): Promise<void> {
   console.log(`${BOLD}Anonymous usage stats${RESET} ${DIM}(optional)${RESET}`);
 
@@ -381,19 +452,42 @@ console.log('');
 console.log(`${BOLD}Setup complete!${RESET}`);
 console.log('');
 console.log('How it works:');
-console.log(`  ${DIM}• Every session is auto-captured (decisions, caveats, learnings)${RESET}`);
+console.log(`  ${DIM}• Every Claude Code session is auto-captured (decisions, caveats, learnings)${RESET}`);
 console.log(`  ${DIM}• Agent auto-recalls past context when starting a task${RESET}`);
 console.log(`  ${DIM}• Memory is local-first (your memory never leaves your machine)${RESET}`);
-console.log(`  ${DIM}• Works across Claude Code, Cursor, Windsurf, Codex, Gemini (cross-agent)${RESET}`);
+console.log(`  ${DIM}• The memory is shared over MCP by 5 clients (Claude Code, Cursor, Windsurf, Codex, Gemini CLI);${RESET}`);
+console.log(`  ${DIM}  auto-capture and the guard run in Claude Code only. Codex: codex mcp add linksee -- npx -y linksee-memory${RESET}`);
 if (guardConfigured) {
-  console.log(`  ${DIM}• Re-injection guard re-surfaces this project's accepted decisions before edits${RESET}`);
+  console.log(`  ${DIM}• Re-injection guard re-surfaces your accepted decisions before edits (${projectGuard ? 'this project' : 'every repo'})${RESET}`);
 }
 console.log('');
-console.log('Test by asking:');
-console.log(`  ${BOLD}"How did we solve this before?"${RESET}`);
-console.log(`  ${BOLD}"Same error again"${RESET}`);
-console.log(`  ${BOLD}"Remember: I prefer TypeScript over JavaScript"${RESET}`);
-console.log(`  ${BOLD}「前にこの問題どう解決したっけ」${RESET}`);
+// 0.17.1 never deletes pinned runtimes (Codex fourth review of #15: any automatic delete risked
+// removing one a hook still uses). Say what they cost and how to remove old ones by hand.
+if (runtime.mode === 'pinned' && runtime.runtimeBase && !dryRun) {
+  console.log(`  ${DIM}• Hooks run from ${runtime.runtimeBase}${sep}<version> (${runtime.bytes !== undefined ? formatBytes(runtime.bytes) : 'about 35 MB'} each). Older versions are not removed automatically;${RESET}`);
+  console.log(`  ${DIM}  0.17.2 adds \`linksee-memory runtime prune\`. Until then you can delete old ones by hand: ${runtime.runtimeBase}${RESET}`);
+  console.log('');
+}
+handWiredNotice(SETTINGS_PATH);
+if (projectGuard) handWiredNotice(PROJECT_SETTINGS_PATH);
+if (handWired.size) {
+  console.log('Left as you wired them (not written by setup, so not changed):');
+  for (const c of handWired) console.log(`  ${DIM}• ${c}${RESET}`);
+  console.log(`  ${DIM}setup writes "<node>" "<package>/dist/bin/<script>.js" --linksee-managed; switch to that form if you want setup to manage them.${RESET}`);
+  console.log('');
+}
+if (memoryIsEmpty()) {
+  // A fresh install has nothing to recall, so "how did we solve this before?" always comes back
+  // empty — the first thing a new user tries would fail. Offer a round trip that cannot.
+  console.log('Try it (your memory is empty, so start by giving it something):');
+  console.log(`  1. Say: ${BOLD}"Remember: in this repo we decided to use X, because Y."${RESET}`);
+  console.log(`  2. Open a ${BOLD}new${RESET} session and ask: ${BOLD}"What did we decide about X?"${RESET}`);
+} else {
+  console.log('Test by asking:');
+  console.log(`  ${BOLD}"How did we solve this before?"${RESET}`);
+  console.log(`  ${BOLD}"Same error again"${RESET}`);
+  console.log(`  ${BOLD}「前にこの問題どう解決したっけ」${RESET}`);
+}
 console.log('');
 console.log(`Or add ${BOLD}"Use Linksee"${RESET} to any prompt to trigger memory recall.`);
 console.log('');

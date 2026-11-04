@@ -31,7 +31,7 @@ export const PROMPTS = [
   {
     name: 'weekly-consolidation',
     description:
-      'Sleep-mode summary of the past week\'s memories for an entity. Produces a single learning-layer entry that captures the trajectory. Use as input to the consolidate tool, or to write a Friday digest.',
+      'Sleep-mode summary of the past week\'s memories for an entity. Produces a single learning-layer entry that captures the trajectory. Use as input when distilling learnings, or to write a Friday digest.',
     arguments: [
       { name: 'entity_name', description: 'The entity to consolidate.', required: true },
       { name: 'week_offset', description: 'Weeks-ago offset (0 = this week, 1 = last week). Default 0.', required: false },

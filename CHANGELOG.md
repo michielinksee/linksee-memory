@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.17.1 — unreleased (Fixes only)
+
+Fixes for what a new user runs into on the first day. No new features, no new tools (still 7).
+
+### Fixed
+
+- **setup no longer overwrites a `settings.json` it cannot read.** The Stop-hook step treated a
+  parse failure (including a UTF-8 BOM, Notepad's default) as `{}` and wrote it back, wiping the
+  user's other hooks and settings. Both settings steps now strip the BOM, refuse to write when the
+  file does not parse, keep one `settings.json.bak-<timestamp>` before changing it, write via a
+  temp file + rename, and write nothing when nothing changed.
+- **Hooks call `node` directly instead of `npx -y`.** Each `npx -y linksee-memory guard|sync` call
+  took 7.4–8.6 s on a warm cache (npm start-up + registry check; measured on Windows), against an
+  8 s `PreToolUse` timeout — so the guard could time out and silently not fire. setup now writes
+  `"<node>" "<package>/dist/bin/<bin>.js" --linksee-managed` (0.20–0.27 s on the same machine).
+  Run through `npx`, setup installs this version once with `npm install --prefix
+  ~/.linksee-memory/runtime/<version> --no-save --omit=dev` (npx's cache is temporary), shows its
+  size. Older runtime versions are never removed automatically (each is about 35 MB): setup prints
+  where they are, they can be deleted by hand, and `linksee-memory runtime prune` is planned for
+  0.17.2. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
+  be undone. On failure the existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
+  wrote: the exact `npx -y linksee-memory sync|guard` strings and the `--linksee-managed` form.
+  Wrappers and hand edits are left alone and listed; `--no-guard` leaves the guard hooks untouched.
+  Paths with `$`, backticks, `%` or `"` keep the npx form. If the SQLite native addon cannot load
+  (e.g. after a Node major upgrade — it fails when the DB is opened), the guard and Stop hooks print
+  one line, "linksee-memory: native module failed to load (Node changed?). Re-run: npx -y
+  linksee-memory setup", and let the action through; other failures stay silent (hook.log).
+  Rewriting `settings.json` keeps its permission bits, writes through a symlink, and refuses a
+  symlink whose target is missing.
+- **The server no longer consolidates memories on its own.** Start-up consolidation deleted the
+  original rows (keeping a 3 × 200-character summary) without the user asking. It is now off
+  unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). There is no `consolidate` tool
+  (merged away in 0.7.0); the old hint that it "auto-runs on server startup" is corrected, and so
+  are the README FAQ and the bundled agent skill (which told agents to run a `consolidate` tool
+  weekly). Rows removed by earlier versions are not restored.
+- **Old databases.** Every DB older than schema 8 stopped with `no such table: drift_anchors`
+  (0.8.0 – 0.17.0), after partly altering the file. Schema 6–8 now migrate. Schema 1–5 is refused
+  before anything is written — the schema is read on a read-only connection before any writable
+  one exists, so a leftover WAL is not checkpointed and memory.db / -wal / -journal stay
+  byte-identical (a file with a hot rollback journal is refused the same way; if the read-only
+  check cannot run at all — e.g. another process holds a lock — it refuses too and says to close
+  other clients, rather than guessing) — with one message: back up the folder, and do not open it with another
+  linksee-memory version meanwhile. No older version is suggested as a stepping stone (0.7.2,
+  for one, has no subcommands: any `npx linksee-memory@0.7.2 …` starts its server, whose start-up
+  consolidate can delete rows). A migration command for these files is planned for 0.17.2.
+
+### Docs
+
+- README: the "~100 ms per turn" claim is replaced by measured numbers for both hook forms; the
+  Quick Start says what setup writes, how to undo it (`.bak`), that the memory is shared over MCP by
+  five clients while auto-capture and the guard are Claude Code only, the one-line Codex
+  registration, and a first try that works on an empty memory. The guard's scope (every repo by
+  default) is stated consistently. The README's Changelog section now points here; its v0.4–v0.11
+  entries were moved into this file.
+- setup's closing message says the same, and on an empty memory suggests "remember X" → new
+  session → "what did we decide about X?" instead of a recall that cannot find anything yet.
+
 ## v0.17.0 — 2026-10-30 (Share a fix as a link)
 
 ### Added — `share_draft`: share a fix as a link, never a send
@@ -278,6 +335,97 @@ Found by using the server as the agent for a day. The theme is one sentence:
   subcommand). Entries for 0.4–0.11 were not kept in this file.
 - Regression tests: `test/supersede-gate.mjs`, `test/edges-state.mjs` (throwaway DB).
 
+
+<!-- v0.4–v0.11: moved here from the README's old Changelog section in 0.17.1 -->
+
+## v0.11.3 — Robustness + MCP hygiene (2026-06-16)
+
+- **Corrupt-database recovery:** if `~/.linksee-memory/memory.db` is unreadable, linksee preserves it as `memory.db.corrupt-<timestamp>` and starts a fresh one (with a clear message) instead of crashing with a raw SQLite error. Old memories stay recoverable in the backup.
+- **`recall` tool description** no longer suggests editing your system prompt — cleaner MCP citizenship.
+
+## v0.11.2 — More cold-start hardening (2026-06-16)
+
+- **`stats` works on a fresh database** instead of crashing with `no such table` — it ensures the schema exists first (it may be the first command a new user runs).
+- **`map --help`** prints usage instead of trying to import a map.
+
+## v0.11.1 — Cold-start fixes (2026-06-16)
+
+- **Run any CLI through the package name:** `npx -y linksee-memory setup` (and `map`, `sync`, `guard`, `stats`, `import`, `install-skill`). A fresh user couldn't reach the standalone bins (`linksee-memory-setup`, …) via `npx` — npx resolves package names, not sibling bin names — so the one-command install 404'd. The main bin now dispatches subcommands; the standalone bins remain as aliases.
+- **`map` exits gracefully** with a next-step message when there's no `map.yaml` yet (was a raw stack trace — the exact state of a first-time user).
+- **serverInfo** now reports the real package version (was pinned to an old string).
+
+## v0.11.0 — The Map: `where_am_i` + `linksee-memory map` (2026-06-15)
+
+**Memory is the entry point; the product map is the new surface.** Drift detection grows up from individual anchors into a whole-product map you navigate from the CLI.
+
+- **`where_am_i`** (11th MCP tool) — locate the current topic/file on the Current Truth Map and get its blast radius. Call it with no args to auto-locate from your recent edits.
+- **`linksee-memory map`** CLI — `where` · `affects` · `explain` · `status` · `next` · `reconcile` · `inspect --json` · `blueprint`. A `map.yaml` (git source of truth) describes how value reaches your user; the reconciler checks it against your code with file:line evidence. Bilingual: add `--lang ja`.
+- Graded blast radius (`must fix together` / `should align` / `fyi`), declared-vs-reality verdicts, and an anti-graveyard guard for accounted-for drift.
+- Per-project keys so the Map handles many projects at once.
+
+## v0.8.0 — Drift Detection MCP Tools (2026-06-08)
+
+**3 tools → 7 tools.** The biggest update since launch — agents can now detect, query, and resolve intent ↔ reality drift.
+
+**New tools:**
+- **`drift_status`** — returns the truth map with 4-species classification and per-node drift state
+- **`check_decision`** — deep-dive into a single anchor: state, edges, pending candidates
+- **`declare_anchor`** — record a decision/constraint/prohibition as a truth-map node (with v9 ProjectCoreNode fields)
+- **`resolve_drift`** — close the feedback loop: fix / supersede / acknowledge / dismiss
+
+**New engine module:**
+- **`truth-engine.ts`** — state derivation logic migrated from the dashboard into the MCP engine. Any MCP client can now query drift status without a dashboard.
+- **Resolution priority fix**: when multiple resolutions reference the same anchor, the most recent one wins (by `resolved_at` timestamp). Prevents a stale acknowledge from shadowing a newer fix.
+- **4-species classification**: nodes classified by `decision_mode` into hypothesis / constraint / commitment / source_of_truth with display format guidance.
+
+No breaking changes to existing memory tools. All 3 memory tools (remember, recall, read_smart) are unchanged.
+
+## v0.7.2 — Recall ergonomics + auto-edge detection + classifier precision (2026-05-30)
+
+Quality pass on v0.7.0 / v0.7.1 — sharper day-to-day agent UX and cleaner data for the dashboard:
+
+- **`recall` token discipline**: drops the redundant `content_raw` from the response (parsed `content` was already there — it was a 2× duplicate), and actually enforces `max_tokens` by greedy assembly that measures real serialized size (was a flat ~100 tok/memory estimate). Adds `approx_tokens` to the response so the agent can see its budget usage. The same query that previously returned ~15,800 tokens for a 1200 budget now stays inside it.
+- **`recall` precision**: near-duplicate memories — same entity + near-identical core text, e.g. the same message captured under both `goal` and `learning` — collapse to one in the result set. Composite weights adapt to query specificity: multi-term queries weight relevance higher so off-topic-but-pinned memories don't crowd narrow recalls.
+- **Capture dedup (write side)**: `session-extractor` now produces AT MOST one memory per user turn, with priority `goal[first_intent] > caveat > decision > context`. A first-intent message containing decision words (e.g. "決めた" / "これで進めよう") is no longer double-saved as both `goal` and `learning`.
+- **`memory_edges` auto-detection**: the previously-empty `memory_edges` table is now populated during the sleep-mode consolidation sweep. `detectMemoryEdges()` links a later DECISION memory to the most-recent earlier same-topic decision within an entity (chain, not clique) so the dashboard can render Pivot Chains. The default relation is `extends` — a same-topic later decision builds on, but does NOT deactivate, the earlier one. Explicit reversal markers (やめる / revert / instead of) produce `contradicts`; explicit replacement markers (の代わり / replaces / deprecate) produce `supersedes`. Prevents silent deactivation of still-valid decisions.
+- **`inferType` / `inferState` precision**: chitchat acknowledgements ("そうだね" / "ありがとう"), pasted terminal/git/email content, and meta-noise no longer classify as `decision` — they return `note` / `open` before pattern matching. The learning-layer default → `decision` is gated by this guard. Real decisions (採用 / 決めた, even after an acknowledgement opener) survive.
+
+No schema migration, no breaking API changes. Existing rows keep their stored content; the classifier improvements apply to new captures going forward.
+
+## v0.7.1 — Review fixes (2026-05-29)
+
+Based on Opus 4.7 design review of v0.7.0:
+
+- **P0 — Required params guidance**: `remember` tool description now includes "REQUIRED PARAMS BY MODE" section so LLMs know exactly which fields are needed for create vs update vs delete.
+- **P0 — Migration guidance**: Deprecated tool names (`forget`, `recall_file`, etc.) now return specific migration examples instead of generic errors.
+- **P1 — recall path+query merge**: When both `path` and `query` are provided to `recall`, results from file history and memory search are merged into a single response.
+- **P2 — Auto-consolidate safety**: Table existence check via `sqlite_master` before querying `consolidations` table, preventing errors on fresh databases.
+
+## v0.7.0 — 3-Tool Unified Surface (2026-05-29)
+
+**8 tools → 3 tools.** Following Context7's proven pattern of fewer tools = better cross-LLM consistency.
+
+**Breaking change**: The following tools are removed from the MCP surface. Calling them returns a migration guide:
+
+| Old tool | New equivalent |
+|---|---|
+| `forget` | `remember({ forget: true, memory_id: <id> })` |
+| `update_memory` | `remember({ memory_id: <id>, content: "..." })` |
+| `recall_file` | `recall({ path: "server.ts" })` |
+| `list_entities` | `recall({})` (no params = entity overview) |
+| `consolidate` | Auto-runs on server startup (7-day threshold) |
+
+**New unified tools:**
+- **`remember`** — create + update + delete in one tool. Mode is inferred from params.
+- **`recall`** — search + file history + overview in one tool. Mode is inferred from params.
+- **`read_smart`** — unchanged.
+
+**Other changes:**
+- Auto-consolidate on server startup (non-blocking `setTimeout`, 7-day threshold, `sqlite_master` safety check)
+- Claude Code Plugin bundle (`claude plugin add -- linksee-memory`)
+- Deprecation errors include specific migration examples
+
+All internal handler functions are preserved — this is a surface change, not a logic rewrite.
 
 ## v0.3.0 — 2026-05-07 (Five Blocks)
 
