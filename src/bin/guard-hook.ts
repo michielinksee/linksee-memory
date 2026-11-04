@@ -15,14 +15,19 @@
 //                    "args": ["${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js"], "timeout": 8 } ] } ] } }
 
 import { pathToFileURL } from 'node:url';
-// The DB layer (better-sqlite3, a native module) is imported dynamically in main() so a load
-// failure — e.g. Node upgraded to a new major after setup pinned the runtime — can be caught and
-// reported in one line instead of crashing at module link time (0.17.1, Codex review of #15).
+import { NATIVE_HINT, isNativeLoadError, hookLog } from '../lib/native-hint.js';
+// The DB layer is imported dynamically, and opening the DB is wrapped, so that a native-addon
+// failure (better-sqlite3 loads its .node at `new Database()`, e.g. after a Node major upgrade)
+// is reported as ONE stderr line instead of a silent exit (0.17.1, Codex reviews of #15).
 type MigrateMod = typeof import('../db/migrate.js');
 type GuardMod = typeof import('../lib/guard.js');
 
-export const RELOAD_HINT =
-  '[linksee-memory] guard hook skipped: could not load its SQLite driver for this Node version. Re-run: npx -y linksee-memory setup';
+/** Fail open (exit 0). Native-load failures say so once on stderr; anything else goes to hook.log only. */
+function bail(where: string, e: unknown): never {
+  if (isNativeLoadError(e)) process.stderr.write(`${NATIVE_HINT}\n`);
+  hookLog(`guard: ${where}: ${String((e as Error)?.message ?? e).split('\n')[0]}`);
+  process.exit(0);
+}
 
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
@@ -52,9 +57,7 @@ async function main(): Promise<void> {
     ({ openDb, runMigrations } = await import('../db/migrate.js'));
     ({ gateAction, buildBootDigest } = await import('../lib/guard.js'));
   } catch (e) {
-    // fail-open, but not silent: the user needs to know the guard is off and how to fix it
-    process.stderr.write(`${RELOAD_HINT} (${(e as Error)?.message?.split('\n')[0] ?? e})\n`);
-    process.exit(0);
+    bail('import', e);
   }
 
   let db;
@@ -62,8 +65,8 @@ async function main(): Promise<void> {
     db = openDb();
     db.pragma('busy_timeout = 2000'); // MCP server may hold a write lock; wait briefly, else fail-open
     runMigrations(db); // ensures injection_log exists even when run standalone
-  } catch {
-    process.exit(0); // can't open DB → never block
+  } catch (e) {
+    bail('open', e); // can't open DB → never block
   }
 
   try {

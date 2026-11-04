@@ -16,6 +16,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isTelemetryEnabled, buildPayload, sendTelemetry } from '../lib/telemetry.js';
+import { NATIVE_HINT, isNativeLoadError } from '../lib/native-hint.js';
 import Database from 'better-sqlite3';
 
 const LOG_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
@@ -90,6 +91,9 @@ async function main(): Promise<void> {
     process.exit(0);
   } else if (r.status !== 0) {
     log(`importer exited ${r.status} (session=${sessionId}, ${elapsed}ms): ${(r.stderr || '').slice(0, 500)}`);
+    // The native addon loads at `new Database()` inside the importer; after a Node major upgrade
+    // that is where it fails. Say so once — still exit 0, the Stop hook never blocks.
+    if (isNativeLoadError(r.stderr || '')) process.stderr.write(`${NATIVE_HINT}\n`);
     process.exit(0);
   }
 

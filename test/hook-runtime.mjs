@@ -14,13 +14,15 @@
 //
 // Run: node test/hook-runtime.mjs   (needs `pnpm build`; temp folders only)
 
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, cpSync, readFileSync, symlinkSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const { resolveHookRuntime, isEphemeralRoot, findNpmCli } = await import('../dist/lib/hook-runtime.js');
+const { resolveHookRuntime, isEphemeralRoot, findNpmCli, pruneOldRuntimes, recordSettingsRef, REFS_FILE } = await import('../dist/lib/hook-runtime.js');
+const { NATIVE_HINT } = await import('../dist/lib/native-hint.js');
 const { nodeHookCommands } = await import('../dist/lib/guard-wiring.js');
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 
@@ -89,11 +91,46 @@ const memoryDir = join(base, 'mem with space');
   check('dry-run: nothing installed', !existsSync(join(base, 'mem-dry', 'runtime')) && /dry-run/.test(dry.note ?? ''));
 }
 
-// 4. upgrade: the old runtime goes only after the new one loads
+// 4. upgrade: the new runtime is installed but resolveHookRuntime deletes NOTHING — pruning is
+//    setup's last step, after settings are written (Codex re-review of #15)
 {
   const rt = resolveHookRuntime({ packageRoot: npxRoot, nodePath: process.execPath, memoryDir, version: '0.17.2', verify: loads, install: fakeInstall('0.17.2') });
-  check('upgrade: pinned to 0.17.2', rt.mode === 'pinned' && rt.root.includes('0.17.2'));
-  check('upgrade: only the newest runtime kept', readdirSync(join(memoryDir, 'runtime')).join(',') === '0.17.2', readdirSync(join(memoryDir, 'runtime')).join(','));
+  check('upgrade: pinned to 0.17.2', rt.mode === 'pinned' && rt.root.includes('0.17.2') && rt.version === '0.17.2' && !!rt.runtimeBase);
+  check('upgrade: old runtime NOT removed by resolveHookRuntime', readdirSync(join(memoryDir, 'runtime')).sort().join(',') === '0.17.1,0.17.2', readdirSync(join(memoryDir, 'runtime')).join(','));
+
+  // same-version reinstall swaps through dest.old-<pid> and leaves no leftovers
+  const again = resolveHookRuntime({ packageRoot: npxRoot, nodePath: process.execPath, memoryDir, version: '0.17.2', verify: (r) => loads(r) && !r.includes(join('runtime', '0.17.2')), install: fakeInstall('0.17.2') });
+  check('same-version reinstall: pinned, no .old-/.tmp- leftovers', again.mode === 'pinned' && readdirSync(join(memoryDir, 'runtime')).every((n) => !/\.old-|\.tmp-/.test(n)), readdirSync(join(memoryDir, 'runtime')).join(','));
+}
+
+// 4b. pruneOldRuntimes: removes only folders no settings file points at
+{
+  const rtBase = join(memoryDir, 'runtime');
+  const settingsA = join(base, 'settings-a.json');
+  const oldGuard = nodeHookCommands(process.execPath, join(rtBase, '0.17.1', 'node_modules', 'linksee-memory')).guard;
+  writeFileSync(settingsA, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: oldGuard }] }] } }, null, 2));
+  let pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('prune: old runtime referenced by a settings file is kept and reported', pr.removed.length === 0 && pr.kept.length === 1 && pr.kept[0].referencedBy === settingsA, JSON.stringify(pr));
+  check('prune: it is still on disk', existsSync(join(rtBase, '0.17.1')));
+
+  // a wrapper (hand-written, unquoted) pointing at the old runtime also keeps it
+  const wrapper = `node ${join(rtBase, '0.17.1', 'node_modules', 'linksee-memory', 'dist', 'bin', 'guard-hook.js')}`;
+  writeFileSync(settingsA, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: wrapper }] }] } }, null, 2));
+  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('prune: a hand-written wrapper path (backslashes, JSON-escaped) keeps it too', pr.kept.length === 1 && existsSync(join(rtBase, '0.17.1')), JSON.stringify(pr));
+
+  // a settings file recorded earlier (e.g. another repo's --project-guard) is checked even if not passed in
+  const other = join(base, 'other-repo-settings.json');
+  writeFileSync(other, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: oldGuard }] }] } }));
+  recordSettingsRef(rtBase, other);
+  writeFileSync(settingsA, '{}');
+  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('prune: a previously recorded settings file (other repo) keeps it', pr.kept.length === 1 && pr.kept[0].referencedBy === other, JSON.stringify(pr));
+
+  writeFileSync(other, '{}');
+  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
+  check('prune: with no reference left, the old runtime is removed', pr.removed.join(',') === '0.17.1' && !existsSync(join(rtBase, '0.17.1')), JSON.stringify(pr));
+  check('prune: the kept version and the refs file survive', existsSync(join(rtBase, '0.17.2')) && existsSync(join(rtBase, REFS_FILE)));
 }
 
 // 5. failures keep what was there and the npx form
@@ -119,20 +156,61 @@ const memoryDir = join(base, 'mem with space');
   check('% in memory dir: npx form, nothing installed', b.mode === 'npx' && !existsSync(join(base, '%USERNAME%')));
 }
 
-// 7. guard hook without a loadable driver: one line on stderr, exit 0 (fail-open, not silent)
+// 7. the native addon itself is broken (what a Node major upgrade does to a pinned runtime):
+//    better-sqlite3's JS loads fine, the .node fails at `new Database()`. Guard and Stop hooks must
+//    print exactly one line (the hint) and exit 0 (Codex re-review of #15).
 {
-  const lone = join(base, 'no-deps', 'linksee-memory');
-  cpSync(DIST, join(lone, 'dist'), { recursive: true });
-  writeFileSync(join(lone, 'package.json'), JSON.stringify({ name: 'linksee-memory', type: 'module' }));
-  const r = spawnSync(process.execPath, [join(lone, 'dist', 'bin', 'guard-hook.js'), '--linksee-managed'], {
+  const req = createRequire(import.meta.url);
+  const realBs = dirname(req.resolve('better-sqlite3/package.json'));      // .pnpm/better-sqlite3@x/node_modules/better-sqlite3
+  const rtNm = join(base, 'broken-rt', 'node_modules');
+  mkdirSync(rtNm, { recursive: true });
+  // a real copy of better-sqlite3 and its own deps (bindings, file-uri-to-path), links resolved
+  cpSync(dirname(realBs), rtNm, { recursive: true, dereference: true });
+  const realBindings = realpathSync(join(dirname(realBs), 'bindings'));
+  if (!existsSync(join(rtNm, 'file-uri-to-path'))) cpSync(join(dirname(realBindings), 'file-uri-to-path'), join(rtNm, 'file-uri-to-path'), { recursive: true, dereference: true });
+  const addon = join(rtNm, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+  check('broken addon: fixture has the real .node to break', existsSync(addon));
+  writeFileSync(addon, 'this is not a native module');
+  // our package: dist copied, every other dependency linked to the repo's install
+  const pkgRoot = join(rtNm, 'linksee-memory');
+  cpSync(DIST, join(pkgRoot, 'dist'), { recursive: true });
+  const pj = JSON.parse(readFileSync(join(DIST, '..', 'package.json'), 'utf8'));
+  writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'linksee-memory', version: pj.version, type: 'module' }));
+  for (const dep of Object.keys(pj.dependencies)) {
+    if (dep === 'better-sqlite3') continue;
+    const target = realpathSync(join(DIST, '..', 'node_modules', dep));
+    const link = join(rtNm, dep);
+    mkdirSync(dirname(link), { recursive: true });
+    if (!existsSync(link)) symlinkSync(target, link, 'junction');
+  }
+  const env = { ...process.env, LINKSEE_MEMORY_DIR: join(base, 'mem-broken'), HOME: base, USERPROFILE: base, LINKSEE_TELEMETRY: 'off' };
+  const lines = (t) => t.split(/\r?\n/).filter((l) => l.length > 0);
+
+  const g = spawnSync(process.execPath, [join(pkgRoot, 'dist', 'bin', 'guard-hook.js'), '--linksee-managed'], {
     input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: 'x' } }),
-    encoding: 'utf8',
-    env: { ...process.env, LINKSEE_MEMORY_DIR: join(base, 'mem-nodeps'), NODE_PATH: '' },
-    cwd: base,
+    encoding: 'utf8', env, cwd: base,
   });
-  check('driver missing: exit 0', r.status === 0, `exit ${r.status} ${r.stderr}`);
-  check('driver missing: stderr says re-run setup', /Re-run: npx -y linksee-memory setup/.test(r.stderr), r.stderr.slice(0, 300));
-  check('driver missing: nothing on stdout (no block, no injection)', r.stdout === '');
+  check('broken addon, guard: exit 0', g.status === 0, `exit ${g.status}`);
+  check('broken addon, guard: exactly one stderr line, the hint', lines(g.stderr).length === 1 && lines(g.stderr)[0] === NATIVE_HINT, JSON.stringify(g.stderr.slice(0, 300)));
+  check('broken addon, guard: nothing on stdout (no block, no injection)', g.stdout === '');
+  check('broken addon, guard: detail written to hook.log', /guard: open:/.test(readFileSync(join(base, 'mem-broken', 'hook.log'), 'utf8')));
+
+  const transcript = join(base, 'transcript.jsonl');
+  writeFileSync(transcript, '');
+  const s = spawnSync(process.execPath, [join(pkgRoot, 'dist', 'bin', 'sync-session.js'), '--linksee-managed'], {
+    input: JSON.stringify({ session_id: 's', transcript_path: transcript, cwd: base }),
+    encoding: 'utf8', env, cwd: base,
+  });
+  check('broken addon, Stop hook: exit 0', s.status === 0, `exit ${s.status}`);
+  check('broken addon, Stop hook: exactly one stderr line, the hint', lines(s.stderr).length === 1 && lines(s.stderr)[0] === NATIVE_HINT, JSON.stringify(s.stderr.slice(0, 300)));
+
+  // a failure that is NOT the addon stays silent on stderr (hook.log only)
+  writeFileSync(join(base, 'not-a-dir.txt'), 'x');
+  const q = spawnSync(process.execPath, [join(DIST, 'bin', 'guard-hook.js')], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: 'x' } }),
+    encoding: 'utf8', env: { ...env, LINKSEE_MEMORY_DIR: join(base, 'not-a-dir.txt') }, cwd: base,
+  });
+  check('other open failure: exit 0 and silent on stderr', q.status === 0 && q.stderr === '', `${q.status} ${q.stderr.slice(0, 200)}`);
 }
 
 // 8. node form built for this machine's real node path
@@ -141,6 +219,6 @@ const memoryDir = join(base, 'mem with space');
   check('real execPath is quoted', c.guard.startsWith('"') && c.guard.includes('" "'));
 }
 
-try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ }
+if (!process.env.KEEP) { try { rmSync(base, { recursive: true, force: true }); } catch { /* ignore */ } } else console.log("kept", base);
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
