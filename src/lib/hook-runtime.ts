@@ -11,7 +11,8 @@
 // a git clone is already stable and is used where it is.
 //
 // Codex review of #15: copying npx's node_modules tree was replaced by this install — a real
-// install has no links back into the cache, its size is known, and old versions are removed.
+// install has no links back into the cache and its size is known. Old versions are never removed
+// here; `linksee-memory runtime prune` (src/bin/runtime.ts, 0.17.2) removes unreferenced ones.
 //   • the new runtime must load better-sqlite3 before anything else happens;
 //   • older runtime/<version> folders are NOT deleted (0.17.1); setup says where they are;
 //   • on any failure the existing runtime is left as it was and the hooks keep the npx form.
@@ -115,9 +116,9 @@ export function formatBytes(n: number): string {
   return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
-// Older runtime/<version> folders are never deleted automatically in 0.17.1 (Codex fourth review
-// of #15): every automatic rule tried still had a path that could delete a runtime some hook used.
-// setup prints where they are and their size; `linksee-memory runtime prune` is planned for 0.17.2.
+// Older runtime/<version> folders are never deleted automatically (Codex fourth review of #15):
+// every automatic rule tried still had a path that could delete a runtime some hook used.
+// setup prints where they are and their size; `linksee-memory runtime prune` deletes them by hand.
 
 export type ResolveOpts = {
   packageRoot: string;
@@ -169,9 +170,13 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
   const spec = o.spec ?? `linksee-memory@${o.version}`;
   const staging = join(base, `.tmp-${o.version}-${process.pid}`);
   const stagingRoot = join(staging, 'node_modules', 'linksee-memory');
-  const fail = (why: string) => {
+  // `previousAt`: the same-version swap moved the old runtime aside and could not put it back —
+  // then "left as it was" would be false, so the note says where it is instead (Codex 5th review, P2).
+  const fail = (why: string, previousAt?: string) => {
     try { rmSync(staging, { recursive: true, force: true }); } catch { /* ignore */ }
-    return npx(`${why}; kept the npx form, existing runtime left as it was`);
+    return npx(previousAt
+      ? `${why}; kept the npx form. The previous runtime could not be moved back: it is at ${previousAt} — rename it to ${dest} to restore it`
+      : `${why}; kept the npx form, existing runtime left as it was`);
   };
   try {
     rmSync(staging, { recursive: true, force: true });
@@ -193,7 +198,7 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
   } catch (e) {
     if (movedAside) { try { renameSync(aside, dest); } catch { /* reported below */ } }
     const restored = !movedAside || existsSync(dest);
-    return fail(`could not move the runtime into ${dest} (${(e as Error)?.message ?? e})${restored ? '' : `; the previous one is at ${aside}`}`);
+    return fail(`could not move the runtime into ${dest} (${(e as Error)?.message ?? e})`, restored ? undefined : aside);
   }
   if (movedAside) { try { rmSync(aside, { recursive: true, force: true }); } catch { /* harmless leftover */ } }
   // Older versions are never removed automatically (see above).
