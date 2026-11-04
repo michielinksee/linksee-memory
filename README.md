@@ -254,7 +254,7 @@ It is **fail-open by construction**: any parse / DB / logic error surfaces nothi
 
 Anchors with `affects` globs fire only on matching paths; an unscoped anchor fires on its own `detect_terms` / `violation_signal`. Nothing is ever **blocked** unless you explicitly hardened it (`resolve_drift(action:'harden')`) — everything else re-injects the decision as context.
 
-To wire it by hand instead, drop this block into `.claude/settings.json` (project root, or `~/.claude/settings.json` for every repo). The `npx -y` form below needs no install, but costs several seconds per call (7.4–8.6 s measured on Windows, close to the 8 s `PreToolUse` timeout — a timed-out guard simply does not fire). `setup` writes a direct `node` call instead; you can do the same with `"<path to node>" "<package>/dist/bin/guard-hook.js"`:
+To wire it by hand instead, drop this block into `.claude/settings.json` (project root, or `~/.claude/settings.json` for every repo). The `npx -y` form below needs no install, but costs several seconds per call (7.4–8.6 s measured on Windows, close to the 8 s `PreToolUse` timeout — a timed-out guard simply does not fire). `setup` writes a direct `node` call instead; you can do the same with `"<path to node>" "<package>/dist/bin/guard-hook.js"` (paths quoted; Claude Code runs hooks through cmd.exe on Windows and sh elsewhere, and a path containing `$`, a backtick, `%` or `"` cannot be quoted safely — setup keeps the npx form for those):
 
 ```json
 {
@@ -369,10 +369,10 @@ Add **"Use Linksee"** to any prompt to force a recall.
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: a pinned copy of the package, because the hooks call `node` on it directly and npx's cache is temporary |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. One version is kept; an older one is removed after the new one loads. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
-Running setup again changes nothing that is already in place. It also switches hooks written by older versions (`npx -y linksee-memory sync` / `guard`) to the direct `node` call — only those exact commands; anything you edited by hand is left alone.
+Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the guard prints that hint and lets the action through).
 
 ### Manual setup (if you prefer step-by-step)
 
@@ -414,7 +414,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-This `npx -y` form works anywhere, but every call starts npm and checks the registry: on the author's Windows machine one call took 7.4–8.6 s (3 runs, warm cache). `setup` writes a direct call instead — `"<path to node>" "<package>/dist/bin/sync-session.js"` — which took 0.20–0.27 s on the same machine. Your numbers will differ; measure with your own hook log. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
+This `npx -y` form works anywhere, but every call starts npm and checks the registry: on the author's Windows machine one call took 7.4–8.6 s (3 runs, warm cache). `setup` writes a direct call instead — `"<path to node>" "<package>/dist/bin/sync-session.js" --linksee-managed` — which took 0.20–0.27 s on the same machine. Your numbers will differ; measure with your own hook log. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
 
 </details>
 

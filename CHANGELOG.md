@@ -14,11 +14,16 @@ Fixes for what a new user runs into on the first day. No new features, no new to
 - **Hooks call `node` directly instead of `npx -y`.** Each `npx -y linksee-memory guard|sync` call
   took 7.4–8.6 s on a warm cache (npm start-up + registry check; measured on Windows), against an
   8 s `PreToolUse` timeout — so the guard could time out and silently not fire. setup now writes
-  `"<node>" "<package>/dist/bin/<bin>.js"` (0.20–0.27 s on the same machine). Run through `npx`,
-  setup first copies the package to `~/.linksee-memory/runtime/<version>/`, because npx's cache is
-  temporary; if that copy does not load, it keeps the npx form and says so. Re-running setup
-  switches hooks that earlier versions wrote — only the exact `npx -y linksee-memory sync|guard`
-  commands; other tools' hooks and hand edits are left alone.
+  `"<node>" "<package>/dist/bin/<bin>.js" --linksee-managed` (0.20–0.27 s on the same machine).
+  Run through `npx`, setup installs this version once with `npm install --prefix
+  ~/.linksee-memory/runtime/<version> --no-save --omit=dev` (npx's cache is temporary), shows its
+  size, keeps one version, and removes the old one only after the new one loads; on failure the
+  existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
+  wrote: the exact `npx -y linksee-memory sync|guard` strings and the `--linksee-managed` form.
+  Wrappers and hand edits are left alone and listed; `--no-guard` leaves the guard hooks untouched.
+  Paths with `$`, backticks, `%` or `"` keep the npx form. If the guard cannot load its SQLite
+  driver (e.g. after a Node major upgrade) it prints "re-run setup" to stderr and lets the action
+  through. Rewriting `settings.json` keeps its permission bits and follows a symlink.
 - **The server no longer consolidates memories on its own.** Start-up consolidation deleted the
   original rows (keeping a 3 × 200-character summary) without the user asking. It is now off
   unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). There is no `consolidate` tool
