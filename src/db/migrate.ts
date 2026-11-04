@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { normalizeEntityName } from '../lib/normalize.js';
+import { isNativeLoadError } from '../lib/native-hint.js';
 
 const DEFAULT_DB_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const DB_PATH = join(DEFAULT_DB_DIR, 'memory.db');
@@ -21,29 +22,44 @@ export function getDbPath(): string {
  * connection first (SQLITE_OPEN_READONLY: no checkpoint, no rollback, memory.db and -wal untouched).
  *   • schema 1–5                 → LegacySchemaError
  *   • a hot rollback journal     → HotJournalError (it cannot be read without rolling back)
- *   • not a DB / anything else   → return, and let the normal open (and its corruption path) decide
- * When the file is refused, the -wal/-shm that the read-only open itself created (a cleanly
- * closed WAL-mode file has neither) are removed again, so the folder is left as it was.
+ *   • not a DB                   → return; the normal open's corruption path moves it aside
+ *   • native addon failed        → rethrown as is
+ *   • anything else (busy, locked, unreadable) → PrecheckError: could not check, so no writing
+ * When the file is refused, the -wal/-shm that the read-only open itself created are removed
+ * again, so the folder is left as it was.
  */
 function precheckBeforeWrite(path: string): void {
-  if (!existsSync(path)) return;
+  if (!existsSync(path)) return; // new DB: nothing to protect, create it
   const had = { wal: existsSync(path + '-wal'), shm: existsSync(path + '-shm') };
+  // Remove only what the read-only open itself added: a -wal that was absent and is still empty,
+  // and a -shm that was absent (e.g. a leftover -wal with no -shm — the reader builds one).
+  const tidy = () => {
+    try {
+      if (!had.wal && existsSync(path + '-wal') && statSync(path + '-wal').size === 0) unlinkSync(path + '-wal');
+      if (!had.shm && existsSync(path + '-shm')) unlinkSync(path + '-shm');
+    } catch { /* leave them; memory.db itself is untouched either way */ }
+  };
   let v = 0;
   try {
     const ro = new Database(path, { readonly: true, fileMustExist: true });
     try { v = readSchemaVersion(ro); } finally { ro.close(); }
   } catch (e) {
-    if ((e as { code?: string })?.code === 'SQLITE_READONLY_ROLLBACK') throw new HotJournalError(path);
-    return;
+    const code = (e as { code?: string })?.code ?? '';
+    const msg = (e as Error)?.message ?? String(e);
+    // The file vanished between the check and the open: a new DB, as above.
+    if (!existsSync(path) && (code === 'SQLITE_CANTOPEN' || code === 'ENOENT' || /unable to open|does not exist/i.test(msg))) return;
+    // The native addon itself failed: let it surface as such (the hooks turn it into one line).
+    if (isNativeLoadError(e)) throw e;
+    // Not a database at all: the normal open's corruption path moves it aside (nothing lost).
+    if (code === 'SQLITE_NOTADB' || code === 'SQLITE_CORRUPT' || /not a database|malformed|disk image/i.test(msg)) return;
+    tidy();
+    if (code === 'SQLITE_READONLY_ROLLBACK') throw new HotJournalError(path);
+    // Anything else (SQLITE_BUSY, locked, permission, I/O): we could not check it, so we do not
+    // write to it either — fail closed (0.17.1, Codex third review of #15).
+    throw new PrecheckError(path, code || msg.split('\n')[0]);
   }
   if (v > 0 && v < MIN_SUPPORTED_SCHEMA) {
-    // only files the read-only open created: an empty -wal and its -shm
-    try {
-      if (!had.wal && existsSync(path + '-wal') && statSync(path + '-wal').size === 0) {
-        unlinkSync(path + '-wal');
-        if (!had.shm && existsSync(path + '-shm')) unlinkSync(path + '-shm');
-      }
-    } catch { /* leave them; memory.db itself is untouched either way */ }
+    tidy();
     throw new LegacySchemaError(v, path);
   }
 }
@@ -110,14 +126,32 @@ export class LegacySchemaError extends DbRefusedError {
   constructor(schemaVersion: number, dbPath: string) {
     super(
       `[linksee-memory] ${dbPath} is at schema ${schemaVersion}; this version migrates schema ${MIN_SUPPORTED_SCHEMA} and newer only. ` +
-      `Stopped before writing anything to the file.\n` +
-      `  1. Close every Claude Code / Cursor / other client using linksee-memory.\n` +
-      `  2. Back up the folder that holds memory.db (copy memory.db and any memory.db-wal / -shm / -journal) and keep the copy.\n` +
-      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.\n` +
+      `Stopped before writing anything to the file.
+\n` +
+      `  1. Close every Claude Code / Cursor / other client using linksee-memory.
+\n` +
+      `  2. Back up the folder that holds memory.db (copy memory.db and any memory.db-wal / -shm / -journal) and keep the copy.
+\n` +
+      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.
+\n` +
       `A migration command for this schema is planned for 0.17.2. To start fresh instead, point LINKSEE_MEMORY_DIR at an empty folder.`,
     );
     this.name = 'LegacySchemaError';
     this.schemaVersion = schemaVersion;
+  }
+}
+
+/** The read-only check could not run (busy, locked, unreadable): refused rather than guessed. */
+export class PrecheckError extends DbRefusedError {
+  readonly reason: string;
+  constructor(dbPath: string, reason: string) {
+    super(
+      `[linksee-memory] could not check ${dbPath} before opening it for writing (${reason}). ` +
+      `Stopped before writing anything. Another client may have it open or locked: close other ` +
+      `Claude Code / Cursor / linksee-memory processes and try again.`,
+    );
+    this.name = 'PrecheckError';
+    this.reason = reason;
   }
 }
 
@@ -126,7 +160,8 @@ export class HotJournalError extends DbRefusedError {
   constructor(dbPath: string) {
     super(
       `[linksee-memory] ${dbPath} has an unfinished write from an interrupted process (memory.db-journal), ` +
-      `so it cannot be checked without changing it. Stopped before writing anything.\n` +
+      `so it cannot be checked without changing it. Stopped before writing anything.
+\n` +
       `  Back up the folder that holds memory.db (all memory.db* files) before anything else opens it. ` +
       `A recovery command is planned for 0.17.2.`,
     );

@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -63,14 +63,16 @@ const version = (db) => db.prepare(`SELECT value FROM meta WHERE key='schema_ver
 const MAKE = join(HERE, 'fixtures', 'make-legacy-db.cjs');
 const filesOf = (dir) => readdirSync(dir).sort();
 const shaAll = (dir) => Object.fromEntries(filesOf(dir).filter((f) => !f.endsWith('-shm')).map((f) => [f, sha(join(dir, f))]));
-for (const state of ['rollback', 'walclean', 'wal', 'hot']) {
+for (const state of ['rollback', 'walclean', 'wal', 'wal-noshm', 'hot']) {
   const dir = mkdtempSync(join(tmpdir(), `linksee-legacy-v5-${state}-`));
   dirs.push(dir);
   const file = join(dir, 'memory.db');
-  spawnSync(process.execPath, [MAKE, file, join(HERE, 'fixtures', 'schema-v5.sql'), state], { encoding: 'utf8' });
+  spawnSync(process.execPath, [MAKE, file, join(HERE, 'fixtures', 'schema-v5.sql'), state === 'wal-noshm' ? 'wal' : state], { encoding: 'utf8' });
+  // a leftover -wal whose -shm is gone: the reader has to build an index, which must not stay behind
+  if (state === 'wal-noshm') rmSync(file + '-shm', { force: true });
   const listBefore = filesOf(dir).join(',');
   const shaBefore = JSON.stringify(shaAll(dir));
-  if (state === 'wal') check(`schema 5 [${state}]: fixture has an un-checkpointed -wal`, existsSync(file + '-wal') && statSync(file + '-wal').size > 0, listBefore);
+  if (state.startsWith('wal') && state !== 'walclean') check(`schema 5 [${state}]: fixture has an un-checkpointed -wal`, existsSync(file + '-wal') && statSync(file + '-wal').size > 0, listBefore);
   if (state === 'hot') check(`schema 5 [${state}]: fixture has a hot -journal`, existsSync(file + '-journal') && statSync(file + '-journal').size > 0, listBefore);
 
   process.env.LINKSEE_MEMORY_DIR = dir;
@@ -82,7 +84,8 @@ for (const state of ['rollback', 'walclean', 'wal', 'hot']) {
   check(`schema 5 [${state}]: message says back up, nothing written, no other version`,
     /Back up/.test(err?.message ?? '') && /Stopped before writing anything/.test(err?.message ?? '') && !/linksee-memory@\d/.test(err?.message ?? ''), err?.message);
   check(`schema 5 [${state}]: memory.db / -wal / -journal byte-identical after openDb`, JSON.stringify(shaAll(dir)) === shaBefore);
-  check(`schema 5 [${state}]: folder listing unchanged after openDb`, filesOf(dir).join(',') === listBefore, `${listBefore} → ${filesOf(dir).join(',')}`);
+  check(`schema 5 [${state}]: folder listing unchanged after openDb (incl. -shm: none added)`, filesOf(dir).join(',') === listBefore, `${listBefore} → ${filesOf(dir).join(',')}`);
+  check(`schema 5 [${state}]: -shm present only if it was before`, existsSync(file + '-shm') === listBefore.split(',').includes('memory.db-shm'));
 
   const r = spawnSync(process.execPath, [SERVER], {
     input: '', encoding: 'utf8', timeout: 20000,
@@ -98,6 +101,49 @@ for (const state of ['rollback', 'walclean', 'wal', 'hot']) {
     conn.close();
     check('schema 5: runMigrations on a caller-supplied connection refuses too', err2 instanceof mod.LegacySchemaError, String(err2));
   }
+}
+
+// 1b. the read-only check cannot run (another process holds an exclusive lock → SQLITE_BUSY):
+//     refuse instead of guessing — no writable connection, nothing created, nothing changed
+//     (Codex third review of #15: "could not check" must not mean "fine").
+{
+  const dir = mkdtempSync(join(tmpdir(), 'linksee-busy-'));
+  dirs.push(dir);
+  const file = join(dir, 'memory.db');
+  {
+    // a current-schema DB in rollback-journal mode, so an exclusive transaction blocks readers
+    process.env.LINKSEE_MEMORY_DIR = dir;
+    const m = await import(`../dist/db/migrate.js?busy-setup=${encodeURIComponent(dir)}`);
+    const db = m.openDb();
+    m.runMigrations(db);
+    db.pragma('journal_mode = DELETE');
+    db.close();
+  }
+  const holder = spawn(process.execPath, [join(HERE, 'fixtures', 'hold-lock.cjs'), file], { stdio: ['pipe', 'pipe', 'inherit'] });
+  await new Promise((res) => holder.stdout.on('data', (d) => { if (String(d).includes('locked')) res(); }));
+  const listBefore = filesOf(dir).join(',');
+  const shaBefore = sha(file);
+
+  process.env.LINKSEE_MEMORY_DIR = dir;
+  const mod = await import(`../dist/db/migrate.js?busy=${encodeURIComponent(dir)}`);
+  let err = null;
+  try { mod.openDb(); } catch (e) { err = e; }
+  check('busy: openDb refuses with PrecheckError', err instanceof mod.PrecheckError, String(err));
+  check('busy: message says another client may have it open', /Another client may have it open/.test(err?.message ?? '') && /Stopped before writing anything/.test(err?.message ?? ''), err?.message);
+  check('busy: no writable connection — no -wal / -shm / extra files, memory.db unchanged',
+    filesOf(dir).join(',') === listBefore && sha(file) === shaBefore, `${listBefore} → ${filesOf(dir).join(',')}`);
+
+  const r = await new Promise((res) => {
+    const p = spawn(process.execPath, [SERVER], { env: { ...process.env, LINKSEE_MEMORY_DIR: dir, LINKSEE_TELEMETRY: 'off' }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    p.stderr.on('data', (d) => { stderr += d; });
+    p.stdin.end();
+    p.on('exit', (status) => res({ status, stderr }));
+  });
+  check('busy: server exits 1 with the message, no stack trace', r.status === 1 && /Another client may have it open/.test(r.stderr) && !/\n\s+at /.test(r.stderr), `exit ${r.status} ${r.stderr.slice(0, 200)}`);
+  check('busy: still nothing changed after the server', filesOf(dir).join(',') === listBefore && sha(file) === shaBefore, filesOf(dir).join(','));
+  holder.stdin.end();
+  await new Promise((res) => holder.on('exit', res));
 }
 
 // 2. schema 7 (no drift_anchors) → migrates to current, rows kept
