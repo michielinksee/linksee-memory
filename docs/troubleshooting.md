@@ -32,6 +32,29 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 </details>
 
 <details>
+<summary><b>The server says my memory.db is at schema 1–5 (I installed 0.11 or earlier, before June 2026).</b></summary>
+
+**Close every Claude Code / Cursor / Codex / other client that uses linksee-memory, and keep them closed until the command finishes.** It cannot detect an idle client on a WAL-mode file (only Windows refuses the final rename then), and nothing here is a lock.
+
+0.17.x refuses these files before writing anything. Then:
+
+```bash
+npx -y linksee-memory@0.17.2 migrate --dry   # rehearse on a temporary copy
+npx -y linksee-memory@0.17.2 migrate         # migrate a copy, then swap it in
+```
+
+What it does: it checks there is free space for 3 × the database (a floor, not a bound: the WAL / journal can grow during the migration), copies `memory.db` (+ `-wal`, `-journal`) and migrates the copy, checking it (no table loses rows, `integrity_check` ok). Up to here it does not write to your files. Then it checks they did not change, and for a rollback-journal file opens a connection once to try a write lock (`BEGIN IMMEDIATE`, then `ROLLBACK`; nothing is written). After that it moves `memory.db` and its `-wal` / `-shm` / `-journal` into `memory.db.pre-migrate-<time>/` (the originals, byte for byte, with a `README.txt`) and puts the migrated copy in their place. If one of those moves fails, it tries to put back what it moved; if something could not be put back, it prints where each original file is now and the exact `move <from> → <to>` lines to reunite the set (also in `README.txt` in that folder) — follow those, not the steps below. If the process is killed or crashes, a `memory.db.migrating-<time>-<pid>/` folder can be left behind; it holds copies only and can be deleted. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead.
+
+**To go back** to the originals after a successful run:
+
+1. Close every client.
+2. Move the current `memory.db` **and** every `memory.db-wal` / `-shm` / `-journal` next to it into a new, separate folder, all together.
+3. Move all the files from `memory.db.pre-migrate-<time>/` back, as one set.
+
+Never combine a `memory.db` from one set with a `-wal` / `-shm` / `-journal` from the other: SQLite reads them as one database, and a mismatched pair can corrupt it.
+</details>
+
+<details>
 <summary><b>Upgrading from v0.0.5 or earlier — my recalls are mostly tagged "Card_Navi" or my project-dir name.</b></summary>
 
 v0.0.6+ fixed the entity detection bug that collapsed all memories into the session's starting cwd. To re-index existing history with correct project attribution, run:
@@ -40,7 +63,7 @@ v0.0.6+ fixed the entity detection bug that collapsed all memories into the sess
 npx -y linksee-memory import --all
 ```
 
-This needs a database at schema 6 or later: a schema 1–5 file is refused without being changed (a migration command is planned for 0.17.2), so back up `~/.linksee-memory/` and wait for it. The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
+This needs a database at schema 6 or later: migrate a schema 1–5 file first (see the next entry). The importer is idempotent (wipes existing session data before re-inserting). Typical runtime: a few minutes for hundreds of sessions. Expect a dramatic improvement in `recall` precision afterward.
 </details>
 
 <details>

@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.17.2 — unreleased (Old databases, runtime cleanup)
+
+No new MCP tools (still 7). Two CLI subcommands, both run by hand.
+
+### Added
+
+- **`npx -y linksee-memory@0.17.2 migrate [--dry] [--db <path>]`** — brings a schema 1–5 memory.db
+  (0.11 and earlier, up to May 2026; 0.17.1 refuses these) to the current schema without starting
+  the server. **Every client must be closed for the whole run:** nothing here is a lock, a WAL-mode
+  file is never probed for writers, and an idle client on it is detected only on Windows (the final
+  rename is refused). What it does:
+  - checks free space for 3 × (memory.db + sidecars); if it cannot check, it stops. 3 × is a floor,
+    not a bound: WAL / journal growth during the migration comes on top;
+  - copies `memory.db` (+ `-wal`, `-journal`) byte for byte into `memory.db.migrating-<time>-<pid>/`
+    and stops if the live files' size or mtime change meanwhile;
+  - lets SQLite recover the copy (hot journal rolled back / WAL read, in the copy), requires
+    `integrity_check` = ok, makes a single-file replica with `VACUUM INTO` and checks it (same
+    schema, same row count in every table);
+  - migrates the replica in one transaction and commits only if no table lost rows, the schema is
+    current and `quick_check` is ok. Any failure up to here: this command has not written to the
+    live files (`memory.db`, `-wal`, `-shm`, `-journal` byte-identical in the tests);
+  - swap: if the live size and mtime are unchanged and — for a rollback-journal file without a
+    `-journal` / `-wal` — one writable connection's `BEGIN IMMEDIATE` + `ROLLBACK` probe finds no
+    writer (it writes nothing), it renames `memory.db` and its sidecars into
+    `memory.db.pre-migrate-<time>/` (the original set, byte for byte, with a `README.txt` on how to
+    go back) and renames the replica into place. If a rename fails it tries to put back what was
+    already moved. If something could not be put back, it prints (and writes to `README.txt`) where
+    each original file is now and the exact `move <from> → <to>` lines that reunite the set;
+  - removes the work folder, and says so if it cannot. If the process itself is killed or crashes,
+    `memory.db.migrating-<time>-<pid>/` can be left behind; it holds copies only and can be deleted.
+  To go back after a successful run: move the current `memory.db` and all its sidecars aside
+  together, then move the whole backup set back — never mix a database and sidecars from different
+  sets. (After a failed swap, follow the printed moves instead.) `--dry` rehearses in a
+  temporary folder and swaps nothing. Schema 6 and newer: "not needed" (a schema 6+ file with a hot
+  journal is recovered the same way, since 0.17.1 refuses it). It never consolidates or merges
+  duplicate entities (0.11's v5 merge deleted rows; they are kept). The server's refusal messages
+  point at this command pinned to this exact version (if the version cannot be read, the fixed
+  `@0.17.2` is printed — never an unpinned command, which could start an older version's server).
+- **`npx -y linksee-memory runtime list | prune [--yes --scope-confirmed] [--settings <file>]…`** —
+  lists `~/.linksee-memory/runtime/<version>/` with sizes and what references each. References are
+  looked for in `~/.claude/settings.json`, `settings.local.json`, `~/.claude.json`,
+  `~/.codex/config.toml`, the current folder's `.claude/settings*.json` and every `--settings`:
+  JSON is parsed and every string checked (so `\/` escapes and backslashes count). The TOML file is
+  read by a deliberately small reader that accepts only blank lines, comments, `[table]` headers of
+  bare keys and `bare.key = ` a string, a one-line array of strings, a number or true/false; every
+  string it read is checked. Anything else (a quoted key, an inline table, a multi-line value, …)
+  makes the file "could not confirm". A JSON file that does not parse, a TOML file the reader does
+  not fully accept, an unreadable file or a missing `--settings` file → nothing is deleted and the
+  reason is printed. Other repos where `setup --project` was run cannot be found from here, so
+  `--yes` alone deletes nothing: `--scope-confirmed` states that those were checked or passed with
+  `--settings`. A deletion that fails exits 1 and is not reported as deleted. The version this
+  command runs from, `.tmp-*`, `*.old-*` and non-version names are never touched.
+
+### Fixed
+
+- Same-version runtime swap: when the old runtime could not be moved back, setup's note said both
+  "existing runtime left as it was" and "the previous one is at …". It now says only where the
+  previous runtime is and how to restore it.
+- The server's read-only check (0.17.1) cleans up a `-shm` it created only when the `-wal` did not
+  change while it looked, and renames the `-shm` before deleting it. This narrows the race with a
+  client opening the file at the same moment; it does not close it. On Windows an open `-shm`
+  cannot be renamed, so it stays; on macOS / Linux it can, and that race remains (0.17.3).
+
 ## v0.17.1 — unreleased (Fixes only)
 
 Fixes for what a new user runs into on the first day. No new features, no new tools (still 7).
