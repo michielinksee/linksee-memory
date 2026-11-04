@@ -15,8 +15,14 @@
 //                    "args": ["${CLAUDE_PROJECT_DIR}/dist/bin/guard-hook.js"], "timeout": 8 } ] } ] } }
 
 import { pathToFileURL } from 'node:url';
-import { openDb, runMigrations } from '../db/migrate.js';
-import { gateAction, buildBootDigest } from '../lib/guard.js';
+// The DB layer (better-sqlite3, a native module) is imported dynamically in main() so a load
+// failure — e.g. Node upgraded to a new major after setup pinned the runtime — can be caught and
+// reported in one line instead of crashing at module link time (0.17.1, Codex review of #15).
+type MigrateMod = typeof import('../db/migrate.js');
+type GuardMod = typeof import('../lib/guard.js');
+
+export const RELOAD_HINT =
+  '[linksee-memory] guard hook skipped: could not load its SQLite driver for this Node version. Re-run: npx -y linksee-memory setup';
 
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
@@ -39,6 +45,17 @@ async function main(): Promise<void> {
     process.exit(0); // unparseable stdin → fail-open
   }
   if (!ev || typeof ev !== 'object') process.exit(0);
+
+  let openDb: MigrateMod['openDb'], runMigrations: MigrateMod['runMigrations'];
+  let gateAction: GuardMod['gateAction'], buildBootDigest: GuardMod['buildBootDigest'];
+  try {
+    ({ openDb, runMigrations } = await import('../db/migrate.js'));
+    ({ gateAction, buildBootDigest } = await import('../lib/guard.js'));
+  } catch (e) {
+    // fail-open, but not silent: the user needs to know the guard is off and how to fix it
+    process.stderr.write(`${RELOAD_HINT} (${(e as Error)?.message?.split('\n')[0] ?? e})\n`);
+    process.exit(0);
+  }
 
   let db;
   try {

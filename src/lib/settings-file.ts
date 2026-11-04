@@ -12,7 +12,7 @@
 //   • write to a temp file in the same folder, then rename (no half-written settings.json)
 //   • write nothing when nothing changed (a second setup run is a no-op)
 
-import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync, mkdirSync, unlinkSync, statSync, chmodSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export type SettingsRead =
@@ -91,10 +91,19 @@ export function writeSettingsFile(path: string, settings: Record<string, unknown
     backedUp.set(path, backup);
   }
 
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  // If settings.json is a symlink (dotfiles repos), replace the file it points to, not the link.
+  let target = path;
+  try { if (lstatSync(path).isSymbolicLink()) target = realpathSync(path); } catch { /* new file */ }
+  // Keep the original permission bits (e.g. 600) — a fresh temp file gets the umask default.
+  // On Windows chmod only toggles read-only, so this is effectively a no-op there.
+  let mode: number | undefined;
+  try { mode = statSync(target).mode & 0o7777; } catch { /* new file */ }
+
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(tmp, next, 'utf8');
-    renameSync(tmp, path);
+    if (mode !== undefined) chmodSync(tmp, mode);
+    renameSync(tmp, target);
   } catch (e) {
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* ignore */ }
     throw e;
