@@ -207,7 +207,9 @@ for (const state of STATES) {
     check(`[${state} ${spec}] split → README.txt in the backup folder has the same moves`, /This migration FAILED/.test(readme) && /move .+ → /.test(readme), readme.slice(0, 300));
     const moves = followMoves(r.stdout);
     check(`[${state} ${spec}] following the printed moves (${moves.length}) restores memory.db + every sidecar byte for byte`, moves.length > 0 && liveSha(d) === shaBefore, `${filesOf(d).join(',')}`);
-    check(`[${state} ${spec}] after that, migrate works on the restored set`, cli(['migrate', '--db', f]).status === 0 && versionOf(f) === TARGET);
+    // (a later second: the failed run's folder, now holding only README.txt, keeps its name taken)
+    const again = migrateLegacy({ dbPath: f, now: new Date(Date.now() + 5000), log: () => {} });
+    check(`[${state} ${spec}] after that, migrate works on the restored set`, again.code === 0 && versionOf(f) === TARGET, JSON.stringify(again));
   }
 }
 
