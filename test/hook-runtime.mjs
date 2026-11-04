@@ -21,7 +21,7 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const { resolveHookRuntime, isEphemeralRoot, findNpmCli, pruneOldRuntimes, recordSettingsRef, REFS_FILE } = await import('../dist/lib/hook-runtime.js');
+const { resolveHookRuntime, isEphemeralRoot, findNpmCli } = await import('../dist/lib/hook-runtime.js');
 const { NATIVE_HINT } = await import('../dist/lib/native-hint.js');
 const { nodeHookCommands } = await import('../dist/lib/guard-wiring.js');
 const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
@@ -91,8 +91,8 @@ const memoryDir = join(base, 'mem with space');
   check('dry-run: nothing installed', !existsSync(join(base, 'mem-dry', 'runtime')) && /dry-run/.test(dry.note ?? ''));
 }
 
-// 4. upgrade: the new runtime is installed but resolveHookRuntime deletes NOTHING — pruning is
-//    setup's last step, after settings are written (Codex re-review of #15)
+// 4. upgrade: the new runtime is installed and NOTHING is deleted — 0.17.1 never removes old
+//    runtimes automatically (Codex fourth review of #15)
 {
   const rt = resolveHookRuntime({ packageRoot: npxRoot, nodePath: process.execPath, memoryDir, version: '0.17.2', verify: loads, install: fakeInstall('0.17.2') });
   check('upgrade: pinned to 0.17.2', rt.mode === 'pinned' && rt.root.includes('0.17.2') && rt.version === '0.17.2' && !!rt.runtimeBase);
@@ -101,58 +101,6 @@ const memoryDir = join(base, 'mem with space');
   // same-version reinstall swaps through dest.old-<pid> and leaves no leftovers
   const again = resolveHookRuntime({ packageRoot: npxRoot, nodePath: process.execPath, memoryDir, version: '0.17.2', verify: (r) => loads(r) && !r.includes(join('runtime', '0.17.2')), install: fakeInstall('0.17.2') });
   check('same-version reinstall: pinned, no .old-/.tmp- leftovers', again.mode === 'pinned' && readdirSync(join(memoryDir, 'runtime')).every((n) => !/\.old-|\.tmp-/.test(n)), readdirSync(join(memoryDir, 'runtime')).join(','));
-}
-
-// 4b. pruneOldRuntimes: removes only folders no settings file points at
-{
-  const rtBase = join(memoryDir, 'runtime');
-  const settingsA = join(base, 'settings-a.json');
-  const oldGuard = nodeHookCommands(process.execPath, join(rtBase, '0.17.1', 'node_modules', 'linksee-memory')).guard;
-  writeFileSync(settingsA, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: oldGuard }] }] } }, null, 2));
-  let pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('prune: old runtime referenced by a settings file is kept and reported', pr.removed.length === 0 && pr.kept.length === 1 && pr.kept[0].referencedBy === settingsA, JSON.stringify(pr));
-  check('prune: it is still on disk', existsSync(join(rtBase, '0.17.1')));
-
-  // a wrapper (hand-written, unquoted) pointing at the old runtime also keeps it
-  const wrapper = `node ${join(rtBase, '0.17.1', 'node_modules', 'linksee-memory', 'dist', 'bin', 'guard-hook.js')}`;
-  writeFileSync(settingsA, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: wrapper }] }] } }, null, 2));
-  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('prune: a hand-written wrapper path (backslashes, JSON-escaped) keeps it too', pr.kept.length === 1 && existsSync(join(rtBase, '0.17.1')), JSON.stringify(pr));
-
-  // a settings file recorded earlier (e.g. another repo's --project-guard) is checked even if not passed in
-  const other = join(base, 'other-repo-settings.json');
-  writeFileSync(other, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: oldGuard }] }] } }));
-  recordSettingsRef(rtBase, other);
-  writeFileSync(settingsA, '{}');
-  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('prune: a previously recorded settings file (other repo) keeps it', pr.kept.length === 1 && pr.kept[0].referencedBy === other, JSON.stringify(pr));
-
-  writeFileSync(other, '{}');
-  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('prune: with no reference left, the old runtime is removed', pr.removed.join(',') === '0.17.1' && !existsSync(join(rtBase, '0.17.1')), JSON.stringify(pr));
-  check('prune: the kept version and the refs file survive', existsSync(join(rtBase, '0.17.2')) && existsSync(join(rtBase, REFS_FILE)));
-}
-
-// 4c. "could not verify" is not "no reference" (Codex third review): pruning is held
-{
-  const rtBase = join(base, 'mem-hold', 'runtime');
-  const mk = () => { mkdirSync(join(rtBase, '0.17.0'), { recursive: true }); mkdirSync(join(rtBase, '0.17.2'), { recursive: true }); };
-  const settingsA = join(base, 'settings-hold.json');
-  writeFileSync(settingsA, '{}');
-
-  mk();
-  writeFileSync(join(rtBase, REFS_FILE), '{ this is not json');
-  let pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('hold: corrupt .settings-refs.json → nothing removed, reason given', pr.removed.length === 0 && existsSync(join(rtBase, '0.17.0')) && /could not verify references/.test(pr.held ?? ''), JSON.stringify(pr));
-  check('hold: recordSettingsRef refuses to overwrite a corrupt list', recordSettingsRef(rtBase, settingsA) === false && readFileSync(join(rtBase, REFS_FILE), 'utf8') === '{ this is not json');
-
-  writeFileSync(join(rtBase, REFS_FILE), JSON.stringify([join(base, 'deleted-repo', '.claude', 'settings.json')]));
-  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA]);
-  check('hold: a recorded settings file that cannot be read → nothing removed, reason names it', pr.removed.length === 0 && existsSync(join(rtBase, '0.17.0')) && /deleted-repo/.test(pr.held ?? ''), JSON.stringify(pr));
-
-  writeFileSync(join(rtBase, REFS_FILE), JSON.stringify([]));
-  pr = pruneOldRuntimes(rtBase, '0.17.2', [settingsA, join(base, 'no-such-project', 'settings.json')]);
-  check('hold: a given project path that does not exist is fine → removed', pr.removed.join(',') === '0.17.0' && !pr.held, JSON.stringify(pr));
 }
 
 // 5. failures keep what was there and the npx form

@@ -208,8 +208,9 @@ if (process.platform !== 'win32') {
   check('mode 600 kept after setup rewrote the file', (statSync(settingsPath(home)).mode & 0o777) === 0o600, (statSync(settingsPath(home)).mode & 0o777).toString(8));
 }
 
-// 9. Codex re-review of #15: an older pinned runtime is removed only as setup's LAST step, only if
-//    every settings write succeeded, and never while a settings file still points at it.
+// 9. Codex fourth review of #15: 0.17.1 never deletes an older pinned runtime — not when nothing
+//    references it, not when a settings write fails, not with --no-guard, not with a wrapper — and
+//    the closing message says where runtimes are and how big.
 //    setup runs here from a fake npx cache (…/_npx/…/node_modules/linksee-memory) with the current
 //    version's runtime already in place (so no npm install / network), plus an old runtime/0.17.0.
 {
@@ -250,16 +251,19 @@ if (process.platform !== 'win32') {
     },
   };
 
-  // A. control: nothing points at 0.17.0 after the switch → it is removed
+  // A. nothing points at 0.17.0 after the switch → still kept; the closing message says where and how big
   {
     const { home, old } = prepare(npx017);
     const r = run(home);
     const s = readSettings(home);
     check('runtime A: setup ran from the fake npx cache and used the pinned runtime', r.status === 0 && /pinned runtime/.test(r.stdout) && s.includes('/runtime/' + version + '/'), r.stdout.slice(0, 600) + r.stderr.slice(0, 300));
-    check('runtime A: old runtime removed once nothing points at it', !existsSync(old) && /Removed older runtime\(s\): 0\.17\.0/.test(r.stdout), r.stdout.slice(-600));
+    check('runtime A: old runtime kept even with no reference left', existsSync(old) && !/Removed/.test(r.stdout));
+    check('runtime A: closing message gives the size, the 0.17.2 prune command and the folder',
+      /Older versions are not removed automatically/.test(r.stdout) && /linksee-memory runtime prune/.test(r.stdout) && r.stdout.includes(join(home, '.linksee-memory', 'runtime')), r.stdout.slice(-700));
+    check('runtime A: no reference list is written', !existsSync(join(home, '.linksee-memory', 'runtime', '.settings-refs.json')));
   }
 
-  // B. a settings write fails → old runtime kept
+  // B. a settings write fails → old runtime kept, setup exits 0 having said so
   {
     const { home, old } = prepare(npx017);
     const sp = settingsPath(home);
@@ -269,7 +273,7 @@ if (process.platform !== 'win32') {
     if (process.platform === 'win32') chmodSync(sp, 0o644); else chmodSync(join(home, '.claude'), 0o755);
     const failed = /Could not write/.test(r.stdout);
     check('runtime B: the settings write failed and setup said so (exit 0)', r.status === 0 && failed, r.stdout.slice(0, 800) + r.stderr.slice(0, 300));
-    check('runtime B: old runtime kept because settings were not fully updated', existsSync(old) && /Older runtimes kept/.test(r.stdout), r.stdout.slice(-500));
+    check('runtime B: old runtime kept', existsSync(old));
     check('runtime B: settings.json still has the 0.17.0 hooks', readSettings(home).includes('npx -y linksee-memory guard'));
   }
 
@@ -287,7 +291,7 @@ if (process.platform !== 'win32') {
     const s = JSON.parse(readSettings(home));
     check('runtime C (--no-guard): Stop switched to the new runtime', s.hooks.Stop[0].hooks[0].command.includes('/runtime/' + version + '/'));
     check('runtime C (--no-guard): guard hook left on the old runtime', s.hooks.PreToolUse[0].hooks[0].command === guardOld);
-    check('runtime C (--no-guard): old runtime kept and reported', existsSync(old) && /Kept .*0\.17\.0.*still referenced/.test(r.stdout), r.stdout.slice(-600));
+    check('runtime C (--no-guard): old runtime kept', existsSync(old));
   }
 
   // D. a hand-made wrapper points into the old runtime → kept
@@ -300,22 +304,7 @@ if (process.platform !== 'win32') {
     const r = run(home);
     const s = JSON.parse(readSettings(home));
     check('runtime D: wrapper untouched', s.hooks.PostToolUse[0].hooks[0].command === wrapper);
-    check('runtime D: old runtime kept because the wrapper still uses it', existsSync(old) && /still referenced/.test(r.stdout), r.stdout.slice(-600));
-  }
-  // E. the reference list is corrupt → setup cannot verify references → old runtime kept, reason shown
-  {
-    const { home, rt, old } = prepare(npx017);
-    writeFileSync(join(rt, '.settings-refs.json'), '{ broken');
-    const r = run(home);
-    check('runtime E: corrupt reference list → old runtime kept with a reason', r.status === 0 && existsSync(old) && /Older runtimes kept: could not verify references/.test(r.stdout), r.stdout.slice(-600));
-  }
-
-  // F. a recorded settings file is gone → kept
-  {
-    const { home, rt, old } = prepare(npx017);
-    writeFileSync(join(rt, '.settings-refs.json'), JSON.stringify([join(home, 'gone-repo', '.claude', 'settings.json')]));
-    const r = run(home);
-    check('runtime F: recorded settings file unreadable → old runtime kept with a reason', r.status === 0 && existsSync(old) && /gone-repo/.test(r.stdout), r.stdout.slice(-600));
+    check('runtime D: old runtime kept', existsSync(old));
   }
 }
 

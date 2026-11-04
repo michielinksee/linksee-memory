@@ -33,6 +33,8 @@ function precheckBeforeWrite(path: string): void {
   const had = { wal: existsSync(path + '-wal'), shm: existsSync(path + '-shm') };
   // Remove only what the read-only open itself added: a -wal that was absent and is still empty,
   // and a -shm that was absent (e.g. a leftover -wal with no -shm — the reader builds one).
+  // Known limit (0.17.2): if another process opens the file in the same instant, the -shm deleted
+  // here may already be in use by it. The tests check a single process only, not concurrency.
   const tidy = () => {
     try {
       if (!had.wal && existsSync(path + '-wal') && statSync(path + '-wal').size === 0) unlinkSync(path + '-wal');

@@ -37,13 +37,13 @@
 
 import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import Database from 'better-sqlite3';
 import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, unmanagedLinkseeHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
-import { resolveHookRuntime, recordSettingsRef, pruneOldRuntimes } from '../lib/hook-runtime.js';
+import { resolveHookRuntime, formatBytes } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
 const args = process.argv.slice(2);
@@ -254,18 +254,11 @@ interface SettingsJson {
   [key: string]: unknown;
 }
 
-// Did every settings read/write this run succeed? Old runtimes are pruned only if so.
-let settingsOk = true;
-// Could every runtime reference be recorded? If not, pruning is skipped this run.
-let refsOk = true;
-/** writeSettingsFile that reports instead of throwing, and remembers which files use the runtime. */
+/** writeSettingsFile that reports instead of throwing (a failed write leaves the file as it was). */
 function safeWrite(path: string, settings: Record<string, unknown>): { backup?: string } | null {
   try {
-    const w = writeSettingsFile(path, settings);
-    if (runtime.mode === 'pinned' && runtime.runtimeBase && !recordSettingsRef(runtime.runtimeBase, path)) refsOk = false;
-    return w;
+    return writeSettingsFile(path, settings);
   } catch (e) {
-    settingsOk = false;
     console.log(`  ${FAIL} Could not write ${path} (${(e as Error)?.message ?? e}) — left as it was`);
     return null;
   }
@@ -275,7 +268,6 @@ function safeWrite(path: string, settings: Record<string, unknown>): { backup?: 
 // file is left untouched, one .bak before the first write, temp file + rename.
 const stopRead = readSettingsFile(SETTINGS_PATH);
 if (!stopRead.ok) {
-  settingsOk = false;
   console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH} (${stopRead.reason}) — left untouched`);
   console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
@@ -342,7 +334,6 @@ async function configureGuard(): Promise<boolean> {
   // BOM stripped; never clobber a file we can't parse — the user may have hand-authored it.
   const read = readSettingsFile(targetPath);
   if (!read.ok) {
-    settingsOk = false;
     console.log(`  ${FAIL} Could not parse ${targetPath} (${read.reason}) — left untouched`);
     console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
     return false;
@@ -397,24 +388,6 @@ async function configureGuard(): Promise<boolean> {
 
 const guardConfigured = await configureGuard();
 console.log('');
-
-// ── Last: remove older pinned runtimes (Codex re-review of #15) ─────────
-// Only now — after every settings write succeeded — and only folders that no settings file still
-// points at (user, project, and every file setup ever pointed at a runtime). With --no-guard the
-// old guard hooks may still use the old runtime; the reference check keeps it in that case too.
-if (runtime.mode === 'pinned' && runtime.runtimeBase && runtime.version && !dryRun) {
-  if (!settingsOk) {
-    console.log(`  ${SKIP} Older runtimes kept: settings were not fully updated this run.`);
-  } else if (!refsOk) {
-    console.log(`  ${SKIP} Older runtimes kept: could not verify references (the runtime reference list could not be saved).`);
-  } else {
-    const pr = pruneOldRuntimes(runtime.runtimeBase, runtime.version, [SETTINGS_PATH, PROJECT_SETTINGS_PATH]);
-    if (pr.held) console.log(`  ${SKIP} Older runtimes kept: ${pr.held}`);
-    if (pr.removed.length) console.log(`  ${DIM}Removed older runtime(s): ${pr.removed.join(', ')}${RESET}`);
-    if (!pr.held) for (const k of pr.kept) console.log(`  ${SKIP} Kept ${k.dir} — still referenced by ${k.referencedBy}`);
-    if (pr.removed.length || pr.kept.length) console.log('');
-  }
-}
 
 // ── Telemetry consent (opt-in, anonymous, off unless you agree) ──────────
 /** True when there is no memory yet (or it cannot be read) — used only to pick the first-try text. */
@@ -488,6 +461,13 @@ if (guardConfigured) {
   console.log(`  ${DIM}• Re-injection guard re-surfaces your accepted decisions before edits (${projectGuard ? 'this project' : 'every repo'})${RESET}`);
 }
 console.log('');
+// 0.17.1 never deletes pinned runtimes (Codex fourth review of #15: any automatic delete risked
+// removing one a hook still uses). Say what they cost and how to remove old ones by hand.
+if (runtime.mode === 'pinned' && runtime.runtimeBase && !dryRun) {
+  console.log(`  ${DIM}• Hooks run from ${runtime.runtimeBase}${sep}<version> (${runtime.bytes !== undefined ? formatBytes(runtime.bytes) : 'about 35 MB'} each). Older versions are not removed automatically;${RESET}`);
+  console.log(`  ${DIM}  0.17.2 adds \`linksee-memory runtime prune\`. Until then you can delete old ones by hand: ${runtime.runtimeBase}${RESET}`);
+  console.log('');
+}
 handWiredNotice(SETTINGS_PATH);
 if (projectGuard) handWiredNotice(PROJECT_SETTINGS_PATH);
 if (handWired.size) {

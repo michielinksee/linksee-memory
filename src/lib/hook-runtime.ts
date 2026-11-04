@@ -13,13 +13,12 @@
 // Codex review of #15: copying npx's node_modules tree was replaced by this install — a real
 // install has no links back into the cache, its size is known, and old versions are removed.
 //   • the new runtime must load better-sqlite3 before anything else happens;
-//   • older runtime/<version> folders are deleted by setup's last step, only after every settings
-//     write succeeded and no settings file still points at them (pruneOldRuntimes);
+//   • older runtime/<version> folders are NOT deleted (0.17.1); setup says where they are;
 //   • on any failure the existing runtime is left as it was and the hooks keep the npx form.
 // The node path written is process.execPath at setup time. If Node is later upgraded to another
 // major, the guard hook catches the driver load failure, says "re-run setup" on stderr and exits 0.
 
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, mkdirSync, realpathSync, statSync, lstatSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, mkdirSync, realpathSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -31,7 +30,7 @@ export type HookRuntime = {
   mode: 'direct' | 'pinned' | 'npx';
   root?: string;
   note?: string;
-  /** runtime/ folder and the version kept there, when pinned (for setup's final prune). */
+  /** runtime/ folder and the version kept there, when pinned (setup reports where runtimes live). */
   runtimeBase?: string;
   version?: string;
   /** Size of the pinned runtime in bytes, when one is in use. */
@@ -116,103 +115,9 @@ export function formatBytes(n: number): string {
   return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
-/** File under runtime/ listing every settings file setup pointed at a pinned runtime. */
-export const REFS_FILE = '.settings-refs.json';
-
-/**
- * Remember that `settingsPath` now has hooks pointing into `base` (so pruning checks it later).
- * Returns false if the list could not be read or saved — setup then skips pruning for this run.
- */
-export function recordSettingsRef(base: string, settingsPath: string): boolean {
-  const refs = readRefs(base);
-  if (!refs.ok) return false;
-  if (refs.list.includes(settingsPath)) return true;
-  try {
-    mkdirSync(base, { recursive: true });
-    writeFileSync(join(base, REFS_FILE), JSON.stringify([...refs.list, settingsPath], null, 2));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** The recorded settings files. A missing list is empty; an unreadable or malformed one is NOT. */
-function readRefs(base: string): { ok: true; list: string[] } | { ok: false; reason: string } {
-  const f = join(base, REFS_FILE);
-  if (!existsSync(f)) return { ok: true, list: [] };
-  try {
-    const list = JSON.parse(readFileSync(f, 'utf8'));
-    if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) return { ok: false, reason: `${f} is not a list of paths` };
-    return { ok: true, list };
-  } catch (e) {
-    return { ok: false, reason: `could not read ${f} (${(e as Error)?.message ?? e})` };
-  }
-}
-
-const normRef = (t: string) => {
-  const fwd = t.replace(/\\\\/g, '/').replace(/\\/g, '/');
-  return process.platform === 'win32' ? fwd.toLowerCase() : fwd;
-};
-
-export type PruneResult = {
-  removed: string[];
-  kept: Array<{ dir: string; referencedBy: string }>;
-  /** Set when references could not be verified: nothing was removed this run. */
-  held?: string;
-};
-
-/**
- * Remove runtime/<x> folders other than `keep` — called by setup only as its LAST step, after
- * every settings write succeeded (Codex re-review of #15). A folder is kept, and reported, if any
- * settings file still mentions its path: the given ones (user + project), plus every settings file
- * setup has ever pointed at a runtime (REFS_FILE) — e.g. another repo set up with --project-guard,
- * a hook left on the old runtime by --no-guard, or a hand-made wrapper.
- *
- * "Could not check" is not "not referenced" (Codex third review): if the refs list is unreadable or
- * malformed, or any settings file cannot be read — including a RECORDED one that has disappeared —
- * nothing is removed and `held` says why. Only the given user/project paths may simply not exist.
- */
-export function pruneOldRuntimes(base: string, keep: string, settingsPaths: string[]): PruneResult {
-  const out: PruneResult = { removed: [], kept: [] };
-  let names: string[] = [];
-  try { names = readdirSync(base); } catch { return out; }
-  const candidates = names.filter((n) => {
-    if (n === keep || n === REFS_FILE) return false;
-    try { return statSync(join(base, n)).isDirectory(); } catch { return false; }
-  });
-  if (!candidates.length) return out;
-  const hold = (reason: string): PruneResult => ({
-    removed: [],
-    kept: candidates.map((n) => ({ dir: join(base, n), referencedBy: '(not checked)' })),
-    held: reason,
-  });
-
-  const refs = readRefs(base);
-  if (!refs.ok) return hold(`could not verify references: ${refs.reason}`);
-  const texts: Array<{ f: string; t: string }> = [];
-  for (const f of settingsPaths) {
-    if (!existsSync(f)) continue; // a given user/project path that does not exist holds no reference
-    try { texts.push({ f, t: normRef(readFileSync(f, 'utf8')) }); } catch (e) {
-      return hold(`could not verify references: could not read ${f} (${(e as Error)?.message ?? e})`);
-    }
-  }
-  for (const f of refs.list) {
-    if (settingsPaths.includes(f)) continue;
-    try { texts.push({ f, t: normRef(readFileSync(f, 'utf8')) }); } catch (e) {
-      return hold(`could not verify references: recorded settings file ${f} could not be read (${(e as Error)?.message ?? e}); remove it from ${join(base, REFS_FILE)} if it is gone for good`);
-    }
-  }
-
-  const nbase = normRef(base).replace(/\/$/, '');
-  for (const n of candidates) {
-    const dir = join(base, n);
-    const needle = `${nbase}/${normRef(n)}`;
-    const hit = texts.find(({ t }) => t.includes(needle + '/') || t.includes(needle + '"'));
-    if (hit) { out.kept.push({ dir, referencedBy: hit.f }); continue; }
-    try { rmSync(dir, { recursive: true, force: true }); out.removed.push(n); } catch { /* leave it */ }
-  }
-  return out;
-}
+// Older runtime/<version> folders are never deleted automatically in 0.17.1 (Codex fourth review
+// of #15): every automatic rule tried still had a path that could delete a runtime some hook used.
+// setup prints where they are and their size; `linksee-memory runtime prune` is planned for 0.17.2.
 
 export type ResolveOpts = {
   packageRoot: string;
@@ -291,8 +196,7 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
     return fail(`could not move the runtime into ${dest} (${(e as Error)?.message ?? e})${restored ? '' : `; the previous one is at ${aside}`}`);
   }
   if (movedAside) { try { rmSync(aside, { recursive: true, force: true }); } catch { /* harmless leftover */ } }
-  // Older versions are NOT removed here: setup calls pruneOldRuntimes() at the very end, after
-  // every settings write succeeded and nothing still points at them.
+  // Older versions are never removed automatically (see above).
   return pinned(`installed ${spec} into ${dest}`);
 }
 

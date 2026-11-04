@@ -17,10 +17,9 @@ Fixes for what a new user runs into on the first day. No new features, no new to
   `"<node>" "<package>/dist/bin/<bin>.js" --linksee-managed` (0.20–0.27 s on the same machine).
   Run through `npx`, setup installs this version once with `npm install --prefix
   ~/.linksee-memory/runtime/<version> --no-save --omit=dev` (npx's cache is temporary), shows its
-  size, and keeps one version: an older runtime is removed only as setup's last step, after every
-  settings write succeeded, and never while any settings file (user, project, or one setup wrote
-  before) still points at it; if those references cannot be verified (unreadable list or settings
-  file), nothing is removed and setup says why. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
+  size. Older runtime versions are never removed automatically (each is about 35 MB): setup prints
+  where they are, they can be deleted by hand, and `linksee-memory runtime prune` is planned for
+  0.17.2. A same-version reinstall swaps through `<dest>.old-<pid>` so it can
   be undone. On failure the existing runtime stays and the hooks keep the npx form. Re-running setup rewrites only hooks it
   wrote: the exact `npx -y linksee-memory sync|guard` strings and the `--linksee-managed` form.
   Wrappers and hand edits are left alone and listed; `--no-guard` leaves the guard hooks untouched.
