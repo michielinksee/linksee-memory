@@ -17,7 +17,8 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isTelemetryEnabled, buildPayload, sendTelemetry } from '../lib/telemetry.js';
 import { NATIVE_HINT, isNativeLoadError } from '../lib/native-hint.js';
-import Database from 'better-sqlite3';
+// better-sqlite3 is imported dynamically below, so a broken native addon goes through the same
+// one-line hint as everything else instead of failing at module load (Codex third review of #15).
 
 const LOG_DIR = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
 const LOG_FILE = join(LOG_DIR, 'hook.log');
@@ -123,6 +124,7 @@ async function main(): Promise<void> {
       const dbDir = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
       const dbPath = join(dbDir, 'memory.db');
       if (existsSync(dbPath)) {
+        const { default: Database } = await import('better-sqlite3');
         const db = new Database(dbPath, { readonly: true });
         try {
           const payload = buildPayload(db, sessionId, { mcpServersInUse: mcpServers });
@@ -137,6 +139,7 @@ async function main(): Promise<void> {
       }
     } catch (e: any) {
       log(`telemetry: error (non-fatal): ${e?.message ?? e}`);
+      if (isNativeLoadError(e)) process.stderr.write(`${NATIVE_HINT}\n`);
     }
   }
 
