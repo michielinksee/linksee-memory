@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, renameSync, existsSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -13,10 +13,46 @@ export function getDbPath(): string {
   return DB_PATH;
 }
 
+/**
+ * Decide, WITHOUT a writable connection, whether this file may be opened for writing at all.
+ * (0.17.1, Codex re-review of #15.) A writable connection that is the last one to close
+ * checkpoints a leftover WAL into memory.db and deletes it, and rolls back a hot journal — both
+ * are writes to a file we are about to refuse. So the schema is read through a read-only
+ * connection first (SQLITE_OPEN_READONLY: no checkpoint, no rollback, memory.db and -wal untouched).
+ *   • schema 1–5                 → LegacySchemaError
+ *   • a hot rollback journal     → HotJournalError (it cannot be read without rolling back)
+ *   • not a DB / anything else   → return, and let the normal open (and its corruption path) decide
+ * When the file is refused, the -wal/-shm that the read-only open itself created (a cleanly
+ * closed WAL-mode file has neither) are removed again, so the folder is left as it was.
+ */
+function precheckBeforeWrite(path: string): void {
+  if (!existsSync(path)) return;
+  const had = { wal: existsSync(path + '-wal'), shm: existsSync(path + '-shm') };
+  let v = 0;
+  try {
+    const ro = new Database(path, { readonly: true, fileMustExist: true });
+    try { v = readSchemaVersion(ro); } finally { ro.close(); }
+  } catch (e) {
+    if ((e as { code?: string })?.code === 'SQLITE_READONLY_ROLLBACK') throw new HotJournalError(path);
+    return;
+  }
+  if (v > 0 && v < MIN_SUPPORTED_SCHEMA) {
+    // only files the read-only open created: an empty -wal and its -shm
+    try {
+      if (!had.wal && existsSync(path + '-wal') && statSync(path + '-wal').size === 0) {
+        unlinkSync(path + '-wal');
+        if (!had.shm && existsSync(path + '-shm')) unlinkSync(path + '-shm');
+      }
+    } catch { /* leave them; memory.db itself is untouched either way */ }
+    throw new LegacySchemaError(v, path);
+  }
+}
+
 function openAt(path: string): Database.Database {
+  precheckBeforeWrite(path);
   const db = new Database(path);
   try {
-    // Refuse an unsupported old schema before the journal-mode pragma (which can write the header).
+    // Second line (the read-only precheck is the real gate): refuse before the journal-mode pragma.
     // This is also the first real read of the file — it throws if the file isn't a DB.
     const v = readSchemaVersion(db);
     if (v > 0 && v < MIN_SUPPORTED_SCHEMA) throw new LegacySchemaError(v, path);
@@ -56,33 +92,45 @@ export function openDb(): Database.Database {
 /** Oldest schema this version migrates in place. Older files are refused before any write. */
 export const MIN_SUPPORTED_SCHEMA = 6;
 
+/** Base class: openDb() refused this file without writing to it. The message says what to do. */
+export class DbRefusedError extends Error {}
+
 /**
  * Thrown for a schema older than MIN_SUPPORTED_SCHEMA (a DB last opened by a 2026-05-or-earlier
- * version). Raised by openDb() BEFORE the journal-mode pragma, so the file is not written to at all,
- * and again by runMigrations() as a second line. The message is what the user should do.
+ * version). Raised by openDb() from a read-only connection, before any writable connection exists,
+ * and again by runMigrations() as a second line.
  *
  * No old version is recommended as a stepping stone: 0.8.0–0.17.0 stop on `no such table:
  * drift_anchors` after partly altering the file, and 0.7.2 has no subcommands — `npx
  * linksee-memory@0.7.2 <anything>` starts its MCP server, whose start-up consolidate can delete
  * original rows (Codex review of PR #15). A migration command for these files is 0.17.2 work.
  */
-export class LegacySchemaError extends Error {
+export class LegacySchemaError extends DbRefusedError {
   readonly schemaVersion: number;
   constructor(schemaVersion: number, dbPath: string) {
     super(
       `[linksee-memory] ${dbPath} is at schema ${schemaVersion}; this version migrates schema ${MIN_SUPPORTED_SCHEMA} and newer only. ` +
-      `Stopped before writing anything to the file.
-` +
-      `  1. Close every Claude Code / Cursor / other client using linksee-memory.
-` +
-      `  2. Back up the folder that holds memory.db (copy memory.db, and memory.db-wal / memory.db-shm if present) and keep the copy.
-` +
-      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.
-` +
+      `Stopped before writing anything to the file.\n` +
+      `  1. Close every Claude Code / Cursor / other client using linksee-memory.\n` +
+      `  2. Back up the folder that holds memory.db (copy memory.db and any memory.db-wal / -shm / -journal) and keep the copy.\n` +
+      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.\n` +
       `A migration command for this schema is planned for 0.17.2. To start fresh instead, point LINKSEE_MEMORY_DIR at an empty folder.`,
     );
     this.name = 'LegacySchemaError';
     this.schemaVersion = schemaVersion;
+  }
+}
+
+/** A rollback journal left by an interrupted write: it cannot be read without being rolled back. */
+export class HotJournalError extends DbRefusedError {
+  constructor(dbPath: string) {
+    super(
+      `[linksee-memory] ${dbPath} has an unfinished write from an interrupted process (memory.db-journal), ` +
+      `so it cannot be checked without changing it. Stopped before writing anything.\n` +
+      `  Back up the folder that holds memory.db (all memory.db* files) before anything else opens it. ` +
+      `A recovery command is planned for 0.17.2.`,
+    );
+    this.name = 'HotJournalError';
   }
 }
 

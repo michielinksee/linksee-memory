@@ -11,7 +11,7 @@
 //
 // Run: node test/legacy-schema.mjs   (needs `pnpm build`; throwaway DBs)
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -56,48 +56,48 @@ const snapshot = (db) => JSON.stringify({
 });
 const version = (db) => db.prepare(`SELECT value FROM meta WHERE key='schema_version'`).get()?.value;
 
-// 1. schema 5 → refused before ANY write: memory.db byte-identical, no -wal/-shm created
-{
-  const dir = mkdtempSync(join(tmpdir(), 'linksee-legacy-v5-'));
+// 1. schema 5 → refused before ANY write, in four on-disk states (Codex re-review of #15):
+//    the check runs on a read-only connection, so a leftover WAL is not checkpointed and a hot
+//    journal is not rolled back. memory.db / -wal / -journal must be byte-identical and the folder
+//    listing unchanged (-shm, the shared-memory index, may be rewritten by any reader).
+const MAKE = join(HERE, 'fixtures', 'make-legacy-db.cjs');
+const filesOf = (dir) => readdirSync(dir).sort();
+const shaAll = (dir) => Object.fromEntries(filesOf(dir).filter((f) => !f.endsWith('-shm')).map((f) => [f, sha(join(dir, f))]));
+for (const state of ['rollback', 'walclean', 'wal', 'hot']) {
+  const dir = mkdtempSync(join(tmpdir(), `linksee-legacy-v5-${state}-`));
   dirs.push(dir);
   const file = join(dir, 'memory.db');
-  // build the fixture with plain better-sqlite3 in the default rollback-journal mode, as an old
-  // install may have left it — so any write (including a journal-mode switch) changes the bytes
-  const raw = new Database(file);
-  raw.exec(fixture(5));
-  raw.prepare(`INSERT INTO entities (name, kind) VALUES ('proj', 'project')`).run();
-  raw.prepare(`INSERT INTO memories (entity_id, layer, content, importance) VALUES (1, 'learning', '{"what":"keep me","why":"the reason"}', 0.8)`).run();
-  raw.close();
-  const before = sha(file);
-  const filesBefore = readdirSync(dir).sort().join(',');
+  spawnSync(process.execPath, [MAKE, file, join(HERE, 'fixtures', 'schema-v5.sql'), state], { encoding: 'utf8' });
+  const listBefore = filesOf(dir).join(',');
+  const shaBefore = JSON.stringify(shaAll(dir));
+  if (state === 'wal') check(`schema 5 [${state}]: fixture has an un-checkpointed -wal`, existsSync(file + '-wal') && statSync(file + '-wal').size > 0, listBefore);
+  if (state === 'hot') check(`schema 5 [${state}]: fixture has a hot -journal`, existsSync(file + '-journal') && statSync(file + '-journal').size > 0, listBefore);
 
   process.env.LINKSEE_MEMORY_DIR = dir;
   const mod = await import(`../dist/db/migrate.js?dir=${encodeURIComponent(dir)}`);
   let err = null;
   try { mod.openDb(); } catch (e) { err = e; }
-  check('schema 5: openDb throws LegacySchemaError', err instanceof mod.LegacySchemaError, String(err));
-  check('schema 5: error carries the version', err?.schemaVersion === 5);
-  check('schema 5: message says back up and that nothing was written', /Back up/.test(err?.message ?? '') && /before writing anything/.test(err?.message ?? ''));
-  check('schema 5: message recommends no other version', !/linksee-memory@\d/.test(err?.message ?? ''), err?.message);
-  check('schema 5: memory.db byte-identical after openDb', sha(file) === before);
-  check('schema 5: no -wal / -shm / journal files created', readdirSync(dir).sort().join(',') === filesBefore, readdirSync(dir).join(','));
+  const expected = state === 'hot' ? mod.HotJournalError : mod.LegacySchemaError;
+  check(`schema 5 [${state}]: openDb refuses (${expected.name})`, err instanceof expected, String(err));
+  check(`schema 5 [${state}]: message says back up, nothing written, no other version`,
+    /Back up/.test(err?.message ?? '') && /Stopped before writing anything/.test(err?.message ?? '') && !/linksee-memory@\d/.test(err?.message ?? ''), err?.message);
+  check(`schema 5 [${state}]: memory.db / -wal / -journal byte-identical after openDb`, JSON.stringify(shaAll(dir)) === shaBefore);
+  check(`schema 5 [${state}]: folder listing unchanged after openDb`, filesOf(dir).join(',') === listBefore, `${listBefore} → ${filesOf(dir).join(',')}`);
 
-  // runMigrations on a caller-supplied connection also refuses (second line)
-  const conn = new Database(file, { readonly: true });
-  let err2 = null;
-  try { mod.runMigrations(conn); } catch (e) { err2 = e; }
-  conn.close();
-  check('schema 5: runMigrations refuses too', err2 instanceof mod.LegacySchemaError, String(err2));
-
-  // the MCP server prints the message and exits non-zero instead of a stack trace, file untouched
   const r = spawnSync(process.execPath, [SERVER], {
     input: '', encoding: 'utf8', timeout: 20000,
     env: { ...process.env, LINKSEE_MEMORY_DIR: dir, LINKSEE_TELEMETRY: 'off' },
   });
-  check('schema 5: server exits 1', r.status === 1, `exit ${r.status}`);
-  check('schema 5: server stderr has the message, no stack trace', /Back up/.test(r.stderr) && !/\n\s+at /.test(r.stderr), r.stderr.slice(0, 300));
-  check('schema 5: memory.db byte-identical after the server refused', sha(file) === before);
-  check('schema 5: still no extra files after the server', readdirSync(dir).sort().join(',') === filesBefore, readdirSync(dir).join(','));
+  check(`schema 5 [${state}]: server exits 1 with the message, no stack trace`, r.status === 1 && /Back up/.test(r.stderr) && !/\n\s+at /.test(r.stderr), `exit ${r.status} ${r.stderr.slice(0, 200)}`);
+  check(`schema 5 [${state}]: byte-identical and same listing after the server`, JSON.stringify(shaAll(dir)) === shaBefore && filesOf(dir).join(',') === listBefore, filesOf(dir).join(','));
+
+  if (state === 'rollback') {
+    const conn = new Database(file, { readonly: true });
+    let err2 = null;
+    try { mod.runMigrations(conn); } catch (e) { err2 = e; }
+    conn.close();
+    check('schema 5: runMigrations on a caller-supplied connection refuses too', err2 instanceof mod.LegacySchemaError, String(err2));
+  }
 }
 
 // 2. schema 7 (no drift_anchors) → migrates to current, rows kept

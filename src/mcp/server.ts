@@ -15,7 +15,7 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { openDb, runMigrations, LegacySchemaError } from '../db/migrate.js';
+import { openDb, runMigrations, DbRefusedError } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
@@ -91,7 +91,7 @@ try {
 } catch (e) {
   // A pre-June-2026 DB (schema < 6) is refused before any write; print what to do
   // instead of a stack trace. MCP clients show the server's stderr in their logs.
-  if (e instanceof LegacySchemaError) {
+  if (e instanceof DbRefusedError) {
     process.stderr.write(`${e.message}\n`);
     process.exit(1);
   }
