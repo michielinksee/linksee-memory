@@ -13,12 +13,13 @@
 // Codex review of #15: copying npx's node_modules tree was replaced by this install — a real
 // install has no links back into the cache, its size is known, and old versions are removed.
 //   • the new runtime must load better-sqlite3 before anything else happens;
-//   • only then are older runtime/<version> folders deleted (one runtime is kept);
+//   • older runtime/<version> folders are deleted by setup's last step, only after every settings
+//     write succeeded and no settings file still points at them (pruneOldRuntimes);
 //   • on any failure the existing runtime is left as it was and the hooks keep the npx form.
 // The node path written is process.execPath at setup time. If Node is later upgraded to another
 // major, the guard hook catches the driver load failure, says "re-run setup" on stderr and exits 0.
 
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, mkdirSync, realpathSync, statSync, lstatSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, mkdirSync, realpathSync, statSync, lstatSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -30,6 +31,9 @@ export type HookRuntime = {
   mode: 'direct' | 'pinned' | 'npx';
   root?: string;
   note?: string;
+  /** runtime/ folder and the version kept there, when pinned (for setup's final prune). */
+  runtimeBase?: string;
+  version?: string;
   /** Size of the pinned runtime in bytes, when one is in use. */
   bytes?: number;
 };
@@ -112,20 +116,64 @@ export function formatBytes(n: number): string {
   return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(0)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
-/** Remove every runtime/<x> except `keep` (called only after `keep` has been verified). */
-function pruneRuntimes(base: string, keep: string): string[] {
-  const removed: string[] = [];
+/** File under runtime/ listing every settings file setup pointed at a pinned runtime. */
+export const REFS_FILE = '.settings-refs.json';
+
+/** Remember that `settingsPath` now has hooks pointing into `base` (so pruning checks it later). */
+export function recordSettingsRef(base: string, settingsPath: string): void {
+  try {
+    const f = join(base, REFS_FILE);
+    let list: string[] = [];
+    try { list = JSON.parse(readFileSync(f, 'utf8')); } catch { /* first one */ }
+    if (!Array.isArray(list)) list = [];
+    if (!list.includes(settingsPath)) {
+      list.push(settingsPath);
+      mkdirSync(base, { recursive: true });
+      writeFileSync(f, JSON.stringify(list, null, 2));
+    }
+  } catch { /* best effort: pruning then only checks the paths it is given */ }
+}
+
+function readRefs(base: string): string[] {
+  try {
+    const list = JSON.parse(readFileSync(join(base, REFS_FILE), 'utf8'));
+    return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : [];
+  } catch { return []; }
+}
+
+const normRef = (t: string) => {
+  const fwd = t.replace(/\\\\/g, '/').replace(/\\/g, '/');
+  return process.platform === 'win32' ? fwd.toLowerCase() : fwd;
+};
+
+export type PruneResult = { removed: string[]; kept: Array<{ dir: string; referencedBy: string }> };
+
+/**
+ * Remove runtime/<x> folders other than `keep` — called by setup only as its LAST step, after
+ * every settings write succeeded (Codex re-review of #15). A folder is kept, and reported, if any
+ * settings file still mentions its path: the given ones (user + project), plus every settings file
+ * setup has ever pointed at a runtime (REFS_FILE) — e.g. another repo set up with --project-guard,
+ * a hook left on the old runtime by --no-guard, or a hand-made wrapper.
+ */
+export function pruneOldRuntimes(base: string, keep: string, settingsPaths: string[]): PruneResult {
+  const out: PruneResult = { removed: [], kept: [] };
   let names: string[] = [];
-  try { names = readdirSync(base); } catch { return removed; }
+  try { names = readdirSync(base); } catch { return out; }
+  const files = [...new Set([...settingsPaths, ...readRefs(base)])];
+  const texts = files.map((f) => {
+    try { return { f, t: normRef(readFileSync(f, 'utf8')) }; } catch { return { f, t: '' }; }
+  });
+  const nbase = normRef(base).replace(/\/$/, '');
   for (const n of names) {
-    if (n === keep) continue;
-    try {
-      if (!statSync(join(base, n)).isDirectory()) continue;
-      rmSync(join(base, n), { recursive: true, force: true });
-      removed.push(n);
-    } catch { /* leave it */ }
+    if (n === keep || n === REFS_FILE) continue;
+    const dir = join(base, n);
+    try { if (!statSync(dir).isDirectory()) continue; } catch { continue; }
+    const needle = `${nbase}/${normRef(n)}`;
+    const hit = texts.find(({ t }) => t.includes(needle + '/') || t.includes(needle + '"'));
+    if (hit) { out.kept.push({ dir, referencedBy: hit.f }); continue; }
+    try { rmSync(dir, { recursive: true, force: true }); out.removed.push(n); } catch { /* leave it */ }
   }
-  return removed;
+  return out;
 }
 
 export type ResolveOpts = {
@@ -161,7 +209,7 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
 
   const pinned = (note: string): HookRuntime => {
     const bytes = dirBytes(dest);
-    return { commands: nodeHookCommands(o.nodePath, destRoot), mode: 'pinned', root: destRoot, bytes, note: `${note}; ${formatBytes(bytes)}` };
+    return { commands: nodeHookCommands(o.nodePath, destRoot), mode: 'pinned', root: destRoot, runtimeBase: base, version: o.version, bytes, note: `${note}; ${formatBytes(bytes)}` };
   };
   const versionAt = (root: string) => {
     try { return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version; } catch { return null; }
@@ -169,7 +217,6 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
 
   // Already installed and loadable → reuse, no network.
   if (versionAt(destRoot) === o.version && verify(destRoot, o.nodePath)) {
-    if (!o.dryRun) pruneRuntimes(base, o.version);
     return pinned(`using the pinned runtime at ${dest}`);
   }
   if (o.dryRun) {
@@ -193,13 +240,21 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
   if (!res.ok) return fail(`npm install ${spec} failed (${res.detail ?? 'unknown error'})`);
   if (versionAt(stagingRoot) !== o.version) return fail(`npm installed ${versionAt(stagingRoot) ?? 'nothing'} instead of ${o.version}`);
   if (!verify(stagingRoot, o.nodePath)) return fail(`the installed runtime could not load better-sqlite3`);
+  // Same-version replacement must be undoable: move the old folder aside, move the new one in,
+  // and only then delete the old one. If the second move fails, put the old one back.
+  const aside = `${dest}.old-${process.pid}`;
+  let movedAside = false;
   try {
-    rmSync(dest, { recursive: true, force: true });
+    if (existsSync(dest)) { renameSync(dest, aside); movedAside = true; }
     renameSync(staging, dest);
   } catch (e) {
-    return fail(`could not move the runtime into ${dest} (${(e as Error)?.message ?? e})`);
+    if (movedAside) { try { renameSync(aside, dest); } catch { /* reported below */ } }
+    const restored = !movedAside || existsSync(dest);
+    return fail(`could not move the runtime into ${dest} (${(e as Error)?.message ?? e})${restored ? '' : `; the previous one is at ${aside}`}`);
   }
-  const removed = pruneRuntimes(base, o.version);
-  return pinned(`installed ${spec} into ${dest}${removed.length ? `, removed old runtime ${removed.join(', ')}` : ''}`);
+  if (movedAside) { try { rmSync(aside, { recursive: true, force: true }); } catch { /* harmless leftover */ } }
+  // Older versions are NOT removed here: setup calls pruneOldRuntimes() at the very end, after
+  // every settings write succeeded and nothing still points at them.
+  return pinned(`installed ${spec} into ${dest}`);
 }
 

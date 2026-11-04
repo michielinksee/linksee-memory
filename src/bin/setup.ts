@@ -43,7 +43,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import Database from 'better-sqlite3';
 import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, unmanagedLinkseeHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
-import { resolveHookRuntime } from '../lib/hook-runtime.js';
+import { resolveHookRuntime, recordSettingsRef, pruneOldRuntimes } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';
 
 const args = process.argv.slice(2);
@@ -254,10 +254,26 @@ interface SettingsJson {
   [key: string]: unknown;
 }
 
+// Did every settings read/write this run succeed? Old runtimes are pruned only if so.
+let settingsOk = true;
+/** writeSettingsFile that reports instead of throwing, and remembers which files use the runtime. */
+function safeWrite(path: string, settings: Record<string, unknown>): { backup?: string } | null {
+  try {
+    const w = writeSettingsFile(path, settings);
+    if (runtime.mode === 'pinned' && runtime.runtimeBase) recordSettingsRef(runtime.runtimeBase, path);
+    return w;
+  } catch (e) {
+    settingsOk = false;
+    console.log(`  ${FAIL} Could not write ${path} (${(e as Error)?.message ?? e}) — left as it was`);
+    return null;
+  }
+}
+
 // Same protection as the guard step below (lib/settings-file.ts): BOM stripped, an unparseable
 // file is left untouched, one .bak before the first write, temp file + rename.
 const stopRead = readSettingsFile(SETTINGS_PATH);
 if (!stopRead.ok) {
+  settingsOk = false;
   console.log(`  ${FAIL} Could not parse ${SETTINGS_PATH} (${stopRead.reason}) — left untouched`);
   console.log(`  ${DIM}Fix the file, or add the Stop hook by hand: ${HOOK_COMMAND}${RESET}`);
 } else {
@@ -282,10 +298,12 @@ if (!stopRead.ok) {
         hooks: [{ type: 'command', command: HOOK_COMMAND }],
       });
     }
-    const w = writeSettingsFile(SETTINGS_PATH, settings);
-    if (replaced.length) console.log(`  ${CHECK} Repointed ${replaced.length} hook(s) to ${HOOK_COMMANDS.sync.startsWith('npx') ? 'npx' : 'a direct node call'} → ${SETTINGS_PATH}`);
-    if (!alreadyHooked) console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
-    if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
+    const w = safeWrite(SETTINGS_PATH, settings);
+    if (w) {
+      if (replaced.length) console.log(`  ${CHECK} Repointed ${replaced.length} hook(s) to ${HOOK_COMMANDS.sync.startsWith('npx') ? 'npx' : 'a direct node call'} → ${SETTINGS_PATH}`);
+      if (!alreadyHooked) console.log(`  ${CHECK} Stop hook added → ${SETTINGS_PATH}`);
+      if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
+    }
   }
 }
 console.log('');
@@ -322,6 +340,7 @@ async function configureGuard(): Promise<boolean> {
   // BOM stripped; never clobber a file we can't parse — the user may have hand-authored it.
   const read = readSettingsFile(targetPath);
   if (!read.ok) {
+    settingsOk = false;
     console.log(`  ${FAIL} Could not parse ${targetPath} (${read.reason}) — left untouched`);
     console.log(`  ${DIM}Add the guard block by hand (see README → Re-injection Guard).${RESET}`);
     return false;
@@ -335,7 +354,8 @@ async function configureGuard(): Promise<boolean> {
     return true;
   }
   if (guardFullyWired(settings) && !dryRun) {
-    const w = writeSettingsFile(targetPath, settings);
+    const w = safeWrite(targetPath, settings);
+    if (!w) return false;
     console.log(`  ${CHECK} Repointed ${replaced.length} guard hook(s) → ${targetPath}`);
     if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
     return true;
@@ -362,7 +382,8 @@ async function configureGuard(): Promise<boolean> {
   // Merge, don't replace (see lib/guard-wiring.ts for the rules it holds to).
   wireGuard(settings, HOOK_COMMANDS.guard);
 
-  const w = writeSettingsFile(targetPath, settings);
+  const w = safeWrite(targetPath, settings);
+  if (!w) return false;
   console.log(`  ${CHECK} Guard wired → ${targetPath} ${DIM}(${scopeLabel})${RESET}`);
   if (w.backup) console.log(`  ${DIM}Previous file kept at ${w.backup}${RESET}`);
   if (!projectGuard) {
@@ -374,6 +395,21 @@ async function configureGuard(): Promise<boolean> {
 
 const guardConfigured = await configureGuard();
 console.log('');
+
+// ── Last: remove older pinned runtimes (Codex re-review of #15) ─────────
+// Only now — after every settings write succeeded — and only folders that no settings file still
+// points at (user, project, and every file setup ever pointed at a runtime). With --no-guard the
+// old guard hooks may still use the old runtime; the reference check keeps it in that case too.
+if (runtime.mode === 'pinned' && runtime.runtimeBase && runtime.version && !dryRun) {
+  if (!settingsOk) {
+    console.log(`  ${SKIP} Older runtimes kept: settings were not fully updated this run.`);
+  } else {
+    const pr = pruneOldRuntimes(runtime.runtimeBase, runtime.version, [SETTINGS_PATH, PROJECT_SETTINGS_PATH]);
+    if (pr.removed.length) console.log(`  ${DIM}Removed older runtime(s): ${pr.removed.join(', ')}${RESET}`);
+    for (const k of pr.kept) console.log(`  ${SKIP} Kept ${k.dir} — still referenced by ${k.referencedBy}`);
+    if (pr.removed.length || pr.kept.length) console.log('');
+  }
+}
 
 // ── Telemetry consent (opt-in, anonymous, off unless you agree) ──────────
 /** True when there is no memory yet (or it cannot be read) — used only to pick the first-try text. */

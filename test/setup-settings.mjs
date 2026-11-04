@@ -11,7 +11,7 @@
 // Run: node test/setup-settings.mjs   (needs `pnpm build` first)
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, chmodSync, statSync, cpSync, symlinkSync, realpathSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -206,6 +206,129 @@ if (process.platform !== 'win32') {
   chmodSync(settingsPath(home), 0o600);
   runSetup(home);
   check('mode 600 kept after setup rewrote the file', (statSync(settingsPath(home)).mode & 0o777) === 0o600, (statSync(settingsPath(home)).mode & 0o777).toString(8));
+}
+
+// 9. Codex re-review of #15: an older pinned runtime is removed only as setup's LAST step, only if
+//    every settings write succeeded, and never while a settings file still points at it.
+//    setup runs here from a fake npx cache (…/_npx/…/node_modules/linksee-memory) with the current
+//    version's runtime already in place (so no npm install / network), plus an old runtime/0.17.0.
+{
+  const REPO = join(dirname(SETUP), '..', '..');
+  const version = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
+  const realBs = realpathSync(join(REPO, 'node_modules', 'better-sqlite3'));
+  const fakePkg = (nm) => {
+    const root = join(nm, 'linksee-memory');
+    cpSync(join(REPO, 'dist'), join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'linksee-memory', version, type: 'module' }));
+    if (!existsSync(join(nm, 'better-sqlite3'))) symlinkSync(realBs, join(nm, 'better-sqlite3'), 'junction');
+    return root;
+  };
+  const npxNm = join(mkdtempSync(join(tmpdir(), 'linksee-fake-')), '_npx', 'h', 'node_modules');
+  homes.push(dirname(dirname(dirname(npxNm))));
+  mkdirSync(npxNm, { recursive: true });
+  const npxSetup = join(fakePkg(npxNm), 'dist', 'bin', 'setup.js');
+
+  const prepare = (settingsObj) => {
+    const home = freshHome(settingsObj === undefined ? undefined : JSON.stringify(settingsObj, null, 2));
+    const rt = join(home, '.linksee-memory', 'runtime');
+    const nm = join(rt, version, 'node_modules');
+    mkdirSync(nm, { recursive: true });
+    fakePkg(nm);
+    mkdirSync(join(rt, '0.17.0', 'node_modules', 'linksee-memory', 'dist', 'bin'), { recursive: true });
+    return { home, rt, old: join(rt, '0.17.0') };
+  };
+  const run = (home, extra = []) => spawnSync(process.execPath, [npxSetup, '--yes', ...extra], {
+    encoding: 'utf8', input: '', timeout: 60000,
+    env: { ...process.env, HOME: home, USERPROFILE: home, LINKSEE_MEMORY_DIR: join(home, '.linksee-memory'), LINKSEE_TELEMETRY: 'off' },
+  });
+  const fwd = (p) => p.replace(/\\/g, '/');
+  const npx017 = {
+    hooks: {
+      Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'npx -y linksee-memory sync' }] }],
+      PreToolUse: [{ matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 8 }] }],
+      SessionStart: [{ matcher: 'startup|resume|compact', hooks: [{ type: 'command', command: 'npx -y linksee-memory guard', timeout: 15 }] }],
+    },
+  };
+
+  // A. control: nothing points at 0.17.0 after the switch → it is removed
+  {
+    const { home, old } = prepare(npx017);
+    const r = run(home);
+    const s = readSettings(home);
+    check('runtime A: setup ran from the fake npx cache and used the pinned runtime', r.status === 0 && /pinned runtime/.test(r.stdout) && s.includes('/runtime/' + version + '/'), r.stdout.slice(0, 600) + r.stderr.slice(0, 300));
+    check('runtime A: old runtime removed once nothing points at it', !existsSync(old) && /Removed older runtime\(s\): 0\.17\.0/.test(r.stdout), r.stdout.slice(-600));
+  }
+
+  // B. a settings write fails → old runtime kept
+  {
+    const { home, old } = prepare(npx017);
+    const sp = settingsPath(home);
+    if (process.platform === 'win32') chmodSync(sp, 0o444);          // read-only: replacing it fails
+    else chmodSync(join(home, '.claude'), 0o555);                     // no new files in the folder
+    const r = run(home);
+    if (process.platform === 'win32') chmodSync(sp, 0o644); else chmodSync(join(home, '.claude'), 0o755);
+    const failed = /Could not write/.test(r.stdout);
+    check('runtime B: the settings write failed and setup said so (exit 0)', r.status === 0 && failed, r.stdout.slice(0, 800) + r.stderr.slice(0, 300));
+    check('runtime B: old runtime kept because settings were not fully updated', existsSync(old) && /Older runtimes kept/.test(r.stdout), r.stdout.slice(-500));
+    check('runtime B: settings.json still has the 0.17.0 hooks', readSettings(home).includes('npx -y linksee-memory guard'));
+  }
+
+  // C. --no-guard: guard hooks (managed, pointing at 0.17.0) are left, so 0.17.0 must stay
+  {
+    const { home, old } = prepare(undefined);
+    const guardOld = `"${fwd(process.execPath)}" "${fwd(join(old, 'node_modules', 'linksee-memory'))}/dist/bin/guard-hook.js" --linksee-managed`;
+    writeFileSync(settingsPath(home), JSON.stringify({
+      hooks: {
+        Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'npx -y linksee-memory sync' }] }],
+        PreToolUse: [{ matcher: 'Edit|Write|Bash', hooks: [{ type: 'command', command: guardOld, timeout: 8 }] }],
+      },
+    }, null, 2));
+    const r = run(home, ['--no-guard']);
+    const s = JSON.parse(readSettings(home));
+    check('runtime C (--no-guard): Stop switched to the new runtime', s.hooks.Stop[0].hooks[0].command.includes('/runtime/' + version + '/'));
+    check('runtime C (--no-guard): guard hook left on the old runtime', s.hooks.PreToolUse[0].hooks[0].command === guardOld);
+    check('runtime C (--no-guard): old runtime kept and reported', existsSync(old) && /Kept .*0\.17\.0.*still referenced/.test(r.stdout), r.stdout.slice(-600));
+  }
+
+  // D. a hand-made wrapper points into the old runtime → kept
+  {
+    const { home, old } = prepare(undefined);
+    const wrapper = `node ${join(old, 'node_modules', 'linksee-memory', 'dist', 'bin', 'guard-hook.js')}`;
+    writeFileSync(settingsPath(home), JSON.stringify({
+      hooks: { ...npx017.hooks, PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: wrapper }] }] },
+    }, null, 2));
+    const r = run(home);
+    const s = JSON.parse(readSettings(home));
+    check('runtime D: wrapper untouched', s.hooks.PostToolUse[0].hooks[0].command === wrapper);
+    check('runtime D: old runtime kept because the wrapper still uses it', existsSync(old) && /still referenced/.test(r.stdout), r.stdout.slice(-600));
+  }
+}
+
+// 10. symlinked settings.json (dotfiles setups): a live link is written through to its target and
+//     stays a link; a dangling link is refused, not replaced by a plain file. Skipped where the OS
+//     does not let this user create symlinks (Windows without Developer Mode).
+{
+  const { readSettingsFile, writeSettingsFile } = await import('../dist/lib/settings-file.js');
+  const d = mkdtempSync(join(tmpdir(), 'linksee-symlink-'));
+  homes.push(d);
+  const target = join(d, 'real-settings.json');
+  const link = join(d, 'settings.json');
+  writeFileSync(target, JSON.stringify({ model: 'opus' }));
+  let canLink = true;
+  try { symlinkSync(target, link, 'file'); } catch { canLink = false; }
+  if (!canLink) {
+    console.log('  skip symlink cases (this user cannot create symlinks here)');
+  } else {
+    writeSettingsFile(link, { model: 'opus', hooks: {} });
+    check('live symlink: still a link after the write', lstatSync(link).isSymbolicLink());
+    check('live symlink: the target got the new content', JSON.parse(readFileSync(target, 'utf8')).hooks !== undefined);
+    rmSync(target);
+    const r = readSettingsFile(link);
+    check('dangling symlink: read refuses', r.ok === false && /symbolic link/.test(r.reason), JSON.stringify(r));
+    let threw = false;
+    try { writeSettingsFile(link, { a: 1 }); } catch { threw = true; }
+    check('dangling symlink: write refuses and the link is left as a link', threw && lstatSync(link).isSymbolicLink() && !existsSync(target));
+  }
 }
 
 for (const h of homes) { try { rmSync(h, { recursive: true, force: true }); } catch { /* ignore */ } }
