@@ -465,7 +465,7 @@ console.log('');
 // removing one a hook still uses). Say what they cost and how to remove old ones by hand.
 if (runtime.mode === 'pinned' && runtime.runtimeBase && !dryRun) {
   console.log(`  ${DIM}• Hooks run from ${runtime.runtimeBase}${sep}<version> (${runtime.bytes !== undefined ? formatBytes(runtime.bytes) : 'about 35 MB'} each). Older versions are not removed automatically;${RESET}`);
-  console.log(`  ${DIM}  List them and remove the ones no settings file uses: npx -y linksee-memory runtime prune (add --yes to delete)${RESET}`);
+  console.log(`  ${DIM}  List them and remove the ones no settings file uses: npx -y linksee-memory runtime prune (see its output before adding --yes --scope-confirmed)${RESET}`);
   console.log('');
 }
 handWiredNotice(SETTINGS_PATH);
