@@ -19,7 +19,7 @@ import { openDb, runMigrations } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
-import { consolidate as runConsolidate } from '../lib/consolidate.js';
+import { consolidate as runConsolidate, autoConsolidateEnabled } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
 import { inferAltitude, inferType, inferState } from '../lib/session-extractor.js';
 import { normalizeEntityName } from '../lib/normalize.js';
@@ -97,8 +97,14 @@ try {
   }
 } catch { /* never block startup */ }
 
-// Auto-maintenance: consolidate stale memories on startup (non-blocking)
-setTimeout(() => {
+// Auto-maintenance: consolidate stale memories on startup (non-blocking).
+//
+// OFF by default since 0.17.1 (L-1-106 / audit F1): consolidate deletes the original rows after
+// writing a summary that keeps only the top 3 × 200 characters, ignores thread_id, and cascades
+// away their edges — reasons and history lost with no action from the user. It now runs only
+// when asked: LINKSEE_AUTO_CONSOLIDATE=1 (or `--auto-consolidate` on the server command line).
+// The `consolidate` tool is unchanged. Rows already removed by earlier versions are not restored.
+if (autoConsolidateEnabled(process.env, process.argv.slice(2))) setTimeout(() => {
   try {
     let shouldRun = true;
     try {
