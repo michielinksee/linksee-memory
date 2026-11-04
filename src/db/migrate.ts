@@ -16,7 +16,11 @@ export function getDbPath(): string {
 function openAt(path: string): Database.Database {
   const db = new Database(path);
   try {
-    db.pragma('journal_mode = WAL'); // first real read of the file header — throws if it isn't a DB
+    // Refuse an unsupported old schema before the journal-mode pragma (which can write the header).
+    // This is also the first real read of the file — it throws if the file isn't a DB.
+    const v = readSchemaVersion(db);
+    if (v > 0 && v < MIN_SUPPORTED_SCHEMA) throw new LegacySchemaError(v, path);
+    db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     return db;
   } catch (e) {
@@ -53,29 +57,43 @@ export function openDb(): Database.Database {
 export const MIN_SUPPORTED_SCHEMA = 6;
 
 /**
- * Thrown by runMigrations for a schema older than MIN_SUPPORTED_SCHEMA (a DB last opened by a
- * 2026-05-or-earlier version). The message is the recovery procedure, so any caller that just
- * prints the error shows the user what to do.
+ * Thrown for a schema older than MIN_SUPPORTED_SCHEMA (a DB last opened by a 2026-05-or-earlier
+ * version). Raised by openDb() BEFORE the journal-mode pragma, so the file is not written to at all,
+ * and again by runMigrations() as a second line. The message is what the user should do.
  *
- * The route was checked on a schema-5 file (2026-11-04): 0.7.2 takes it to schema 7 without
- * touching memories; 0.8.0 through 0.17.0 all stop on `no such table: drift_anchors` (fixed in
- * 0.17.1, so 0.17.1 takes schema 7 on to 16).
+ * No old version is recommended as a stepping stone: 0.8.0–0.17.0 stop on `no such table:
+ * drift_anchors` after partly altering the file, and 0.7.2 has no subcommands — `npx
+ * linksee-memory@0.7.2 <anything>` starts its MCP server, whose start-up consolidate can delete
+ * original rows (Codex review of PR #15). A migration command for these files is 0.17.2 work.
  */
 export class LegacySchemaError extends Error {
   readonly schemaVersion: number;
   constructor(schemaVersion: number, dbPath: string) {
     super(
       `[linksee-memory] ${dbPath} is at schema ${schemaVersion}; this version migrates schema ${MIN_SUPPORTED_SCHEMA} and newer only. ` +
-      `Nothing was written. To bring it forward:\n` +
-      `  1. Close every Claude Code / Cursor / other client using linksee-memory.\n` +
-      `  2. Back up the folder that holds memory.db (copy memory.db, and memory.db-wal / memory.db-shm if present).\n` +
-      `  3. Run once: npx -y linksee-memory@0.7.2 stats   (same LINKSEE_MEMORY_DIR if you set one) — this moves it to schema 7.\n` +
-      `  4. Start this version again; it migrates schema 7 to the current one.\n` +
-      `If anything goes wrong, put the backup back. (A direct migration is planned for 0.17.2.)`,
+      `Stopped before writing anything to the file.
+` +
+      `  1. Close every Claude Code / Cursor / other client using linksee-memory.
+` +
+      `  2. Back up the folder that holds memory.db (copy memory.db, and memory.db-wal / memory.db-shm if present) and keep the copy.
+` +
+      `  3. Do not open this file with another linksee-memory version in the meantime — older versions can delete or half-migrate rows.
+` +
+      `A migration command for this schema is planned for 0.17.2. To start fresh instead, point LINKSEE_MEMORY_DIR at an empty folder.`,
     );
     this.name = 'LegacySchemaError';
     this.schemaVersion = schemaVersion;
   }
+}
+
+/** Read meta.schema_version without writing (0 when the table or row is absent). */
+export function readSchemaVersion(db: Database.Database): number {
+  const metaTable = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+  ).get() as { name?: string } | undefined;
+  if (!metaTable?.name) return 0;
+  const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+  return row ? Number(row.value) || 0 : 0;
 }
 
 export function runMigrations(db: Database.Database): void {
@@ -85,19 +103,13 @@ export function runMigrations(db: Database.Database): void {
 
   // Safely read current schema version. On a fresh DB the meta table doesn't
   // exist yet, which is fine — treat that as "version 0, full schema apply".
-  let currentVersion = 0;
-  const metaTable = db.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
-  ).get() as { name?: string } | undefined;
-  if (metaTable?.name) {
-    const versionRow = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
-    if (versionRow) currentVersion = Number(versionRow.value) || 0;
-  }
+  const currentVersion = readSchemaVersion(db);
 
   // 0.17.1 (L-1-106 / audit F3): refuse schema 1–5 BEFORE any write. Their path through here
   // (v5 → v6 generated columns, then the v5 entity merge running after the version has already
   // been bumped to 16, with no transaction around it) can leave a half-migrated file. A safe,
-  // tested migration is 0.17.2 work; until then stop and say how to get through.
+  // tested migration is 0.17.2 work. openDb() already refused these before any write; this is
+  // the second line for callers that hand in their own connection.
   if (currentVersion > 0 && currentVersion < MIN_SUPPORTED_SCHEMA) {
     throw new LegacySchemaError(currentVersion, getDbPath());
   }

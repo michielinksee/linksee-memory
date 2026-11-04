@@ -84,11 +84,12 @@ if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand))
   process.exit(r.status ?? (r.signal ? 1 : 0));
 }
 
-const db = openDb();
+let db!: ReturnType<typeof openDb>;
 try {
+  db = openDb();
   runMigrations(db);
 } catch (e) {
-  // A pre-June-2026 DB (schema < 6) is refused before any write; print the recovery steps
+  // A pre-June-2026 DB (schema < 6) is refused before any write; print what to do
   // instead of a stack trace. MCP clients show the server's stderr in their logs.
   if (e instanceof LegacySchemaError) {
     process.stderr.write(`${e.message}\n`);
@@ -113,7 +114,8 @@ try {
 // writing a summary that keeps only the top 3 × 200 characters, ignores thread_id, and cascades
 // away their edges — reasons and history lost with no action from the user. It now runs only
 // when asked: LINKSEE_AUTO_CONSOLIDATE=1 (or `--auto-consolidate` on the server command line).
-// The `consolidate` tool is unchanged. Rows already removed by earlier versions are not restored.
+// There is no `consolidate` tool (merged away in 0.7.0). Rows already removed by earlier versions
+// are not restored.
 if (autoConsolidateEnabled(process.env, process.argv.slice(2))) setTimeout(() => {
   try {
     let shouldRun = true;
@@ -2263,7 +2265,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           forget: 'remember({ forget: true, memory_id: <id> })',
           list_entities: 'recall() with no params',
           recall_file: 'recall({ path: "<file_path>" })',
-          consolidate: 'Auto-runs on server startup. No manual call needed.',
+          consolidate: 'No longer a tool, and since 0.17.1 it does not run on server start either (it deletes the original rows). Opt in on the server with LINKSEE_AUTO_CONSOLIDATE=1 if you want the old weekly start-up run.',
         };
         if (name in migrations) {
           throw new Error(`Tool "${name}" was merged in v0.7.0. Migration: ${migrations[name]}`);

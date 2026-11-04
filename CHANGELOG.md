@@ -21,12 +21,16 @@ Fixes for what a new user runs into on the first day. No new features, no new to
   commands; other tools' hooks and hand edits are left alone.
 - **The server no longer consolidates memories on its own.** Start-up consolidation deleted the
   original rows (keeping a 3 × 200-character summary) without the user asking. It is now off
-  unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). The `consolidate` tool is
-  unchanged. Rows removed by earlier versions are not restored.
+  unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). There is no `consolidate` tool
+  (merged away in 0.7.0); the old hint that it "auto-runs on server startup" is corrected. Rows
+  removed by earlier versions are not restored.
 - **Old databases.** Every DB older than schema 8 stopped with `no such table: drift_anchors`
-  (0.8.0 – 0.17.0). Schema 6–8 now migrate. Schema 1–5 is refused before anything is written,
-  with the steps to bring it forward (back up, run `npx -y linksee-memory@0.7.2 stats` once,
-  start again). A direct migration is planned for 0.17.2.
+  (0.8.0 – 0.17.0), after partly altering the file. Schema 6–8 now migrate. Schema 1–5 is refused
+  before anything is written — the schema is read before the journal-mode switch, so the file
+  stays byte-identical — with one message: back up the folder, and do not open it with another
+  linksee-memory version meanwhile. No older version is suggested as a stepping stone (0.7.2,
+  for one, has no subcommands: any `npx linksee-memory@0.7.2 …` starts its server, whose start-up
+  consolidate can delete rows). A migration command for these files is planned for 0.17.2.
 
 ### Docs
 
