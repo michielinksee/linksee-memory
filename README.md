@@ -369,7 +369,7 @@ Add **"Use Linksee"** to any prompt to force a recall.
 | `~/.claude.json` | the `linksee` MCP server (via `claude mcp add`) — undo with `claude mcp remove linksee` |
 | `~/.claude/skills/linksee-memory/SKILL.md` | the agent skill |
 | `~/.claude/settings.json` | the `Stop` hook (auto-capture) and the `SessionStart` / `PreToolUse` guard hooks. Merged into what is there — other hooks and settings are kept. If the file does not parse, setup leaves it untouched and says so. Before changing it, setup keeps the previous file as `settings.json.bak-<timestamp>`: to undo, copy that file back over `settings.json`. |
-| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, and `npx -y linksee-memory runtime prune` lists them; with `--yes` it deletes only the versions no settings file references (if a settings file cannot be read, it deletes nothing). If the install fails, the hooks stay on the npx form. |
+| `~/.linksee-memory/runtime/<version>/` | only when setup was run through `npx`: setup runs `npm install --prefix ~/.linksee-memory/runtime/<version> --no-save --omit=dev linksee-memory@<version>` once (the only network call, shown with its size), because the hooks call `node` on it directly and npx's cache is temporary. Older versions are not removed automatically (about 35 MB each): setup prints the folder, and `npx -y linksee-memory runtime prune` lists them with what references each. With `--yes --scope-confirmed` it deletes only the versions no settings file references; it cannot see other repos where you ran `setup --project` (pass their `.claude/settings.json` with `--settings`), and if any settings file cannot be read or parsed it deletes nothing. If the install fails, the hooks stay on the npx form. |
 | `~/.linksee-memory/telemetry-consent` | your telemetry answer (`off` unless you said yes) |
 
 Running setup again changes nothing that is already in place. It rewrites only hooks it wrote itself: the exact `npx -y linksee-memory sync` / `npx -y linksee-memory guard` from earlier versions, and the direct form it writes now, which ends in `--linksee-managed`. Anything else that runs our scripts — a wrapper, a path you typed — is left alone and listed at the end of setup. With `--no-guard`, the guard hooks are not touched at all. If you later upgrade Node to a new major version, re-run setup (the hooks print one line saying so and let the action through).
@@ -825,11 +825,11 @@ No account, no credit card, no API key. Just install and use.
 0.17.x refuses these files before writing anything. Close every client that uses linksee-memory, then:
 
 ```bash
-npx -y linksee-memory@0.17.2 migrate --dry   # read-only: what it would do
-npx -y linksee-memory@0.17.2 migrate         # back up, then migrate
+npx -y linksee-memory@0.17.2 migrate --dry   # rehearse on a temporary copy
+npx -y linksee-memory@0.17.2 migrate         # migrate a copy, then swap it in
 ```
 
-It copies the file to `memory.db.pre-migrate-<time>` first (checked with `integrity_check`), runs every step in one transaction, and rolls back if a step fails or any table would lose rows. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead.
+It migrates a copy of the file and checks it (no table loses rows, `integrity_check` ok). Only then does it move `memory.db` and its `-wal` / `-shm` / `-journal` into `memory.db.pre-migrate-<time>/` (the originals, byte for byte) and put the migrated copy in their place. If anything fails before that, your files are not changed. It does not start the server, consolidate, or merge entities. Keep the version pinned: older versions have no `migrate` and would start their server instead.
 </details>
 
 <details>
