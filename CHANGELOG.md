@@ -2,8 +2,11 @@
 
 ## v0.18.0 — unreleased (Reversal and who-wrote-it)
 
-No new MCP tools (still 7). Two optional arguments on existing tools. No schema change: the
-`memory_edges` table and the `memories.source` column were already there; nothing wrote them.
+No new MCP tools (still 7) and no schema change (the `memory_edges` table and the
+`memories.source` column were already there; nothing wrote them). Two optional arguments on
+existing tools — **and one change to what a default `recall` returns: superseded memories are
+hidden, including the ones earlier versions already marked `state: superseded`** (about 112 on the
+maintainer's database; still in the DB, `include_superseded: true` shows them).
 
 ### Added
 
@@ -26,19 +29,29 @@ No new MCP tools (still 7). Two optional arguments on existing tools. No schema 
 
 ### Changed
 
-- `recall` now also hides memories that earlier versions marked `state: superseded` (distill triage,
-  the opt-in consolidate). They are still in the database; `include_superseded: true` shows them.
+- **Default `recall` hides superseded memories** — rows that are the target of a `supersedes` link
+  and rows already marked `state: superseded` by earlier versions (distill triage, the opt-in
+  consolidate). They are left out in SQL before the result limit, so a pile of them cannot crowd a
+  current memory out. They are still in the database; `include_superseded: true` shows them.
+- A memory saved with `supersedes` is stored as current: if the text-based guess would have
+  called it `superseded` ("instead of", 「代わりに」 describe the old decision), its state is
+  `decided` and the reply says so (`state_note`).
+- `remember` no longer reports a saved memory as failed when the momentum refresh after the save
+  fails; the save stands and `warnings` says what failed (a retry would have saved it twice).
 - README "First round trip": a two-repo step (a decision recorded in repo A **is** returned in
-  repo B — memory is per machine, labelled by entity) and a reversal step.
+  repo B — memory is per machine, labelled by entity; `entity_name` narrows by a part of the entity
+  name, so `repo-a` also matches `repo-a-backup`) and a reversal step.
 
 ### Not changed (limits)
 
 - Nothing detects a reversal for you: the agent must pass the old id.
+- The Stop-hook re-import still deletes a session's raw rows outside the transaction that
+  re-inserts them (unchanged from 0.17.x).
 - Two writers in the same moment: SQLite WAL with better-sqlite3's 5 s busy timeout. A save that
   times out is reported as failed and writes nothing (tested with a held write lock); a real
   two-client collision has not been reproduced beyond that.
 
-## v0.17.2 — unreleased (Old databases, runtime cleanup)
+## v0.17.2 — 2026-11-04 (Old databases, runtime cleanup)
 
 No new MCP tools (still 7). Two CLI subcommands, both run by hand.
 

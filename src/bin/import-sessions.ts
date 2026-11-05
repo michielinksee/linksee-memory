@@ -86,7 +86,9 @@ async function main() {
   const projectArgs = args.filter((a, i) => !a.startsWith('--')
     && (sessionFileIdx < 0 || i !== sessionFileIdx + 1)
     && (viaIdx < 0 || i !== viaIdx + 1));
-  // session_id stays the first key: wipeSession matches `"session_id":"…"` inside this JSON.
+  // The session keys are kept as they were: wipeSession and makeDistilledTurnSet find these rows
+  // by the substring `"session_id":"…"` (position does not matter, the exact text does).
+  // Known, not changed here: wipeSession runs outside the re-insert transaction.
   const sourceJson = (src: object): string => JSON.stringify({ ...src, client: 'claude-code', via });
 
   // Single-file mode (used by the Stop hook)

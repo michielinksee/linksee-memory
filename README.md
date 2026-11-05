@@ -21,7 +21,7 @@ A new install has an empty memory, so "how did we solve this before?" finds noth
 
 1. In Claude Code or Codex, say: *"Remember: in this repo we decided to use X, because Y. Use Linksee."*
 2. Open a **new** session — in either one — and ask: *"What did we decide about X? Use Linksee."*
-3. Two repos: record a decision in repo A, then in repo B (e.g. Codex) ask the same. It **does** come back — the memory is per machine, not per repo — labelled `entity: repo-a` and `by: <client>`; add `entity_name` to the recall to keep to one repo.
+3. Two repos: record a decision in repo A, then in repo B (e.g. Codex) ask the same. It **does** come back — the memory is per machine, not per repo — labelled `entity: repo-a` and `by: <client>`; `entity_name` on the recall narrows by a part of the entity name (`repo-a` also matches `repo-a-backup`).
 4. Reverse it: `remember` the new decision with `supersedes: <old memory_id>`. `recall` then shows only the new one (`supersedes #<id>`); `include_superseded: true` shows both.
 
 ## What it does not do

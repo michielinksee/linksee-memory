@@ -571,6 +571,22 @@ function handleRemember(args: any): string {
     rawContent = JSON.stringify(structured);
   }
 
+  // A memory that names what it supersedes IS the current decision. The text-based guess
+  // (inferState) reads "instead of" / 「代わりに」 — words about the OLD decision — as this row
+  // being superseded, which would hide the new row next to the old one. With an explicit
+  // supersedes, the new row is never stored as superseded.
+  let stateNote: string | undefined;
+  if (supersedeIds.length > 0) {
+    try {
+      const c = JSON.parse(rawContent);
+      if (c && typeof c === 'object' && c.state === 'superseded') {
+        c.state = 'decided';
+        rawContent = JSON.stringify(c);
+        stateNote = 'state set to "decided": a memory that supersedes another is the current one';
+      }
+    } catch { /* structured above, always JSON */ }
+  }
+
   // Who wrote it: the client name/version the MCP host sent in initialize (self-reported).
   const source = mcpSource(server.getClientVersion());
 
@@ -606,7 +622,13 @@ function handleRemember(args: any): string {
     throw e;
   }
 
-  const mom = refreshMomentumForEntity(db, entityId);
+  // The memory is committed from here on. Helpers that fail after this point must not turn a
+  // saved memory into ok:false — the caller would retry and save it twice.
+  const warnings: string[] = [];
+  let mom: { score: number; band: string } | null = null;
+  try { mom = refreshMomentumForEntity(db, entityId); } catch (e: any) {
+    warnings.push(`saved, but the momentum refresh failed: ${String(e?.message ?? e).slice(0, 200)}`);
+  }
 
   const out: Record<string, unknown> = {
     ok: true,
@@ -614,9 +636,11 @@ function handleRemember(args: any): string {
     entity_id: entityId,
     layer,
     pinned: importance >= 0.9,
-    momentum: { score: mom.score, band: mom.band },
+    ...(mom ? { momentum: { score: mom.score, band: mom.band } } : {}),
   };
+  if (warnings.length > 0) out.warnings = warnings;
   if (supersedeIds.length > 0) out.supersedes = supersedeIds;
+  if (stateNote) out.state_note = stateNote;
   if (supersededAnchors.length > 0) {
     // The memory link does not touch the gate. Say so instead of retiring an anchor on our own.
     out.anchors_still_enforced = supersededAnchors;
@@ -708,7 +732,18 @@ function appendAxisFilters(sql: string, params: any[], filters: AxisFilters): st
   return sql;
 }
 
-function runFtsQuery(query: string, layer: string | undefined, limit: number, axis?: AxisFilters): any[] {
+// Superseded rows: a row whose state is 'superseded', or the target of a supersedes edge.
+// Applied in SQL, BEFORE the LIMIT — filtering after it let a pile of superseded rows fill the
+// candidate pool and return nothing while a current memory existed (Codex review 1 of #21).
+type SupersededMode = 'exclude' | 'include' | 'only';
+const SUPERSEDED_SQL = `(m.mem_state = 'superseded' OR EXISTS (SELECT 1 FROM memory_edges me WHERE me.to_memory_id = m.id AND me.relation = 'supersedes'))`;
+function appendSupersededFilter(sql: string, mode: SupersededMode): string {
+  if (mode === 'exclude') return sql + ` AND NOT ${SUPERSEDED_SQL}`;
+  if (mode === 'only') return sql + ` AND ${SUPERSEDED_SQL}`;
+  return sql;
+}
+
+function runFtsQuery(query: string, layer: string | undefined, limit: number, axis?: AxisFilters, sup: SupersededMode = 'include'): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -722,12 +757,13 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
   const params: any[] = [query];
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
+  sql = appendSupersededFilter(sql, sup);
   sql += ' ORDER BY bm25_score ASC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
 }
 
-function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters): any[] {
+function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, sup: SupersededMode = 'include'): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -741,6 +777,7 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
   if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
+  sql = appendSupersededFilter(sql, sup);
   if (query && !entityName) {
     sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
     params.push(`%${query}%`, `%${query}%`);
@@ -821,9 +858,26 @@ function handleRecall(args: any): string {
   const ftsQuery = toFtsQuery(args.query ?? '');
   const canUseFts = !!ftsQuery && !args.entity_name;
 
+  // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
+  // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
+  const showSuperseded = args?.include_superseded === true || axis.mem_state === 'superseded';
+  const sup: SupersededMode = showSuperseded ? 'include' : 'exclude';
+  const HIDDEN_COUNT_CAP = 1000;
+  let supersededHidden = 0;
+  if (!showSuperseded) {
+    const hiddenIds = new Set<number>();
+    if (canUseFts) {
+      for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
+    } else {
+      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
+    }
+    supersededHidden = hiddenIds.size;
+  }
+
   if (canUseFts) {
-    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis);
+    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, sup);
+    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, sup);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -838,7 +892,7 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, sup).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
   }
 
@@ -942,15 +996,8 @@ function handleRecall(args: any): string {
       supersedesOf.set(l.f, [...(supersedesOf.get(l.f) ?? []), l.t]);
     }
   }
-  // Fold superseded rows by default: a reversed decision must not come back next to its
-  // replacement. Asking for them (include_superseded, or mem_state:'superseded') shows them.
-  const showSuperseded = args?.include_superseded === true || axis.mem_state === 'superseded';
-  let supersededHidden = 0;
-  const visible = showSuperseded ? scored : scored.filter((r) => {
-    const hide = supersededBy.has(r.id) || r._mem_state === 'superseded';
-    if (hide) supersededHidden++;
-    return !hide;
-  });
+  // Superseded rows were already left out in SQL (before the LIMIT) unless asked for.
+  const visible = scored;
 
   // Apply band filter AFTER scoring (needs heat.band)
   const filtered = band ? visible.filter((s) => s.heat_band === band) : visible;
@@ -1049,7 +1096,7 @@ function handleRecall(args: any): string {
       type: axis.mem_type ?? null,
       state: axis.mem_state ?? null,
     },
-    ...(supersededHidden > 0 ? { superseded_hidden: supersededHidden, superseded_hint: 'include_superseded: true to show them' } : {}),
+    ...(supersededHidden > 0 ? { superseded_hidden: supersededHidden >= HIDDEN_COUNT_CAP ? `${HIDDEN_COUNT_CAP}+` : supersededHidden, superseded_hint: 'include_superseded: true to show them' } : {}),
     memories: memoriesOut,
   });
 }
