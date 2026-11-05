@@ -16,9 +16,9 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
   edges and the state change are one transaction. Refused — and nothing is saved — when an id does
   not exist, is the new memory itself, belongs to another entity, or is an undistilled raw capture
   from a Claude Code session (the next import of that session would give it a new id and drop the
-  link). Also refused, with nothing written: content that is a JSON object missing any of
+  link). Also refused, with nothing written: content that is a JSON object or array missing any of
   `altitude` / `type` / `state` (it would be re-wrapped and its state re-guessed, so an explicit
-  state in it could not be confirmed) — send plain text, or JSON with all three. Without
+  state in it could not be confirmed) — send plain text, or JSON with all three. A JSON string or number is treated as plain text (it carries no state to lose). Without
   `supersedes` such JSON is re-wrapped as before. Not accepted together with `memory_id` (update). If the old memory was enforced as an
   anchor, the reply names it; the anchor is not retired automatically (`resolve_drift` does that).
 - **`recall({ include_superseded })`** — superseded memories are hidden by default
