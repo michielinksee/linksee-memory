@@ -270,7 +270,7 @@ nodes:
   - id: pro-offer
     layer: surface
     stage: monetize
-    statement: 現状=Free・MIT・ローカルのみ(local only)。Proの予定は無し。ドリフト+記憶コアは永久ローカル無料
+    statement: 現状=Free・MIT・ローカルのみ(local only)。Pro は提供していない(予約欄も 2026-11 に撤去)。ドリフト+記憶コアはローカル無料
     status: commitment
     facets: [revenue]
 
@@ -318,7 +318,7 @@ nodes:
     layer: implementation
     statement: MCPサーバー7ツール(recall/remember/read_smart/drift_status/declare_anchor/resolve_drift/share_draft。旧5名は畳み込み・呼べば応答)
     status: active
-    reality:                       # READMEの「7 tools」とコードのツール数が一致しているか
+    reality:                       # READMEの旧名説明(where_am_i)とコードの定義が一致しているか(ツール数は検証していない)
       checks:
         - { claim: 'server.ts に where_am_i ツールが登録されている', kind: regex_present, path: src/mcp/server.ts, pattern: "name:\\s*'where_am_i'" }
     facets: [engineering]
