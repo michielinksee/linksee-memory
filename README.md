@@ -8,10 +8,21 @@ Needs Node.js 20 or later, and Claude Code or Codex to try it (either one is eno
 
 ## Install
 
+Claude Code, from inside a session (plugin: MCP server and skill, no hooks):
+
+```text
+/plugin marketplace add michielinksee/linksee-memory
+/plugin install linksee-memory@linksee-memory
+```
+
+Or from a shell, which also installs the hooks:
+
 ```bash
 npx -y linksee-memory setup                       # Claude Code: MCP server, skill, hooks
 codex mcp add linksee -- npx -y linksee-memory    # Codex: the same memory
 ```
+
+The plugin starts the server with `npx -y linksee-memory@latest` and ships the same skill `setup` installs; the Stop hook (auto-capture) and the [re-injection guard](docs/guard.md) are not in it, so run `setup` for those. Pick one of the two: with both, Claude Code lists the server twice (`linksee` and `plugin:linksee-memory:linksee`).
 
 One command for Claude Code. `setup --dry-run` prints what it would change. It edits `~/.claude/settings.json`, so the hooks apply in every repo, and keeps the old file as `settings.json.bak-<timestamp>` ([what it writes](#what-setup-writes)).
 

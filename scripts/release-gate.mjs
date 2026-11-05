@@ -50,7 +50,7 @@ if (tagRef !== head) fail(`tag ${tag} points at ${tagRef.slice(0, 7)} but HEAD i
 
 // 3. versions agree
 const readVersion = (path) => JSON.parse(readFileSync(path, 'utf8')).version;
-for (const f of ['server.json', '.well-known/mcp/server.json']) {
+for (const f of ['server.json', '.well-known/mcp/server.json', '.claude-plugin/plugin.json']) {
   const v = readVersion(f);
   if (v !== version) fail(`${f} says ${v}, package.json says ${version}.`);
 }

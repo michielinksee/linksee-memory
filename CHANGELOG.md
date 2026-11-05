@@ -10,6 +10,10 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
 
 ### Added
 
+- **Claude Code plugin marketplace** — `/plugin marketplace add michielinksee/linksee-memory` then
+  `/plugin install linksee-memory@linksee-memory` registers the MCP server (`npx -y linksee-memory@latest`)
+  and the agent skill. No hooks: `setup` still installs those. `.claude-plugin/` only; nothing in the
+  npm package changes.
 - **`remember({ content, supersedes: <id> | [<id>, …] })`** — the new memory replaces older ones.
   Writes a `supersedes` edge (new → old) and sets the old memory's `state` to `superseded` with
   `superseded_by` (plain-text memories keep their text; the edge marks them). The new row, the

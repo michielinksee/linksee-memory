@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// sync-version — carry package.json's version into the two MCP manifests.
+// sync-version — carry package.json's version into the two MCP manifests and the Claude Code
+// plugin manifest (.claude-plugin/plugin.json: its version decides when plugin users get a new copy).
 //
 // Runs from the `version` lifecycle script, which npm fires after it bumps package.json and
 // before it creates the commit and tag. Staging the files here puts them inside that same
@@ -13,7 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const TARGETS = ['server.json', '.well-known/mcp/server.json'];
+const TARGETS = ['server.json', '.well-known/mcp/server.json', '.claude-plugin/plugin.json'];
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 const changed = [];
