@@ -36,6 +36,7 @@ import { logAnchorTouch } from '../lib/anchor-touch.js';
 import { triageDistillQueue, distillPending } from '../lib/distill-triage.js';
 import { whereAmI, listMapProjects } from '../lib/map-view.js';
 import { buildShareDraft, KINDS, RUNTIMES } from '../lib/share-draft.js';
+import { parseSupersedesArg, checkSupersedes, applySupersedes, SupersedeRefused, mcpSource, byFromSource } from '../lib/supersede.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -217,6 +218,10 @@ const TOOLS = [
         force: { type: 'boolean', default: false, description: 'Bypass paste-back quality check.' },
         memory_id: { type: 'number', description: 'Set to update an existing memory instead of creating. Only content/layer/importance are changed.' },
         forget: { type: 'boolean', default: false, description: 'Set true + memory_id to delete a memory. Caveat-layer and pinned memories cannot be deleted.' },
+        supersedes: {
+          description: 'Create mode only: the memory id(s) this new memory replaces (a reversed or updated decision). Writes a supersedes link and marks the old memory superseded; recall then hides it unless include_superseded is true. Refused — and nothing is saved — if an id does not exist, belongs to another entity, or is a raw session capture.',
+          anyOf: [{ type: 'number' }, { type: 'array', items: { type: 'number' } }],
+        },
       },
     },
   },
@@ -242,6 +247,7 @@ const TOOLS = [
         path: { type: 'string', description: 'File path or substring. When set, returns file edit history with per-edit user-intent context instead of memory search.' },
         max_intents: { type: 'number', description: 'For file mode: max user-intent snippets. Default 10.', default: 10 },
         scope_to_roots: { type: 'boolean', default: false, description: 'For file mode: filter to client-provided roots.' },
+        include_superseded: { type: 'boolean', default: false, description: 'Also return memories that a newer memory superseded (hidden by default; each carries superseded_by).' },
         explain: { type: 'boolean', default: false, description: 'Include ranking internals (composite, heat, band, momentum, match_reasons, score_breakdown). Off by default so more memories fit the token budget.' },
         where: { description: 'Locate on the Current Truth Map. A topic string, or true to auto-locate from the files you edited recently. Returns your node, journey stage, blast radius, and the decision behind it.', anyOf: [{ type: 'string' }, { type: 'boolean' }] },
         project: { type: 'string', description: 'With where: the Map project slug, when several maps are imported.' },
@@ -536,7 +542,13 @@ function handleRemember(args: any): string {
     });
   }
 
-  const entityId = upsertEntity({ name: args.entity_name, kind: args.entity_kind, key: args.entity_key });
+  // supersedes: parse before anything is written; a malformed value refuses the whole call.
+  let supersedeIds: number[];
+  try { supersedeIds = parseSupersedesArg(args.supersedes); } catch (e) {
+    if (e instanceof SupersedeRefused) return JSON.stringify({ ok: false, rejected: 'supersedes', reason: e.message, saved: false });
+    throw e;
+  }
+
   const importance = Math.min(1, Math.max(0, Number(args.importance ?? 0.5)));
 
   // Auto-classify: if content is plain text (not JSON with 3-axis fields),
@@ -559,18 +571,42 @@ function handleRemember(args: any): string {
     rawContent = JSON.stringify(structured);
   }
 
-  const result = db
-    .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected, thread_id) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(entityId, layer, rawContent, importance, importance >= 0.9 ? 1 : 0, args.thread_id ?? null);
+  // Who wrote it: the client name/version the MCP host sent in initialize (self-reported).
+  const source = mcpSource(server.getClientVersion());
 
-  db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
-    entityId,
-    'memory_stored',
-    JSON.stringify({ layer, memory_id: result.lastInsertRowid })
-  );
+  // Entity, row, event, supersedes edges and the old rows' state change commit together or not
+  // at all: if any supersedes id cannot be confirmed, nothing — not even a new entity — is left.
+  let entityId: number, memoryId: number, supersededAnchors: number[] = [];
+  try {
+    ({ entityId, memoryId, supersededAnchors } = db.transaction(() => {
+      const eid = upsertEntity({ name: args.entity_name, kind: args.entity_kind, key: args.entity_key });
+      const result = db
+        .prepare('INSERT INTO memories (entity_id, layer, content, importance, protected, source, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(eid, layer, rawContent, importance, importance >= 0.9 ? 1 : 0, source, args.thread_id ?? null);
+      const mid = Number(result.lastInsertRowid);
+      // Checked after the INSERT so a self-reference is seen as one (the id exists only now);
+      // a refusal throws and the transaction rolls the INSERT back.
+      const oldRows = supersedeIds.length > 0 ? checkSupersedes(db, supersedeIds, eid, mid) : [];
+      if (oldRows.length > 0) applySupersedes(db, mid, oldRows);
+      db.prepare('INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)').run(
+        eid,
+        'memory_stored',
+        JSON.stringify(supersedeIds.length > 0 ? { layer, memory_id: mid, supersedes: supersedeIds } : { layer, memory_id: mid })
+      );
+      const anchors: number[] = [];
+      for (const r of oldRows) {
+        try { const c = JSON.parse(r.content); if (c && Number.isInteger(c.anchor_id)) anchors.push(c.anchor_id); } catch { /* plain text */ }
+      }
+      return { entityId: eid, memoryId: mid, supersededAnchors: anchors };
+    })());
+  } catch (e) {
+    if (e instanceof SupersedeRefused) {
+      return JSON.stringify({ ok: false, rejected: 'supersedes', memory_id: e.memoryId, reason: e.message, saved: false });
+    }
+    throw e;
+  }
 
   const mom = refreshMomentumForEntity(db, entityId);
-  const memoryId = Number(result.lastInsertRowid);
 
   const out: Record<string, unknown> = {
     ok: true,
@@ -580,6 +616,12 @@ function handleRemember(args: any): string {
     pinned: importance >= 0.9,
     momentum: { score: mom.score, band: mom.band },
   };
+  if (supersedeIds.length > 0) out.supersedes = supersedeIds;
+  if (supersededAnchors.length > 0) {
+    // The memory link does not touch the gate. Say so instead of retiring an anchor on our own.
+    out.anchors_still_enforced = supersededAnchors;
+    out.anchor_hint = `The superseded memory is enforced as anchor ${supersededAnchors.map((a) => '#' + a).join(', ')}; the gate still applies it. To retire it: resolve_drift({ anchor_id, action: 'supersede', superseded_by: <new anchor id> }).`;
+  }
 
   // "Remember" and "enforce" used to be two tools with two schemas, and an agent had to pick.
   // Picking remember meant the decision was stored but never re-injected — the exact failure
@@ -671,7 +713,7 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
            m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state, m.thread_id as _thread_id,
-           bm25(memories_fts) as bm25_score
+           m.source as _source, bm25(memories_fts) as bm25_score
     FROM memories_fts
     JOIN memories m ON m.id = memories_fts.rowid
     JOIN entities e ON e.id = m.entity_id
@@ -690,7 +732,7 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
            m.altitude as _altitude, m.mem_type as _mem_type, m.mem_state as _mem_state, m.thread_id as _thread_id,
-           0 as bm25_score
+           m.source as _source, 0 as bm25_score
     FROM memories m
     JOIN entities e ON e.id = m.entity_id
     WHERE 1=1
@@ -882,8 +924,36 @@ function handleRecall(args: any): string {
     };
   });
 
+  // Supersedes links among the candidates, both directions (indexed on both columns).
+  const supersededBy = new Map<number, number>();   // old id → newest id that supersedes it
+  const supersedesOf = new Map<number, number[]>(); // new id → old ids
+  const allIds = scored.map((r) => r.id);
+  for (let i = 0; i < allIds.length; i += 400) { // chunked: offset can make the pool large
+    const ids = allIds.slice(i, i + 400);
+    const ph = ids.map(() => '?').join(',');
+    const links = db.prepare(
+      `SELECT from_memory_id AS f, to_memory_id AS t FROM memory_edges
+        WHERE relation = 'supersedes' AND (from_memory_id IN (${ph}) OR to_memory_id IN (${ph}))
+        ORDER BY from_memory_id ASC`,
+    ).all(...ids, ...ids) as Array<{ f: number; t: number }>;
+    for (const l of links) {
+      if (supersededBy.has(l.t) && (supersedesOf.get(l.f) ?? []).includes(l.t)) continue; // seen in an earlier chunk
+      supersededBy.set(l.t, Math.max(supersededBy.get(l.t) ?? 0, l.f));
+      supersedesOf.set(l.f, [...(supersedesOf.get(l.f) ?? []), l.t]);
+    }
+  }
+  // Fold superseded rows by default: a reversed decision must not come back next to its
+  // replacement. Asking for them (include_superseded, or mem_state:'superseded') shows them.
+  const showSuperseded = args?.include_superseded === true || axis.mem_state === 'superseded';
+  let supersededHidden = 0;
+  const visible = showSuperseded ? scored : scored.filter((r) => {
+    const hide = supersededBy.has(r.id) || r._mem_state === 'superseded';
+    if (hide) supersededHidden++;
+    return !hide;
+  });
+
   // Apply band filter AFTER scoring (needs heat.band)
-  const filtered = band ? scored.filter((s) => s.heat_band === band) : scored;
+  const filtered = band ? visible.filter((s) => s.heat_band === band) : visible;
 
   // Sort by composite (best first)
   filtered.sort((a, b) => b.composite_score - a.composite_score);
@@ -933,6 +1003,10 @@ function handleRecall(args: any): string {
       content: parsedContent,
       importance: r.importance,
       pinned: r.importance >= 0.9,
+      // One short field each, only when the row has it (no tokens spent on absence).
+      ...(byFromSource(r._source) ? { by: byFromSource(r._source) } : {}),
+      ...(supersedesOf.has(r.id) ? { supersedes: supersedesOf.get(r.id)!.map((x) => `#${x}`).join(' ') } : {}),
+      ...(supersededBy.has(r.id) ? { superseded_by: supersededBy.get(r.id) } : {}),
       // Ranking internals only on request — they roughly double the per-memory cost and an
       // agent acting on the memory needs what/why/state, not the scorer's arithmetic.
       ...(args?.explain ? {
@@ -975,6 +1049,7 @@ function handleRecall(args: any): string {
       type: axis.mem_type ?? null,
       state: axis.mem_state ?? null,
     },
+    ...(supersededHidden > 0 ? { superseded_hidden: supersededHidden, superseded_hint: 'include_superseded: true to show them' } : {}),
     memories: memoriesOut,
   });
 }
@@ -1415,6 +1490,9 @@ async function handleRememberUnified(args: any): Promise<string> {
   }
   // Update mode
   if (args.memory_id) {
+    if (args.supersedes !== undefined && args.supersedes !== null) {
+      return JSON.stringify({ ok: false, rejected: 'supersedes', reason: 'supersedes applies when creating a memory, not when updating one (memory_id). Remember the new decision without memory_id and pass supersedes: <old id>.', saved: false });
+    }
     return handleUpdateMemory(args);
   }
   // Create mode (default). Only content is required; everything an agent used to have to

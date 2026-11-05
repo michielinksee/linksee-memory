@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.18.0 — unreleased (Reversal and who-wrote-it)
+
+No new MCP tools (still 7). Two optional arguments on existing tools. No schema change: the
+`memory_edges` table and the `memories.source` column were already there; nothing wrote them.
+
+### Added
+
+- **`remember({ content, supersedes: <id> | [<id>, …] })`** — the new memory replaces older ones.
+  Writes a `supersedes` edge (new → old) and sets the old memory's `state` to `superseded` with
+  `superseded_by` (plain-text memories keep their text; the edge marks them). The new row, the
+  edges and the state change are one transaction. Refused — and nothing is saved — when an id does
+  not exist, is the new memory itself, belongs to another entity, or is an undistilled raw capture
+  from a Claude Code session (the next import of that session would give it a new id and drop the
+  link). Not accepted together with `memory_id` (update). If the old memory was enforced as an
+  anchor, the reply names it; the anchor is not retired automatically (`resolve_drift` does that).
+- **`recall({ include_superseded })`** — superseded memories are hidden by default
+  (`superseded_hidden: <n>` says how many); `include_superseded: true` or `mem_state: "superseded"`
+  shows them, each with `superseded_by`. The newer memory carries `supersedes: "#<id>"`.
+- **`memories.source` for new rows.** Through MCP: `{"client","version","via":"mcp"}` from the
+  `clientInfo` the host sent in `initialize` (`{"client":"unknown","via":"mcp"}` without one). Stop
+  hook: the session keys plus `"client":"claude-code","via":"stop-hook"` (`"via":"import"` for a
+  manual import). `recall` adds `by: <client>` to rows that have one. The client name is
+  self-reported, not verified. Rows written before 0.18.0 are not back-filled.
+
+### Changed
+
+- `recall` now also hides memories that earlier versions marked `state: superseded` (distill triage,
+  the opt-in consolidate). They are still in the database; `include_superseded: true` shows them.
+- README "First round trip": a two-repo step (a decision recorded in repo A **is** returned in
+  repo B — memory is per machine, labelled by entity) and a reversal step.
+
+### Not changed (limits)
+
+- Nothing detects a reversal for you: the agent must pass the old id.
+- Two writers in the same moment: SQLite WAL with better-sqlite3's 5 s busy timeout. A save that
+  times out is reported as failed and writes nothing (tested with a held write lock); a real
+  two-client collision has not been reproduced beyond that.
+
 ## v0.17.2 — unreleased (Old databases, runtime cleanup)
 
 No new MCP tools (still 7). Two CLI subcommands, both run by hand.

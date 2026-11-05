@@ -155,7 +155,7 @@ open → decided → in_progress → done
 |---|---|---|
 | `affects` | string[] | File paths or areas this touches. Critical for future `recall_file` accuracy |
 | `next_action` | string / null | What should happen next. Null if done/completed |
-| `supersedes_id` | number / null | Memory ID this replaces (builds pivot chains) |
+| `supersedes_id` | number / null | Memory ID this replaces. Content only — the link that recall acts on is the `remember` argument `supersedes: <id>` (0.18.0) |
 | `prior_belief` | string | What we used to think (for learnings — enables belief-update tracking) |
 | `evidence_refs` | object[] | Links to evidence: `{"type": "session"|"file"|"url", "id": "...", "label": "..."}`. Store as REFERENCES, never inline the full content |
 
@@ -435,7 +435,7 @@ User: "Let's switch to Stripe for payments"
    → Look for: type="decision", state="decided" memories on the same topic
 2. If past decision found:
    a. Tell user: "Previously we decided <X> because <reason>. Override?"
-   b. If user confirms override → use supersedes_id to link to old decision
+   b. If user confirms override → `remember({ content, supersedes: <old memory_id> })` (recall then hides the old decision)
    c. If user says "oh right, keep it" → no new memory needed, proceed
 3. If no past decision found → proceed to record (see Case E below)
 ```

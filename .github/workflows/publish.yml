@@ -101,6 +101,7 @@ jobs:
           node test/remember-anchor.mjs
           node test/tool-surface.mjs
           node test/distill-triage.mjs
+          node test/supersede-source.mjs
 
       - name: MCP initialize + tools/list handshake
         run: |
