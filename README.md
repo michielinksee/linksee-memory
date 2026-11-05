@@ -22,7 +22,12 @@ npx -y linksee-memory setup                       # Claude Code: MCP server, ski
 codex mcp add linksee -- npx -y linksee-memory    # Codex: the same memory
 ```
 
-The plugin starts the server with `npx -y linksee-memory@latest` and ships the same skill `setup` installs; the Stop hook (auto-capture) and the [re-injection guard](docs/guard.md) are not in it, so run `setup` for those. Pick one of the two: with both, Claude Code lists the server twice (`linksee` and `plugin:linksee-memory:linksee`).
+The plugin starts the server with `npx -y linksee-memory@latest` and ships the same skill `setup` installs. It has no hooks: the Stop hook (auto-capture) and the [re-injection guard](docs/guard.md) come only from `setup`. One or the other, not both:
+
+- Already ran `setup`? Do not add the plugin. With both, Claude Code runs the server twice (`linksee` and `plugin:linksee-memory:linksee`).
+- Installed the plugin and want the hooks? Disable it (`/plugin` → Installed → linksee-memory → disable, or `claude plugin disable linksee-memory@linksee-memory`), then run `npx -y linksee-memory setup`. The memory file is the same; nothing is lost.
+- Plugin only: no hooks, so nothing is saved unless the agent calls `remember` (the skill tells it when).
+- Windows: after installing the plugin, run `/mcp` and check that `plugin:linksee-memory:linksee` is connected. If it is not, use the `setup` line below (it registers the server with `claude mcp add`, the form that is known to work on Windows).
 
 One command for Claude Code. `setup --dry-run` prints what it would change. It edits `~/.claude/settings.json`, so the hooks apply in every repo, and keeps the old file as `settings.json.bak-<timestamp>` ([what it writes](#what-setup-writes)).
 

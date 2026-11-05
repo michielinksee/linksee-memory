@@ -30,9 +30,11 @@ description: |
 
 Claude Code forgets everything when a session ends. The solution the user taught yesterday, the failure you hit today, the decision made three days ago — all of it is normally lost. **linksee-memory is the "memory that doesn't disappear" device.**
 
-Writes are handled automatically by the Stop hook (already running). But **reads require the agent to actively pull**. This skill instills that "go look first" habit in the agent.
+Writes happen automatically only when `linksee-memory setup` installed the Stop hook. The Claude Code plugin alone has no hooks: nothing is saved unless the agent calls `remember`. Either way, **reads require the agent to actively pull**. This skill instills that "go look first" habit in the agent.
 
-*JP: Claude Code は session が終わると全部忘れる。linksee-memory は「消えない記憶」を作る装置。書き込みは Stop hook が自動でやってくれるが、読み出しはエージェントが能動的にやる必要がある。*
+*JP: Claude Code は session が終わると全部忘れる。linksee-memory は「消えない記憶」を作る装置。書き込みの自動保存は `setup` で Stop hook を入れた場合だけ。plugin 単独では hook が無いので、`remember` を呼ばない限り何も保存されない。読み出しはどちらでもエージェントが能動的にやる必要がある。*
+
+**Tool names depend on how linksee-memory was installed.** The examples below use the short tool name (`recall`, `remember`, …). Registered with `npx -y linksee-memory setup` or `claude mcp add`, the full name is `mcp__linksee__<tool>`; installed as the Claude Code plugin, it is `mcp__plugin_linksee-memory_linksee__<tool>` ([why](https://code.claude.com/docs/en/mcp#plugin-provided-mcp-servers)). Use whichever is present in your tool list.
 
 ---
 
@@ -185,7 +187,7 @@ Before starting any new task, inject past context.
 **At the very beginning of a conversation**, use `list_entities` first to understand what you know:
 
 ```
-mcp__linksee__list_entities({ min_memories: 5, limit: 10 })
+list_entities({ min_memories: 5, limit: 10 })
 ```
 
 The returned "high-momentum entities" are the projects likely to be discussed. Each entity's `layer_breakdown` reveals patterns ("this project has many caveats", "goal is unfinished", etc.).
@@ -193,7 +195,7 @@ The returned "high-momentum entities" are the projects likely to be discussed. E
 Then, once a specific task starts, recall:
 
 ```
-mcp__linksee__recall({
+recall({
   query: "<keywords of current task — project name + technology>",
   max_tokens: 2000
 })
@@ -244,7 +246,7 @@ The recall engine uses FTS5 full-text search + heat_score ranking. Your query de
 Before touching a specific file, check its edit history:
 
 ```
-mcp__linksee__recall_file({
+recall_file({
   path_substring: "<file path or substring match>",
   max_intents: 5
 })
@@ -259,7 +261,7 @@ Returns: the file's entire edit history + **the user message that drove each edi
 When you need to read a file, **use `read_smart` instead of the standard `Read` tool**:
 
 ```
-mcp__linksee__read_smart({
+read_smart({
   path: "<absolute path>"
 })
 ```
@@ -290,7 +292,7 @@ update_memory({
 The moment an error, failure, or "doesn't work" happens, record immediately:
 
 ```
-mcp__linksee__remember({
+remember({
   entity_name: "<project name or service name>",
   entity_kind: "project",
   layer: "caveat",
@@ -330,7 +332,7 @@ mcp__linksee__remember({
 When you understand something new, change approaches, or solve a problem:
 
 ```
-mcp__linksee__remember({
+remember({
   entity_name: "<entity>",
   entity_kind: "project | concept | ...",
   layer: "learning",
@@ -714,7 +716,7 @@ Now you have both bodies of knowledge before starting
 
 | Moment | recall precision | Why |
 |---|---|---|
-| Day 1 | low (little data) | Stop hook is still collecting |
+| Day 1 | low (little data) | the Stop hook (if `setup` installed it) or your own `remember` calls are still collecting |
 | Week 1 | medium | thousands of memories, FTS5 kicks in |
 | Month 1 | high | heat_score stabilizes, important memories surface |
 | Month 3+ | strongest | learnings crystallized (distilled) |
@@ -724,6 +726,6 @@ Now you have both bodies of knowledge before starting
 ---
 
 *This skill runs on top of linksee-memory MCP v0.4.0+.*
-*Auto-write via Stop hook, explicit read via recall.*
+*Auto-write via the Stop hook when `setup` installed it (the plugin has no hooks), explicit read via recall.*
 *Listed in MCP Official Registry, PulseMCP, mcpservers.org, Glama.*
 *MIT License — Synapse Arrows PTE. LTD.*
