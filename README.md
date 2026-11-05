@@ -21,6 +21,8 @@ A new install has an empty memory, so "how did we solve this before?" finds noth
 
 1. In Claude Code or Codex, say: *"Remember: in this repo we decided to use X, because Y. Use Linksee."*
 2. Open a **new** session — in either one — and ask: *"What did we decide about X? Use Linksee."*
+3. Two repos: record a decision in repo A, then in repo B (e.g. Codex) ask the same. It **does** come back — the memory is per machine, not per repo — labelled `entity: repo-a` and `by: <client>`; `entity_name` on the recall narrows by a part of the entity name (`repo-a` also matches `repo-a-backup`).
+4. Reverse it: `remember` the new decision with `supersedes: <old memory_id>`. `recall` then shows only the new one (`supersedes #<id>`); `include_superseded: true` shows both.
 
 ## What it does not do
 
@@ -100,7 +102,7 @@ an agent can hold without a manual.
 | Tool | What it does |
 |---|---|
 | `recall` | **Start here.** No arguments → the **session brief**: what needs attention, where you are on the Map, open loops, top entities. `query` → search; `path` → a file's edit history with the user intent behind each edit; `where: "<topic>"` → your position on the Current Truth Map + blast radius; `dream: true` → the triage session (North Star, orphaned proposals, distill queue, friction). |
-| `remember` | **Save / update / delete.** `content` is the only required field — entity and layer default to the project you're in. Add `anchor: {}` to also record it as a decision (in Claude Code, re-injected on session start and before a matching Edit/Write/Bash); add `violation_signal` to it so a contradicting edit can be detected. |
+| `remember` | **Save / update / delete.** `content` is the only required field — entity and layer default to the project you're in. Add `anchor: {}` to also record it as a decision (in Claude Code, re-injected on session start and before a matching Edit/Write/Bash); add `violation_signal` to it so a contradicting edit can be detected. `supersedes: <id>` replaces an older memory of the same entity (recall hides the old one). |
 | `read_smart` | **Token-saving file reader** with AST diff caching. Re-read unchanged = ~50 tokens; modified = changed chunks only. |
 | `drift_status` | **"What's drifting right now?"** The truth map: 🔴 drift / 🟡 review / ⚪ held / 🔵 verified / ⚫ unverified, with the evidence for each. `anchor_id` → deep-dive into one decision. |
 | `declare_anchor` | **Record a normative claim** — `decision` / `prohibition` / `constraint` the detector checks against reality, or `proposal`: an option you presented that the user never addressed, parked as a review item. |

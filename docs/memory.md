@@ -72,6 +72,14 @@ Each entity (person / company / project / file / concept) can have memories acro
 - `goal` memories bypass decay while the goal is active.
 - `state` tracks lifecycle: `open` → `decided` → `in_progress` → `done` / `stalled` / `superseded`.
 
+### Replacing a memory (`supersedes`, 0.18.0)
+
+`remember({ content, supersedes: <id> | [<id>, …] })` saves the new memory, writes a `supersedes` row in `memory_edges` (new → old) and sets the old memory's `state` to `superseded` with `superseded_by: <new id>` (a plain-text memory keeps its text; the edge alone marks it). It is refused, and nothing is saved, if an id does not exist, is the new memory itself, belongs to another entity, or is a raw capture from a Claude Code session that has not been distilled (the next import of that session gives it a new id). It works only when creating, not with `memory_id`, and only with plain text or JSON that has all of `altitude` / `type` / `state` — a JSON object or array missing any of them is refused (its state could not be confirmed); a JSON string or number is treated as plain text, since it carries no state to lose; without `supersedes` it is re-wrapped as before. `recall` hides superseded memories by default and says how many (`superseded_hidden`); `include_superseded: true` shows them; a memory that is the target of a link carries `superseded_by` (`mem_state: "superseded"` shows the ones whose state says so; a plain-text memory marked only by the link is not among them). The newer memory carries `supersedes: "#<id>"`. If its state was guessed from the text as `superseded` (「代わりに」, "replaced" describe the old decision), it is stored as `decided`; an explicit `state: "superseded"` together with `supersedes` is refused. Older memories that earlier versions marked `superseded` (distill triage, the opt-in consolidate) are hidden the same way. Superseding a memory does not retire an anchor declared from it — the reply names the anchor, and `resolve_drift({ action: 'supersede' })` retires it. Nothing finds the old memory for you: the agent has to pass its id.
+
+### Who wrote it (`source`, 0.18.0)
+
+Each memory saved through MCP records the client the host named in `initialize`: `source = {"client": "<name>", "version": "<v>", "via": "mcp"}`, or `{"client": "unknown", "via": "mcp"}` when the host sent none. Memories imported by the Claude Code Stop hook add `"client": "claude-code", "via": "stop-hook"` to their session keys (`"via": "import"` for a manual import); consolidate keeps `{"origin": "consolidate"}`. `recall` adds `by: <client>` to each memory that has one. The name is what the client says about itself — it is not verified, and it says which program wrote the memory, not which model or person. Memories saved before 0.18.0 have no client and are not back-filled.
+
 ## Architecture
 
 A single SQLite file (`better-sqlite3` + FTS5 trigram tokenizer for JP/EN) contains five layers:

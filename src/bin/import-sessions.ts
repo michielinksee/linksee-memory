@@ -79,7 +79,17 @@ async function main() {
   const scanAll = args.includes('--all');
   const sessionFileIdx = args.indexOf('--session-file');
   const sessionFile = sessionFileIdx >= 0 ? args[sessionFileIdx + 1] : null;
-  const projectArgs = args.filter((a, i) => !a.startsWith('--') && (sessionFileIdx < 0 || i !== sessionFileIdx + 1));
+  // --via stop-hook is passed by sync-session (the Claude Code Stop hook). Anything else is a
+  // manual or batch import. Recorded in memories.source next to the session keys (0.18.0).
+  const viaIdx = args.indexOf('--via');
+  const via = viaIdx >= 0 && args[viaIdx + 1] === 'stop-hook' ? 'stop-hook' : 'import';
+  const projectArgs = args.filter((a, i) => !a.startsWith('--')
+    && (sessionFileIdx < 0 || i !== sessionFileIdx + 1)
+    && (viaIdx < 0 || i !== viaIdx + 1));
+  // The session keys are kept as they were: wipeSession and makeDistilledTurnSet find these rows
+  // by the substring `"session_id":"…"` (position does not matter, the exact text does).
+  // Known, not changed here: wipeSession runs outside the re-insert transaction.
+  const sourceJson = (src: object): string => JSON.stringify({ ...src, client: 'claude-code', via });
 
   // Single-file mode (used by the Stop hook)
   if (sessionFile) {
@@ -139,7 +149,7 @@ async function main() {
       const memContentToId = new Map<string, number>();
       for (const m of result.memories) {
         if (m.source.turn_uuid && distilledTurns.has(m.source.turn_uuid)) continue; // distilled rewrite wins
-        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, JSON.stringify(m.source), m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
+        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, sourceJson(m.source), m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
         memContentToId.set(m.content, Number(res.lastInsertRowid));
         inserted.memories++;
       }
@@ -262,7 +272,7 @@ async function main() {
 
         for (const m of result.memories) {
           if (m.source.turn_uuid && distilledTurns.has(m.source.turn_uuid)) continue; // distilled rewrite wins
-          const srcJson = JSON.stringify(m.source);
+          const srcJson = sourceJson(m.source);
           const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson, m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
           memContentToId.set(m.content, Number(res.lastInsertRowid));
           agg.memories_inserted++;

@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const r = spawnSync(process.execPath, [importerPath, '--session-file', transcriptPath], {
+  const r = spawnSync(process.execPath, [importerPath, '--session-file', transcriptPath, '--via', 'stop-hook'], {
     encoding: 'utf8',
     timeout: 30000,
   });

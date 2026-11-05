@@ -1,6 +1,73 @@
 # Changelog
 
-## v0.17.2 — unreleased (Old databases, runtime cleanup)
+## v0.18.0 — unreleased (Reversal and who-wrote-it)
+
+No new MCP tools (still 7) and no schema change (the `memory_edges` table and the
+`memories.source` column were already there; nothing wrote them). Two optional arguments on
+existing tools — **and one change to what a default `recall` returns: superseded memories are
+hidden, including the ones earlier versions already marked `state: superseded`** (about 112 on the
+maintainer's database; still in the DB, `include_superseded: true` shows them).
+
+### Added
+
+- **`remember({ content, supersedes: <id> | [<id>, …] })`** — the new memory replaces older ones.
+  Writes a `supersedes` edge (new → old) and sets the old memory's `state` to `superseded` with
+  `superseded_by` (plain-text memories keep their text; the edge marks them). The new row, the
+  edges and the state change are one transaction. Refused — and nothing is saved — when an id does
+  not exist, is the new memory itself, belongs to another entity, or is an undistilled raw capture
+  from a Claude Code session (the next import of that session would give it a new id and drop the
+  link). Also refused, with nothing written: content that is a JSON object or array missing any of
+  `altitude` / `type` / `state` (it would be re-wrapped and its state re-guessed, so an explicit
+  state in it could not be confirmed) — send plain text, or JSON with all three. A JSON string or number is treated as plain text (it carries no state to lose). Without
+  `supersedes` such JSON is re-wrapped as before. Not accepted together with `memory_id` (update). If the old memory was enforced as an
+  anchor, the reply names it; the anchor is not retired automatically (`resolve_drift` does that).
+- **`recall({ include_superseded })`** — superseded memories are hidden by default
+  (`superseded_hidden` says how many); `include_superseded: true` shows them. `mem_state:
+  "superseded"` shows the ones whose state says so — a plain-text memory marked only by a link is
+  not among them. A memory that is the target of a link carries `superseded_by` (rows marked
+  superseded by earlier versions, with no link, do not). The newer memory carries
+  `supersedes: "#<id>"`.
+- **`memories.source` for new rows.** Through MCP: `{"client","version","via":"mcp"}` from the
+  `clientInfo` the host sent in `initialize` (`{"client":"unknown","via":"mcp"}` without one). Stop
+  hook: the session keys plus `"client":"claude-code","via":"stop-hook"` (`"via":"import"` for a
+  manual import). `recall` adds `by: <client>` to rows that have one. The client name is
+  self-reported, not verified. Rows written before 0.18.0 are not back-filled.
+
+### Changed
+
+- **Default `recall` hides superseded memories** — rows that are the target of a `supersedes` link
+  and rows already marked `state: superseded` by earlier versions (distill triage, the opt-in
+  consolidate). They are left out in SQL before the result limit, so a pile of them cannot crowd a
+  current memory out. They are still in the database; `include_superseded: true` shows them.
+- A memory saved with `supersedes` is the current one (content: plain text, or JSON with all of
+  altitude/type/state — partial JSON is refused). Only when its state was **guessed from the
+  text** as `superseded` (「代わりに」, "replaced" describe the old decision) is it stored as
+  `decided`, and the reply says so (`state_note`). A state given **explicitly** in the content is
+  kept; an explicit `state: "superseded"` together with `supersedes` contradicts itself and is
+  refused, with nothing written.
+- The superseded filter is NULL-safe: plain-text memories and JSON without a `state` stay visible.
+- `remember` no longer reports a saved memory as failed when the momentum refresh after the save
+  fails; the save stands and `warnings` says what failed (a retry would have saved it twice).
+- README "First round trip": a two-repo step (a decision recorded in repo A **is** returned in
+  repo B — memory is per machine, labelled by entity; `entity_name` narrows by a part of the entity
+  name, so `repo-a` also matches `repo-a-backup`) and a reversal step.
+
+### Not changed (limits)
+
+- Nothing detects a reversal for you: the agent must pass the old id.
+- The Stop-hook re-import still deletes a session's raw rows outside the transaction that
+  re-inserts them (unchanged from 0.17.x). Next version.
+- After-save problems are reported three ways: `warnings` (momentum), `anchor_error` (anchor
+  declaration), and nothing when writing the anchor id back into the memory fails; the existing
+  "remember again" hint can lead to a second save. Next version: one `warnings` field.
+- `superseded_hidden` is a number, or the string `"1000+"` when the count reaches the cap. It
+  costs one or two extra searches per recall (they read row content). Next version: one type and
+  a cheaper count.
+- Two writers in the same moment: SQLite WAL with better-sqlite3's 5 s busy timeout. A save that
+  times out is reported as failed and writes nothing (tested with a held write lock); a real
+  two-client collision has not been reproduced beyond that.
+
+## v0.17.2 — 2026-11-04 (Old databases, runtime cleanup)
 
 No new MCP tools (still 7). Two CLI subcommands, both run by hand.
 
