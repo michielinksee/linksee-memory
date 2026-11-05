@@ -202,6 +202,31 @@ try {
     check('guessed "superseded" + supersedes → stored as decided, with state_note', guessed.ok === true && typeof guessed.state_note === 'string' && db.prepare('SELECT mem_state s FROM memories WHERE id = ?').get(guessed.memory_id).s === 'decided', JSON.stringify(guessed).slice(0, 200));
   }
 
+  // ①g Partial JSON (missing any of altitude/type/state) + supersedes → refused, nothing written,
+  //     whatever state it names. Without supersedes the old re-wrap is unchanged.
+  {
+    const target = await a.call('remember', { entity_name: 'repo-a', content: 'partial-json target: deploy on Fridays' });
+    const partials = [];
+    for (const st of ['superseded', 'decided', 'in_progress']) partials.push({ state: st, what: `partial-json: deploy Mondays (${st})` });
+    partials.push({ type: 'decision', what: 'partial-json: deploy Mondays (type only)' });
+    partials.push({ altitude: 'implementation', what: 'partial-json: deploy Mondays (altitude only)' });
+    partials.push({ altitude: 'implementation', type: 'decision', what: 'partial-json: deploy Mondays (no state)' });
+    partials.push({ altitude: 'implementation', type: 'decision', state: '', what: 'partial-json: deploy Mondays (empty state)' });
+    partials.push(['partial-json', 'array']);
+    for (const pj of partials) {
+      const before = snap();
+      const targetContent = db.prepare('SELECT content c FROM memories WHERE id = ?').get(target.memory_id).c;
+      const r = await a.call('remember', { entity_name: 'repo-a', content: JSON.stringify(pj), supersedes: target.memory_id });
+      check(`partial JSON ${JSON.stringify(pj).slice(0, 50)} + supersedes → refused`, r.ok === false && r.rejected === 'supersedes' && /altitude, type and state/.test(r.reason ?? ''), JSON.stringify(r).slice(0, 160));
+      check('…nothing written, target untouched', snap() === before && db.prepare('SELECT content c FROM memories WHERE id = ?').get(target.memory_id).c === targetContent, `${before} → ${snap()}`);
+    }
+    const noSupPartial = await a.call('remember', { entity_name: 'repo-a', content: JSON.stringify({ state: 'in_progress', what: 'partial-json without supersedes' }) });
+    const stored = noSupPartial.ok ? JSON.parse(db.prepare('SELECT content c FROM memories WHERE id = ?').get(noSupPartial.memory_id).c) : null;
+    check('partial JSON without supersedes is still re-wrapped as before', noSupPartial.ok === true && typeof stored?.what === 'string' && stored.what.includes('partial-json without supersedes') && !!stored.altitude && !!stored.type && !!stored.state, JSON.stringify(stored).slice(0, 160));
+    const plainOk = await a.call('remember', { entity_name: 'repo-a', content: 'partial-json: deploy on Mondays, plain text', supersedes: target.memory_id });
+    check('plain text + supersedes still accepted', plainOk.ok === true, JSON.stringify(plainOk).slice(0, 160));
+  }
+
   // ①d momentum refresh fails AFTER the commit → still ok:true (with a warning), saved exactly once.
   db.exec(`CREATE TRIGGER t_fail_mom BEFORE UPDATE OF momentum_score ON entities BEGIN SELECT RAISE(ABORT, 'injected momentum failure'); END`);
   const momText = 'saved even though the momentum refresh fails';

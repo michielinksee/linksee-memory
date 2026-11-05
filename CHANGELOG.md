@@ -16,11 +16,17 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
   edges and the state change are one transaction. Refused — and nothing is saved — when an id does
   not exist, is the new memory itself, belongs to another entity, or is an undistilled raw capture
   from a Claude Code session (the next import of that session would give it a new id and drop the
-  link). Not accepted together with `memory_id` (update). If the old memory was enforced as an
+  link). Also refused, with nothing written: content that is a JSON object missing any of
+  `altitude` / `type` / `state` (it would be re-wrapped and its state re-guessed, so an explicit
+  state in it could not be confirmed) — send plain text, or JSON with all three. Without
+  `supersedes` such JSON is re-wrapped as before. Not accepted together with `memory_id` (update). If the old memory was enforced as an
   anchor, the reply names it; the anchor is not retired automatically (`resolve_drift` does that).
 - **`recall({ include_superseded })`** — superseded memories are hidden by default
-  (`superseded_hidden: <n>` says how many); `include_superseded: true` or `mem_state: "superseded"`
-  shows them, each with `superseded_by`. The newer memory carries `supersedes: "#<id>"`.
+  (`superseded_hidden` says how many); `include_superseded: true` shows them. `mem_state:
+  "superseded"` shows the ones whose state says so — a plain-text memory marked only by a link is
+  not among them. A memory that is the target of a link carries `superseded_by` (rows marked
+  superseded by earlier versions, with no link, do not). The newer memory carries
+  `supersedes: "#<id>"`.
 - **`memories.source` for new rows.** Through MCP: `{"client","version","via":"mcp"}` from the
   `clientInfo` the host sent in `initialize` (`{"client":"unknown","via":"mcp"}` without one). Stop
   hook: the session keys plus `"client":"claude-code","via":"stop-hook"` (`"via":"import"` for a
@@ -33,7 +39,8 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
   and rows already marked `state: superseded` by earlier versions (distill triage, the opt-in
   consolidate). They are left out in SQL before the result limit, so a pile of them cannot crowd a
   current memory out. They are still in the database; `include_superseded: true` shows them.
-- A memory saved with `supersedes` is the current one. Only when its state was **guessed from the
+- A memory saved with `supersedes` is the current one (content: plain text, or JSON with all of
+  altitude/type/state — partial JSON is refused). Only when its state was **guessed from the
   text** as `superseded` (「代わりに」, "replaced" describe the old decision) is it stored as
   `decided`, and the reply says so (`state_note`). A state given **explicitly** in the content is
   kept; an explicit `state: "superseded"` together with `supersedes` contradicts itself and is
@@ -49,7 +56,13 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
 
 - Nothing detects a reversal for you: the agent must pass the old id.
 - The Stop-hook re-import still deletes a session's raw rows outside the transaction that
-  re-inserts them (unchanged from 0.17.x).
+  re-inserts them (unchanged from 0.17.x). Next version.
+- After-save problems are reported three ways: `warnings` (momentum), `anchor_error` (anchor
+  declaration), and nothing when writing the anchor id back into the memory fails; the existing
+  "remember again" hint can lead to a second save. Next version: one `warnings` field.
+- `superseded_hidden` is a number, or the string `"1000+"` when the count reaches the cap. It
+  costs one or two extra searches per recall (they read row content). Next version: one type and
+  a cheaper count.
 - Two writers in the same moment: SQLite WAL with better-sqlite3's 5 s busy timeout. A save that
   times out is reported as failed and writes nothing (tested with a held write lock); a real
   two-client collision has not been reproduced beyond that.

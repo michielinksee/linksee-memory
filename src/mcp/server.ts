@@ -219,7 +219,7 @@ const TOOLS = [
         memory_id: { type: 'number', description: 'Set to update an existing memory instead of creating. Only content/layer/importance are changed.' },
         forget: { type: 'boolean', default: false, description: 'Set true + memory_id to delete a memory. Caveat-layer and pinned memories cannot be deleted.' },
         supersedes: {
-          description: 'Create mode only: the memory id(s) this new memory replaces (a reversed or updated decision). Writes a supersedes link and marks the old memory superseded; recall then hides it unless include_superseded is true. Refused — and nothing is saved — if an id does not exist, belongs to another entity, or is a raw session capture.',
+          description: 'Create mode only: the memory id(s) this new memory replaces (a reversed or updated decision). Writes a supersedes link and marks the old memory superseded; recall then hides it unless include_superseded is true. Refused — and nothing is saved — if an id does not exist, belongs to another entity, or is a raw session capture — and when content is JSON missing any of altitude/type/state (send plain text or all three).',
           anyOf: [{ type: 'number' }, { type: 'array', items: { type: 'number' } }],
         },
       },
@@ -560,6 +560,21 @@ function handleRemember(args: any): string {
       isAlreadyStructured = true;
     }
   } catch { /* not JSON = needs wrapping */ }
+
+  // With supersedes, a JSON object that lacks any of altitude/type/state is refused before
+  // anything is written: it would be re-wrapped as {what: "<the JSON>"} and its state re-guessed,
+  // so an explicit state in it could not be honoured or even confirmed. No clever rescue —
+  // plain text, or JSON with all three, only.
+  if (supersedeIds.length > 0 && !isAlreadyStructured) {
+    let parsedObj = false;
+    try { const p = JSON.parse(rawContent); parsedObj = p !== null && typeof p === 'object'; } catch { /* plain text */ }
+    if (parsedObj) {
+      return JSON.stringify({
+        ok: false, rejected: 'supersedes', saved: false,
+        reason: 'with supersedes, content must be plain text or JSON with all of altitude, type and state. This JSON lacks at least one, so its state cannot be confirmed. Send the content as plain text, or add altitude/type/state, and save again.',
+      });
+    }
+  }
 
   if (!isAlreadyStructured) {
     const structured = {
