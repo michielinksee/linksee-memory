@@ -33,9 +33,12 @@ maintainer's database; still in the DB, `include_superseded: true` shows them).
   and rows already marked `state: superseded` by earlier versions (distill triage, the opt-in
   consolidate). They are left out in SQL before the result limit, so a pile of them cannot crowd a
   current memory out. They are still in the database; `include_superseded: true` shows them.
-- A memory saved with `supersedes` is stored as current: if the text-based guess would have
-  called it `superseded` ("instead of", 「代わりに」 describe the old decision), its state is
-  `decided` and the reply says so (`state_note`).
+- A memory saved with `supersedes` is the current one. Only when its state was **guessed from the
+  text** as `superseded` (「代わりに」, "replaced" describe the old decision) is it stored as
+  `decided`, and the reply says so (`state_note`). A state given **explicitly** in the content is
+  kept; an explicit `state: "superseded"` together with `supersedes` contradicts itself and is
+  refused, with nothing written.
+- The superseded filter is NULL-safe: plain-text memories and JSON without a `state` stay visible.
 - `remember` no longer reports a saved memory as failed when the momentum refresh after the save
   fails; the save stands and `warnings` says what failed (a retry would have saved it twice).
 - README "First round trip": a two-repo step (a decision recorded in repo A **is** returned in

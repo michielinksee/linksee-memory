@@ -571,20 +571,26 @@ function handleRemember(args: any): string {
     rawContent = JSON.stringify(structured);
   }
 
-  // A memory that names what it supersedes IS the current decision. The text-based guess
-  // (inferState) reads "instead of" / 「代わりに」 — words about the OLD decision — as this row
-  // being superseded, which would hide the new row next to the old one. With an explicit
-  // supersedes, the new row is never stored as superseded.
+  // A memory that names what it supersedes IS the current decision.
+  //  • State GUESSED from the text (inferState reads 「代わりに」 / "replaced" — words about the
+  //    OLD decision — as this row being superseded): corrected to 'decided', and the reply says so.
+  //  • State given EXPLICITLY as 'superseded' together with supersedes: the two contradict each
+  //    other and we cannot tell which one the caller meant, so nothing is written.
   let stateNote: string | undefined;
   if (supersedeIds.length > 0) {
-    try {
-      const c = JSON.parse(rawContent);
-      if (c && typeof c === 'object' && c.state === 'superseded') {
-        c.state = 'decided';
-        rawContent = JSON.stringify(c);
-        stateNote = 'state set to "decided": a memory that supersedes another is the current one';
+    let c: any;
+    try { c = JSON.parse(rawContent); } catch { c = null; /* structured above, always JSON */ }
+    if (c && typeof c === 'object' && c.state === 'superseded') {
+      if (isAlreadyStructured) {
+        return JSON.stringify({
+          ok: false, rejected: 'supersedes', saved: false,
+          reason: 'content says state "superseded" but the memory also supersedes another one — a memory that replaces an older one is the current one. Remove state "superseded" (or set the state you mean) and save again.',
+        });
       }
-    } catch { /* structured above, always JSON */ }
+      c.state = 'decided';
+      rawContent = JSON.stringify(c);
+      stateNote = 'the state guessed from the text was "superseded"; stored as "decided" because this memory supersedes another one';
+    }
   }
 
   // Who wrote it: the client name/version the MCP host sent in initialize (self-reported).
@@ -736,7 +742,9 @@ function appendAxisFilters(sql: string, params: any[], filters: AxisFilters): st
 // Applied in SQL, BEFORE the LIMIT — filtering after it let a pile of superseded rows fill the
 // candidate pool and return nothing while a current memory existed (Codex review 1 of #21).
 type SupersededMode = 'exclude' | 'include' | 'only';
-const SUPERSEDED_SQL = `(m.mem_state = 'superseded' OR EXISTS (SELECT 1 FROM memory_edges me WHERE me.to_memory_id = m.id AND me.relation = 'supersedes'))`;
+// NULL-safe: plain-text rows and JSON without a state have mem_state NULL, and
+// `NOT (NULL = 'superseded' OR …)` is NULL — which would drop them (Codex review 2 of #21).
+const SUPERSEDED_SQL = `(COALESCE(m.mem_state, '') = 'superseded' OR EXISTS (SELECT 1 FROM memory_edges me WHERE me.to_memory_id = m.id AND me.relation = 'supersedes'))`;
 function appendSupersededFilter(sql: string, mode: SupersededMode): string {
   if (mode === 'exclude') return sql + ` AND NOT ${SUPERSEDED_SQL}`;
   if (mode === 'only') return sql + ` AND ${SUPERSEDED_SQL}`;

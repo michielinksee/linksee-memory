@@ -154,6 +154,54 @@ try {
   const rb3 = await a.call('recall', { query: 'bulkdecision variant', include_superseded: true, limit: 200, mark_accessed: false });
   check('include_superseded brings them back', (rb3.memories ?? []).filter((m) => m.content?.state === 'superseded').length > 0);
 
+  // ①e NULL-safe exclusion. Five kinds of row, both search paths: plain text (mem_state NULL),
+  //     JSON without a state (NULL), state 'decided', state 'superseded', and a plain-text row
+  //     replaced by an edge only. The first three must come back, the last two must not.
+  {
+    const ent = Number(db.prepare(`INSERT INTO entities (kind, name, normalized_name) VALUES ('project', 'nullsafe-proj', 'nullsafe-proj')`).run().lastInsertRowid);
+    const ins = (content) => Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance) VALUES (?, 'context', ?, 0.5)`).run(ent, content).lastInsertRowid);
+    const kinds = {
+      plain: ins('nsfx plain row q7 then omega'),
+      nostate: ins(JSON.stringify({ what: 'nsfx nostate row q7 then omega' })),
+      decided: ins(JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'decided', what: 'nsfx decided row q7 then omega' })),
+      superseded: ins(JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'superseded', what: 'nsfx superseded row q7 then omega' })),
+      edgeonly: ins('nsfx edgeonly row q7 then omega'),
+    };
+    db.prepare(`INSERT INTO memory_edges (from_memory_id, to_memory_id, relation) VALUES (?, ?, 'supersedes')`).run(kinds.decided, kinds.edgeonly);
+    check('fixture: plain and no-state rows have mem_state NULL', db.prepare('SELECT COUNT(*) n FROM memories WHERE id IN (?, ?) AND mem_state IS NULL').get(kinds.plain, kinds.nostate).n === 2);
+    const want = [kinds.plain, kinds.nostate, kinds.decided].sort((x, y) => x - y);
+    const all = Object.values(kinds).sort((x, y) => x - y);
+    const ours = (r) => (r.memories ?? []).map((m) => m.id).filter((id) => all.includes(id)).sort((x, y) => x - y);
+    for (const [label, args, method] of [
+      ['FTS only ("nsfx omega": tokens not adjacent, LIKE cannot match)', { query: 'nsfx omega' }, 'fts5'],
+      ['LIKE only ("q7": too short for the trigram index)', { query: 'q7' }, 'like'],
+      ['LIKE by entity_name', { entity_name: 'nullsafe-proj' }, 'like'],
+    ]) {
+      const r = await a.call('recall', { ...args, mark_accessed: false, limit: 50 });
+      check(`${label}: search path is ${method}`, r.search === method, String(r.search));
+      check(`${label}: plain / no-state / decided returned, superseded / edge-only not`, JSON.stringify(ours(r)) === JSON.stringify(want), `${JSON.stringify(ours(r))} want ${JSON.stringify(want)} kinds=${JSON.stringify(kinds)}`);
+      check(`${label}: superseded_hidden counts exactly the 2`, r.superseded_hidden === 2, String(r.superseded_hidden));
+      const ri = await a.call('recall', { ...args, include_superseded: true, mark_accessed: false, limit: 50 });
+      check(`${label}: include_superseded returns all 5`, JSON.stringify(ours(ri)) === JSON.stringify(all), JSON.stringify(ours(ri)));
+    }
+  }
+
+  // ①f Explicit state vs supersedes. Explicit "superseded" + supersedes contradict → refused, nothing
+  //     written. An explicit "decided" is kept as given. (Guessed "superseded" → decided is ①b.)
+  {
+    const target = await a.call('remember', { entity_name: 'repo-a', content: 'explicit-state target: use tabs' });
+    const before = snap();
+    const contra = await a.call('remember', { entity_name: 'repo-a', supersedes: target.memory_id,
+      content: JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'superseded', what: 'explicit-state: use spaces' }) });
+    check('explicit state "superseded" + supersedes → refused', contra.ok === false && contra.rejected === 'supersedes' && /state "superseded"/.test(contra.reason ?? ''), JSON.stringify(contra).slice(0, 200));
+    check('…and nothing was written', snap() === before && db.prepare('SELECT mem_state s FROM memories WHERE id = ?').get(target.memory_id).s !== 'superseded', `${before} → ${snap()}`);
+    const exp = await a.call('remember', { entity_name: 'repo-a', supersedes: target.memory_id,
+      content: JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'in_progress', what: 'explicit-state: moving to spaces' }) });
+    check('explicit state other than superseded is kept as given (no state_note)', exp.ok === true && exp.state_note === undefined && db.prepare('SELECT mem_state s FROM memories WHERE id = ?').get(exp.memory_id).s === 'in_progress', JSON.stringify(exp).slice(0, 160));
+    const guessed = await a.call('remember', { entity_name: 'repo-a', content: '旧版の設定を置き換え、新しい lint 設定にする', supersedes: exp.memory_id });
+    check('guessed "superseded" + supersedes → stored as decided, with state_note', guessed.ok === true && typeof guessed.state_note === 'string' && db.prepare('SELECT mem_state s FROM memories WHERE id = ?').get(guessed.memory_id).s === 'decided', JSON.stringify(guessed).slice(0, 200));
+  }
+
   // ①d momentum refresh fails AFTER the commit → still ok:true (with a warning), saved exactly once.
   db.exec(`CREATE TRIGGER t_fail_mom BEFORE UPDATE OF momentum_score ON entities BEGIN SELECT RAISE(ABORT, 'injected momentum failure'); END`);
   const momText = 'saved even though the momentum refresh fails';
