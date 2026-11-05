@@ -119,7 +119,7 @@ nodes:
   - id: readme
     layer: surface
     stage: understand
-    statement: README=事実上の主LP — Three spells/Quick Start/11 Tools/Pricing/Telemetry契約
+    statement: README=事実上の主LP — Three spells/Quick Start/7 Tools/Support and license/Telemetry契約
     status: active
     reality:
       # section_contains: 「where_am_i」という文字列がどこかに在るだけでなく、Toolsセクション内に
@@ -270,7 +270,7 @@ nodes:
   - id: pro-offer
     layer: surface
     stage: monetize
-    statement: Pro=Summer 2026(デバイス間同期+チーム共有)。線引き=ドリフト+記憶コアは永久ローカル無料
+    statement: 現状=Free・MIT・ローカルのみ(local only)。Pro は提供していない(予約欄も 2026-11 に撤去)。ドリフト+記憶コアはローカル無料
     status: commitment
     facets: [revenue]
 
@@ -316,9 +316,9 @@ nodes:
   # ── 実装 implementation ────────────────────────────────────────
   - id: mcp-server
     layer: implementation
-    statement: MCPサーバー11ツール(remember/recall/read_smart/where_am_i/dream/check_decision/anchor・drift・proposal系)
+    statement: MCPサーバー7ツール(recall/remember/read_smart/drift_status/declare_anchor/resolve_drift/share_draft。旧5名は畳み込み・呼べば応答)
     status: active
-    reality:                       # READMEの「11 tools」とコードのツール数が一致しているか
+    reality:                       # READMEの旧名説明(where_am_i)とコードの定義が一致しているか(ツール数は検証していない)
       checks:
         - { claim: 'server.ts に where_am_i ツールが登録されている', kind: regex_present, path: src/mcp/server.ts, pattern: "name:\\s*'where_am_i'" }
     facets: [engineering]
