@@ -1,0 +1,17 @@
+{
+  "name": "linksee-memory",
+  "description": "linksee-memory for Claude Code: a local MCP memory server, one SQLite file on your machine, nothing leaves it.",
+  "owner": {
+    "name": "Synapse Arrows Pte. Ltd.",
+    "url": "https://github.com/michielinksee"
+  },
+  "plugins": [
+    {
+      "name": "linksee-memory",
+      "source": "./",
+      "description": "A local MCP memory server: one SQLite file on your machine that Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write. No account, no credit card, no cloud, no API key.",
+      "category": "memory",
+      "tags": ["mcp", "memory", "local-first", "drift-detection", "handover"]
+    }
+  ]
+}

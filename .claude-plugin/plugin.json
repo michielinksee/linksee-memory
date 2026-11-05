@@ -1,0 +1,21 @@
+{
+  "name": "linksee-memory",
+  "displayName": "Linksee Memory",
+  "version": "0.18.0",
+  "description": "A local MCP memory server: one SQLite file on your machine that Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write. No account, no credit card, no cloud, no API key.",
+  "author": {
+    "name": "Synapse Arrows Pte. Ltd.",
+    "url": "https://github.com/michielinksee"
+  },
+  "homepage": "https://docs.linksee.app",
+  "repository": "https://github.com/michielinksee/linksee-memory",
+  "license": "MIT",
+  "keywords": ["mcp", "memory", "local-first", "sqlite", "drift-detection", "handover", "linksee"],
+  "skills": ["./src/skill"],
+  "mcpServers": {
+    "linksee": {
+      "command": "npx",
+      "args": ["-y", "linksee-memory@latest"]
+    }
+  }
+}
