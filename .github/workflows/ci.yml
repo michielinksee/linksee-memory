@@ -103,7 +103,7 @@ jobs:
         # Not a gate — continue-on-error — until the install instructions are fixed separately.
         continue-on-error: true
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # GitHub runs bash -e; keep going so the npx result is printed
           P="$RUNNER_TEMP/npm12"
           npm install --prefix "$P" --no-audit --no-fund --loglevel=error npm@12 >/dev/null
           NPX12="$P/node_modules/.bin/npx"
