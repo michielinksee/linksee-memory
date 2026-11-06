@@ -4,7 +4,7 @@ A local MCP memory server: one SQLite file on your machine that Claude Code, Cur
 
 It is for handing a project over — to your next session, to another client, to the person after you — with the reasons attached. Every client can save and search the memory. In Claude Code, hooks also bring a recorded decision back at session start and before an edit. Drift detection shows which recorded decisions the code has since left.
 
-Needs Node.js 22.13 or later (recommended: SQLite is built into Node, nothing is compiled), and Claude Code or Codex to try it (either one is enough). Node 20 and Node 22.0–22.12 still work through `better-sqlite3`, which then has to be built on install — on npm 12 that means allowing its install script (see [troubleshooting](docs/troubleshooting.md)).
+Needs Node.js 22.16 or later (recommended: SQLite with FTS5 is built into Node, nothing is compiled), and Claude Code or Codex to try it (either one is enough). Node 20 and Node 22.0–22.15 still work through `better-sqlite3`, which then has to be built on install — on npm 12 that means allowing its install script (see [troubleshooting](docs/troubleshooting.md)).
 
 ## Install
 

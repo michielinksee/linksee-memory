@@ -11,11 +11,16 @@
 //      MCP server and remember → recall works; forcing better there exits 1 with one line
 //   3. round trip: a DB written through better-sqlite3 is read and written through node:sqlite,
 //      then read again through better-sqlite3 (same file, same schema, WAL, FTS5)
+//   4. an old Node (node:sqlite off) whose better-sqlite3 loads but has no working binding — the
+//      default path and the forced one both exit 1 with one stderr line and nothing on stdout
+//   5. WAL hand-over: one driver writes and is killed before any checkpoint, the other opens the
+//      file and sees the rows (both directions)
 //
 // The node:sqlite parts are skipped (said so, not silently) on a Node without node:sqlite.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -39,7 +44,22 @@ const hasNode = (() => {
   }
 })();
 const drivers = hasNode ? ['node', 'better'] : ['better'];
-if (!hasNode) console.log(`  skip node:sqlite parts — Node ${process.versions.node} has no node:sqlite`);
+if (!hasNode) console.log(`  skip node:sqlite parts — Node ${process.versions.node} has no usable node:sqlite (missing, or no FTS5)`);
+// Node 22.13–22.15: node:sqlite exists but has no FTS5 → auto must pick better-sqlite3, forced node must refuse.
+{
+  let builtin = false;
+  const orig = process.emitWarning; process.emitWarning = () => {};
+  try { builtin = !!process.getBuiltinModule?.('node:sqlite')?.DatabaseSync; } catch { /* none */ } finally { process.emitWarning = orig; }
+  if (builtin && !hasNode) {
+    const prev = process.env.LINKSEE_SQLITE_DRIVER;
+    delete process.env.LINKSEE_SQLITE_DRIVER;
+    check('node:sqlite without FTS5: auto uses better-sqlite3', layer.driverName() === 'better');
+    process.env.LINKSEE_SQLITE_DRIVER = 'node';
+    let e = null; try { layer.driverName(); } catch (x) { e = x; }
+    check('node:sqlite without FTS5: forced node refused, says FTS5', e?.code === layer.NO_DRIVER_CODE && /FTS5/.test(e.message), e?.message);
+    if (prev === undefined) delete process.env.LINKSEE_SQLITE_DRIVER; else process.env.LINKSEE_SQLITE_DRIVER = prev;
+  }
+}
 
 // ---- 1. the layer, on each driver ---------------------------------------------------------------
 const savedDriver = process.env.LINKSEE_SQLITE_DRIVER;
@@ -242,6 +262,75 @@ if (hasNode) {
     const n = db.prepare("SELECT count(*) n FROM memories_fts WHERE memories_fts MATCH ?").get('"rt-beta-9e2"').n;
     check(`[${drv}] FTS index sees the node:sqlite row`, n >= 1, String(n));
     db.close();
+  }
+  if (savedDriver === undefined) delete process.env.LINKSEE_SQLITE_DRIVER; else process.env.LINKSEE_SQLITE_DRIVER = savedDriver;
+}
+
+// ---- 4. old Node + better-sqlite3 present but its binding broken --------------------------------------
+{
+  const flagOff = spawnSync(process.execPath, ['--no-experimental-sqlite', '-e', 'console.log(process.getBuiltinModule?.("node:sqlite") ? "on" : "off")'], { encoding: 'utf8' });
+  if (flagOff.stdout.trim() !== 'off') {
+    console.log(`  skip old-Node fallback case — --no-experimental-sqlite does not turn node:sqlite off on Node ${process.versions.node}`);
+  } else {
+    const req = createRequire(import.meta.url);
+    const realBs = dirname(req.resolve('better-sqlite3/package.json'));
+    const nm = join(base, 'brokenbs', 'node_modules');
+    mkdirSync(nm, { recursive: true });
+    cpSync(dirname(realBs), nm, { recursive: true, dereference: true }); // better-sqlite3 + bindings + file-uri-to-path
+    const realBindings = realpathSync(join(dirname(realBs), 'bindings'));
+    if (!existsSync(join(nm, 'file-uri-to-path'))) cpSync(join(dirname(realBindings), 'file-uri-to-path'), join(nm, 'file-uri-to-path'), { recursive: true, dereference: true });
+    const addon = join(nm, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+    check('broken binding: fixture has the real .node to remove', existsSync(addon));
+    rmSync(addon, { force: true }); // what npm 12 leaves: JS present, no compiled binding
+    const pkgRoot = join(nm, 'linksee-memory');
+    cpSync(DIST, join(pkgRoot, 'dist'), { recursive: true });
+    const pj = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'linksee-memory', version: pj.version, type: 'module' }));
+    for (const dep of Object.keys(pj.dependencies)) {
+      const link = join(nm, dep);
+      mkdirSync(dirname(link), { recursive: true });
+      if (!existsSync(link)) symlinkSync(realpathSync(join(ROOT, 'node_modules', dep)), link, 'junction');
+    }
+    const probe = spawnSync(process.execPath, ['-e', 'require("better-sqlite3");console.log("required")'], { cwd: pkgRoot, encoding: 'utf8' });
+    check('broken binding: better-sqlite3 itself still require()s', probe.stdout.trim() === 'required', probe.stderr.slice(0, 200));
+    for (const [label, extra] of [['default path', {}], ['forced better', { LINKSEE_SQLITE_DRIVER: 'better' }]]) {
+      const mem = join(base, `mem-brokenbs-${label.replace(/\W/g, '')}`);
+      const r = spawnSync(process.execPath, ['--no-experimental-sqlite', join(pkgRoot, 'dist', 'mcp', 'server.js')], { input: '', encoding: 'utf8', env: baseEnv(mem, extra), cwd: pkgRoot, timeout: 30000 });
+      const lines = r.stderr.split(/\r?\n/).filter(Boolean);
+      check(`old Node, broken binding (${label}): exit 1`, r.status === 1, `exit ${r.status}`);
+      check(`old Node, broken binding (${label}): one stderr line with the way out`, lines.length === 1 && lines[0].startsWith(layer.NO_DRIVER_HINT) && /binding/.test(lines[0]), JSON.stringify(r.stderr.slice(0, 400)));
+      check(`old Node, broken binding (${label}): stdout empty`, r.stdout === '');
+      check(`old Node, broken binding (${label}): no DB created`, !existsSync(join(mem, 'memory.db')));
+    }
+  }
+}
+
+// ---- 5. WAL hand-over: writer killed before checkpoint, the other driver opens it --------------------
+if (hasNode) {
+  const sqliteUrl = pathToFileURL(join(DIST, 'db', 'sqlite.js')).href;
+  for (const [writer, reader] of [['better', 'node'], ['node', 'better']]) {
+    const p = join(base, `wal-${writer}-to-${reader}.db`);
+    const code = `const m = await import(${JSON.stringify(sqliteUrl)});
+const db = new m.Database(${JSON.stringify(p)});
+db.pragma('journal_mode = WAL'); db.pragma('wal_autocheckpoint = 0');
+db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)');
+const ins = db.prepare('INSERT INTO t (v) VALUES (?)');
+db.transaction(() => { for (let i = 0; i < 50; i++) ins.run('${writer}-' + i); })();
+console.log('written'); process.kill(process.pid, 'SIGKILL');`;
+    const w = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, LINKSEE_SQLITE_DRIVER: writer } });
+    check(`[${writer}→${reader}] writer wrote and was killed`, w.stdout.trim() === 'written' && w.status !== 0, `${w.status} ${w.signal} ${w.stderr.slice(0, 200)}`);
+    const walBytes = existsSync(p + '-wal') ? statSync(p + '-wal').size : 0;
+    check(`[${writer}→${reader}] an un-checkpointed WAL was left`, walBytes > 0, String(walBytes));
+    process.env.LINKSEE_SQLITE_DRIVER = reader;
+    const db = new layer.Database(p);
+    check(`[${writer}→${reader}] reader sees all rows from the WAL`, db.prepare('SELECT count(*) n FROM t').get().n === 50);
+    db.prepare('INSERT INTO t (v) VALUES (?)').run(`${reader}-after`);
+    check(`[${writer}→${reader}] reader writes; integrity_check ok`, db.pragma('integrity_check', { simple: true }) === 'ok' && db.prepare('SELECT count(*) n FROM t').get().n === 51);
+    db.close();
+    process.env.LINKSEE_SQLITE_DRIVER = writer;
+    const back = new layer.Database(p, { readonly: true });
+    check(`[${writer}→${reader}] writer's driver reads 51 rows back`, back.prepare('SELECT count(*) n FROM t').get().n === 51);
+    back.close();
   }
   if (savedDriver === undefined) delete process.env.LINKSEE_SQLITE_DRIVER; else process.env.LINKSEE_SQLITE_DRIVER = savedDriver;
 }

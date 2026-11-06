@@ -57,7 +57,7 @@ export function isEphemeralRoot(packageRoot: string): boolean {
 /**
  * Can a node process open a database through this root's driver layer? (the part most likely to break)
  * 0.19.0: goes through dist/db/sqlite.js, so it checks what the hooks will really use — node:sqlite
- * on Node 22.13+, better-sqlite3 below that (or whatever LINKSEE_SQLITE_DRIVER forces).
+ * on Node 22.16+, better-sqlite3 below that (or whatever LINKSEE_SQLITE_DRIVER forces).
  */
 export function verifyRoot(root: string, nodePath: string): boolean {
   const pkg = join(root, 'package.json');

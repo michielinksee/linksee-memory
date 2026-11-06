@@ -9,10 +9,10 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 
 npm 12 no longer runs dependency install scripts by default, so `better-sqlite3` arrives without its compiled part. Up to 0.18.x that was the only SQLite driver and the server stopped on start.
 
-Since 0.19.0 linksee-memory uses the SQLite built into Node (`node:sqlite`) whenever Node has it — **Node 22.13 or later** — and does not need `better-sqlite3` at all. So:
+Since 0.19.0 linksee-memory uses the SQLite built into Node (`node:sqlite`) whenever Node has it with FTS5 — **Node 22.16 or later** (22.13–22.15 have node:sqlite but without FTS5) — and does not need `better-sqlite3` at all. So:
 
-1. **Upgrade Node to 22.13+ (or 24 LTS)** and run the same `npx -y linksee-memory` again. Nothing else to change; the same `~/.linksee-memory/memory.db` is used.
-2. If you must stay on Node 20 / 22.0–22.12, `better-sqlite3` has to be built. With npx or a global install, pass the flag: `npx --allow-scripts=better-sqlite3 -y linksee-memory` / `npm i -g linksee-memory --allow-scripts=better-sqlite3`. Inside a project, npm 12 refuses that flag; add `"allowScripts": { "better-sqlite3": true }` to the project's package.json instead. npm 11 and older build it as before.
+1. **Upgrade Node to 22.16+ (or 24 LTS)** and run the same `npx -y linksee-memory` again. Nothing else to change; the same `~/.linksee-memory/memory.db` is used.
+2. If you must stay on Node 20 / 22.0–22.15, `better-sqlite3` has to be built. With npx or a global install, pass the flag: `npx --allow-scripts=better-sqlite3 -y linksee-memory` / `npm i -g linksee-memory --allow-scripts=better-sqlite3`. Inside a project, npm 12 refuses that flag; add `"allowScripts": { "better-sqlite3": true }` to the project's package.json instead. npm 11 and older build it as before.
 
 The server prints one line and exits 1 when neither driver can load. `LINKSEE_SQLITE_DRIVER=node` or `=better` forces one (for testing; the default picks node:sqlite when available).
 </details>

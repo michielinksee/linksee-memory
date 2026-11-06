@@ -2,10 +2,10 @@
 //
 // Why: npm 12 stops dependency install scripts by default, so `npx -y linksee-memory` got
 // better-sqlite3 without its native binding and died on "Could not locate the bindings file".
-// Node 22.13+ ships SQLite itself (node:sqlite), which needs no install script at all.
+// Node 22.16+ ships SQLite itself (node:sqlite, with the FTS5 the schema needs), with no install script.
 //
 //   • default: node:sqlite when this Node has it; better-sqlite3 (now an optionalDependency)
-//     only when it does not (Node 20, Node 22 < 22.13).
+//     only when it does not (Node 20, Node 22 < 22.16 — 22.13–22.15 have node:sqlite but no FTS5).
 //   • LINKSEE_SQLITE_DRIVER=node | better forces one (tests run the whole suite under both).
 //   • neither loads → NoSqliteDriverError, whose message is the one-line way out.
 //
@@ -48,7 +48,7 @@ export type DatabaseOptions = {
 
 export const NO_DRIVER_CODE = 'LINKSEE_NO_SQLITE_DRIVER';
 export const NO_DRIVER_HINT =
-  'linksee-memory: no SQLite driver could load. Use Node 22.13 or newer (it has SQLite built in), ' +
+  'linksee-memory: no SQLite driver could load. Use Node 22.16 or newer (it has SQLite built in), ' +
   'or let npm build better-sqlite3 (npm 12: npx --allow-scripts=better-sqlite3 -y linksee-memory, or "allowScripts" in a project package.json).';
 
 /** Neither node:sqlite nor better-sqlite3 could be used. `message` is the one line to show. */
@@ -64,6 +64,7 @@ export class NoSqliteDriverError extends Error {
 // ---- driver loading ------------------------------------------------------------------------
 
 let nodeMod: any | null | undefined; // undefined = not tried yet
+let nodeSqliteMissing = 'node:sqlite is not available';
 let betterCtor: any | null | undefined;
 let betterLoadError: unknown;
 
@@ -83,13 +84,32 @@ function loadNodeSqlite(): any | null {
   } as typeof process.emitWarning;
   try {
     const m = get.call(process, 'node:sqlite') as { DatabaseSync?: unknown } | undefined;
-    nodeMod = m && typeof m.DatabaseSync === 'function' ? m : null;
+    nodeMod = m && typeof m.DatabaseSync === 'function' && hasFts5Trigram(m) ? m : null;
   } catch {
     nodeMod = null;
   } finally {
     process.emitWarning = orig;
   }
   return nodeMod;
+}
+
+/**
+ * The schema needs FTS5 with the trigram tokenizer. Node 22.13–22.15 ship node:sqlite unflagged but
+ * built WITHOUT FTS5 ("no such module: fts5"); 22.16 is the first 22.x with it. Checked, not version-
+ * matched, so a build without it falls back to better-sqlite3 instead of failing on the first query.
+ */
+function hasFts5Trigram(m: any): boolean {
+  let db: any;
+  try {
+    db = new m.DatabaseSync(':memory:');
+    db.exec("CREATE VIRTUAL TABLE temp.linksee_probe USING fts5(c, tokenize='trigram')");
+    return true;
+  } catch {
+    nodeSqliteMissing = 'node:sqlite has no FTS5 trigram (Node 22.16+ has it)';
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
 }
 
 function loadBetter(): any | null {
@@ -111,7 +131,7 @@ export function driverName(): DriverName {
   }
   if (forced === 'node') {
     if (loadNodeSqlite()) return 'node';
-    throw new NoSqliteDriverError(`LINKSEE_SQLITE_DRIVER=node but node:sqlite is not available in Node ${process.versions.node}`);
+    throw new NoSqliteDriverError(`LINKSEE_SQLITE_DRIVER=node but ${nodeSqliteMissing} in Node ${process.versions.node}`);
   }
   if (forced === 'better') {
     if (loadBetter()) return 'better';
@@ -119,7 +139,7 @@ export function driverName(): DriverName {
   }
   if (loadNodeSqlite()) return 'node';
   if (loadBetter()) return 'better';
-  throw new NoSqliteDriverError(`Node ${process.versions.node} has no node:sqlite and better-sqlite3 could not be loaded: ${firstLine(betterLoadError)}`, betterLoadError);
+  throw new NoSqliteDriverError(`Node ${process.versions.node}: ${nodeSqliteMissing}, and better-sqlite3 could not be loaded: ${firstLine(betterLoadError)}`, betterLoadError);
 }
 
 function firstLine(e: unknown): string {
@@ -249,6 +269,7 @@ export class Database {
   readonly name: string;
   readonly readonly: boolean;
   private readonly raw: any;
+  private closed = false;
 
   constructor(path: string, opts: DatabaseOptions = {}) {
     this.driver = driverName();
@@ -261,7 +282,8 @@ export class Database {
         this.raw = new Ctor(path, { readonly: !!opts.readonly, fileMustExist: !!opts.fileMustExist, timeout });
       } catch (e) {
         // The npm 12 case: the JS is there, the native binding never got built.
-        if (isBindingFailure(e) && (process.env.LINKSEE_SQLITE_DRIVER ?? '').trim().toLowerCase() !== 'better') {
+        // Default and forced paths alike: one line saying how to get a driver (Codex R4 #27).
+        if (isBindingFailure(e)) {
           throw new NoSqliteDriverError(`better-sqlite3 has no usable native binding: ${firstLine(e)}`, e);
         }
         throw e;
@@ -286,15 +308,22 @@ export class Database {
 
   get open(): boolean {
     if (this.driver === 'better') return this.raw.open;
-    return this.raw.isOpen ?? true;
+    // Node 22.13–22.14 have no isOpen: keep our own mark (set by close()).
+    return typeof this.raw.isOpen === 'boolean' ? this.raw.isOpen : !this.closed;
   }
 
   get inTransaction(): boolean {
     if (this.driver === 'better') return this.raw.inTransaction;
     if (typeof this.raw.isTransaction === 'boolean') return this.raw.isTransaction;
-    // Node 22.13–22.15 have no isTransaction: BEGIN fails only inside a transaction.
-    try { this.raw.exec('BEGIN'); } catch { return true; }
-    this.raw.exec('ROLLBACK');
+    // Node 22.13–22.15 have no isTransaction. BEGIN inside a transaction fails with exactly this
+    // message; any other failure (closed, busy, I/O) is not an answer and is rethrown (Codex R4 #27).
+    try {
+      this.raw.exec('BEGIN');
+    } catch (e) {
+      if (/cannot start a transaction within a transaction/i.test((e as Error)?.message ?? '')) return true;
+      throw asSqliteError(e);
+    }
+    guard(() => this.raw.exec('ROLLBACK'));
     return false;
   }
 
@@ -362,7 +391,7 @@ export class Database {
 
   close(): this {
     if (this.driver === 'better') this.raw.close();
-    else if (this.open) guard(() => this.raw.close());
+    else if (this.open) { guard(() => this.raw.close()); this.closed = true; }
     return this;
   }
 }

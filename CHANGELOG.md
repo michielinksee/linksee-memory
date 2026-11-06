@@ -12,7 +12,8 @@ npm 12 stops dependency install scripts by default. `npx -y linksee-memory` then
 
 ### What changed
 
-- **`node:sqlite` is the default driver** when the running Node has it (22.13+; 24 LTS). Nothing is
+- **`node:sqlite` is the default driver** when the running Node has it with FTS5 (22.16+; 24 LTS). Node 22.13–22.15
+  ship node:sqlite without FTS5; that is detected (not version-matched) and they use better-sqlite3. Nothing is
   compiled on install, so npm 12's script blocking no longer matters. All SQLite access goes through
   one layer, `src/db/sqlite.ts`, which gives node:sqlite better-sqlite3's behaviour where the code
   relies on it: plain-object rows, Buffer blobs, Number `changes` / `lastInsertRowid`, `SQLITE_*`
@@ -20,7 +21,7 @@ npm 12 stops dependency install scripts by default. `npx -y linksee-memory` then
   `transaction()` with `.immediate` and savepoints when nested, `pragma(…, { simple })`, foreign keys
   on and a 16 MB page cache as in better-sqlite3's build.
 - **`better-sqlite3` is now an optionalDependency**, used only on a Node without node:sqlite
-  (Node 20, 22.0–22.12). If it cannot be built either, the server prints one line (upgrade Node, or
+  (Node 20, 22.0–22.15). If it cannot be built either, the server prints one line (upgrade Node, or
   allow better-sqlite3's install script) and exits 1 — no stack trace, nothing on stdout.
 - node:sqlite's own `ExperimentalWarning` is silenced; every other warning is kept. Output stays on stderr.
 - `LINKSEE_SQLITE_DRIVER=node | better` forces a driver. CI runs the whole test list under each.

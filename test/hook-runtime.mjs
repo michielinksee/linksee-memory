@@ -153,7 +153,7 @@ const memoryDir = join(base, 'mem with space');
     mkdirSync(dirname(link), { recursive: true });
     if (!existsSync(link)) symlinkSync(target, link, 'junction');
   }
-  // 0.19.0: this case is about the better-sqlite3 driver (Node < 22.13, or forced). With node:sqlite
+  // 0.19.0: this case is about the better-sqlite3 driver (Node < 22.16, or forced). With node:sqlite
   // available a broken better-sqlite3 is never touched — that path is checked in test/sqlite-driver.mjs.
   const env = { ...process.env, LINKSEE_MEMORY_DIR: join(base, 'mem-broken'), HOME: base, USERPROFILE: base, LINKSEE_TELEMETRY: 'off', LINKSEE_SQLITE_DRIVER: 'better' };
   const lines = (t) => t.split(/\r?\n/).filter((l) => l.length > 0);

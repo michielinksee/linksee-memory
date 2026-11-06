@@ -99,7 +99,7 @@ try {
     process.stderr.write(`${e.message}\n`);
     process.exit(1);
   }
-  // 0.19.0: no SQLite driver at all (Node < 22.13 and better-sqlite3 not built, e.g. npm 12 blocked
+  // 0.19.0: no SQLite driver at all (Node < 22.16 and better-sqlite3 not built, e.g. npm 12 blocked
   // its install script) → one line saying how to get one, not a bindings stack trace.
   if (e instanceof NoSqliteDriverError) {
     process.stderr.write(`${e.message}\n`);
