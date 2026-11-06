@@ -98,6 +98,7 @@ jobs:
         run: node scripts/test-packed.mjs --keep-tarball "$RUNNER_TEMP/linksee-memory.tgz"
 
       - name: "Observe only: npm 12, plain npx, no allowScripts (allowed to fail)"
+        timeout-minutes: 4
         # npm 12 blocks dependency install scripts by default; a project-less npx has no package.json
         # allowScripts to unblock better-sqlite3. This shows what a user on npm 12 gets today.
         # Not a gate — continue-on-error — until the install instructions are fixed separately.

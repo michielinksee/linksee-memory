@@ -6,3 +6,22 @@
 /scripts/test-packed.mjs    @michielinksee
 /.github/workflows/         @michielinksee
 /.github/CODEOWNERS         @michielinksee
+# The required safety tests themselves: keeping a name but deleting its assertions must also ask the owner (Codex review of #26).
+/test/share-draft.mjs                     @michielinksee
+/test/legacy-schema.mjs                   @michielinksee
+/test/legacy-migrate.mjs                  @michielinksee
+/test/live-check.mjs                      @michielinksee
+/test/supersede-gate.mjs                  @michielinksee
+/test/edges-state.mjs                     @michielinksee
+/test/guard-wiring.mjs                    @michielinksee
+/test/guard-scope.mjs                     @michielinksee
+/test/guard-dismiss.mjs                   @michielinksee
+/test/remember-anchor.mjs                 @michielinksee
+/test/tool-surface.mjs                    @michielinksee
+/test/hook-runtime.mjs                    @michielinksee
+/test/supersede-source.mjs                @michielinksee
+/test/session-import.mjs                  @michielinksee
+/test/import-cli-append-only.mjs          @michielinksee
+/test/distill-triage.mjs                  @michielinksee
+/test/consolidate-no-delete.mjs           @michielinksee
+/test/auto-consolidate.mjs                @michielinksee
