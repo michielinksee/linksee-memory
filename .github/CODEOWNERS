@@ -1,0 +1,8 @@
+# The test floor and the machinery that runs it (L-1-328). A PR that weakens a safety test should
+# not be able to weaken its gate in the same diff without the owner seeing it.
+# Takes effect once branch protection on main has "Require review from Code Owners" turned on.
+/test/required-tests.json   @michielinksee
+/scripts/run-tests.mjs      @michielinksee
+/scripts/test-packed.mjs    @michielinksee
+/.github/workflows/         @michielinksee
+/.github/CODEOWNERS         @michielinksee

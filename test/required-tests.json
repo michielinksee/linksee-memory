@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "The floor. Owned by CODEOWNERS (.github/CODEOWNERS), kept apart from test/suite.json on purpose: a PR that",
+    "drops or weakens a safety test has to touch this file too, which asks for the owner's review instead of",
+    "slipping through next to the change that made the test inconvenient.",
+    "`required`: must be listed under `tests` in test/suite.json (never `excluded`). run-tests.mjs --check fails otherwise.",
+    "`packed`: also run against the npm tarball (scripts/test-packed.mjs) before every publish — the 0.18.1",
+    "no-delete guarantees, checked on what users actually install rather than on the working tree.",
+    "Adding a name is always fine. Removing one needs a written reason in the PR and the owner's approval."
+  ],
+  "required": [
+    "share-draft.mjs",
+    "legacy-schema.mjs",
+    "legacy-migrate.mjs",
+    "live-check.mjs",
+    "supersede-gate.mjs",
+    "edges-state.mjs",
+    "guard-wiring.mjs",
+    "guard-scope.mjs",
+    "guard-dismiss.mjs",
+    "remember-anchor.mjs",
+    "tool-surface.mjs",
+    "hook-runtime.mjs",
+    "supersede-source.mjs",
+    "session-import.mjs",
+    "import-cli-append-only.mjs",
+    "distill-triage.mjs",
+    "consolidate-no-delete.mjs",
+    "auto-consolidate.mjs"
+  ],
+  "packed": [
+    "consolidate-no-delete.mjs",
+    "auto-consolidate.mjs",
+    "import-cli-append-only.mjs",
+    "session-import.mjs",
+    "distill-triage.mjs",
+    "supersede-source.mjs"
+  ]
+}
