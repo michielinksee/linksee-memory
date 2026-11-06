@@ -6,7 +6,8 @@
 //   node dist/bin/import-sessions.js --all                   (scans all ~/.claude/projects/*)
 //   node dist/bin/import-sessions.js --session-file <path>   (single jsonl — used by hook)
 //
-// All inserts are IDEMPOTENT: existing data for a given session_id is wiped before re-insert.
+// Re-imports are idempotent and delete no memory (0.18.1): rows are matched by a stable key and
+// updated in place, in one BEGIN IMMEDIATE transaction per session — see lib/session-import.ts.
 
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,6 +16,7 @@ import { openDb, runMigrations } from '../db/migrate.js';
 import { parseSessionFile, projectNameFromCwd, detectProjectName } from '../lib/session-parser.js';
 import { extractSession, type ExtractedFileEdit } from '../lib/session-extractor.js';
 import { normalizeEntityName } from '../lib/normalize.js';
+import { importSession } from '../lib/session-import.js';
 
 const CLAUDE_PROJECTS = join(homedir(), '.claude', 'projects');
 
@@ -39,39 +41,6 @@ function collectJsonlFiles(projectDir: string): string[] {
   }
 }
 
-// Idempotent wipe: remove all rows tied to a given session_id BEFORE re-inserting.
-// Uses LIKE matching on the JSON-encoded source field for memories/events.
-// DISTILLED memories survive the wipe: a session stays ACTIVE while its raw extractions
-// get distilled (dream → remember(memory_id) rewrite), and the next Stop-hook re-import
-// must not destroy that human/agent-curated rewrite and resurrect the raw utterance.
-function wipeSession(db: any, sessionId: string): { memories: number; edits: number; events: number } {
-  const sidNeedle = `%"session_id":"${sessionId}"%`;
-  const editDel = db.prepare('DELETE FROM session_file_edits WHERE session_id = ?').run(sessionId);
-  const memDel = db.prepare(
-    `DELETE FROM memories WHERE source LIKE ?
-       AND (NOT json_valid(content) OR COALESCE(json_extract(content, '$.distilled'), 0) != 1)`
-  ).run(sidNeedle);
-  const evtDel = db.prepare('DELETE FROM events WHERE payload LIKE ?').run(sidNeedle);
-  return { memories: memDel.changes, edits: editDel.changes, events: evtDel.changes };
-}
-
-// A re-extracted memory must NOT be re-inserted if its source turn already has a surviving
-// distilled rewrite (matched by turn_uuid — the stable key shared by raw and rewrite).
-function makeDistilledTurnSet(db: any, sessionId: string): Set<string> {
-  const rows = db.prepare(
-    `SELECT source FROM memories
-      WHERE source LIKE ? AND json_valid(content) AND json_extract(content, '$.distilled') = 1`
-  ).all(`%"session_id":"${sessionId}"%`) as Array<{ source: string }>;
-  const set = new Set<string>();
-  for (const r of rows) {
-    try {
-      const uuid = JSON.parse(r.source)?.turn_uuid;
-      if (uuid) set.add(String(uuid));
-    } catch { /* ignore malformed source */ }
-  }
-  return set;
-}
-
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('-h') || args.includes('--help')) { usage(); return; }
@@ -86,9 +55,8 @@ async function main() {
   const projectArgs = args.filter((a, i) => !a.startsWith('--')
     && (sessionFileIdx < 0 || i !== sessionFileIdx + 1)
     && (viaIdx < 0 || i !== viaIdx + 1));
-  // The session keys are kept as they were: wipeSession and makeDistilledTurnSet find these rows
-  // by the substring `"session_id":"…"` (position does not matter, the exact text does).
-  // Known, not changed here: wipeSession runs outside the re-insert transaction.
+  // The session keys are kept as they were: importSession finds these rows by the substring
+  // `"session_id":"…"` (position does not matter, the exact text does).
   const sourceJson = (src: object): string => JSON.stringify({ ...src, client: 'claude-code', via });
 
   // Single-file mode (used by the Stop hook)
@@ -116,12 +84,6 @@ async function main() {
 
     if (!db) return;
 
-    // Idempotent: wipe any prior data for THIS session before re-inserting
-    // (distilled rewrites survive — see wipeSession), then skip re-extracting
-    // any turn that already has a distilled rewrite.
-    const wiped = wipeSession(db, result.session_id);
-    const distilledTurns = makeDistilledTurnSet(db, result.session_id);
-
     // Resolve project entity (canonical_key = project:<name>, so same project across
     // different sessions/cwds collapses to one entity)
     let projectEntityId: number;
@@ -137,36 +99,17 @@ async function main() {
       projectEntityId = Number(ins.lastInsertRowid);
     }
 
-    // created_at = the source turn's true timestamp. The Stop hook re-imports the growing
-    // transcript every turn (wipe+reinsert), and DEFAULT unixepoch() restamped days-old
-    // content as "now" — inflating every time-windowed view ("today" showed last week).
-    const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
-
-    let inserted = { memories: 0, edits: 0 };
-    db.transaction(() => {
-      const memContentToId = new Map<string, number>();
-      for (const m of result.memories) {
-        if (m.source.turn_uuid && distilledTurns.has(m.source.turn_uuid)) continue; // distilled rewrite wins
-        const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, sourceJson(m.source), m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
-        memContentToId.set(m.content, Number(res.lastInsertRowid));
-        inserted.memories++;
-      }
-      for (const fe of result.file_edits) {
-        const memId = fe.memory_content ? memContentToId.get(fe.memory_content) ?? null : null;
-        insEdit.run(fe.session_id, memId, fe.file_path, fe.operation, fe.turn_uuid ?? null, fe.context_snippet, fe.occurred_at);
-        inserted.edits++;
-      }
-      insEvt.run(projectEntityId, 'session_imported', JSON.stringify({
-        session_id: result.session_id,
-        memories: result.memories.length,
-        file_edits: result.file_edits.length,
-        stats: result.stats,
-      }), parsed.started_at || Math.floor(Date.now() / 1000));
-    })();
-
-    console.log(`[ok] ${result.session_id.slice(0, 8)} (${projectName}): wiped ${wiped.memories}m/${wiped.edits}e/${wiped.events}ev → inserted ${inserted.memories}m/${inserted.edits}e`);
+    // created_at = the source turn's true timestamp (a re-import must not restamp old content).
+    let r;
+    try {
+      r = importSession(db, result, { entityId: projectEntityId, sourceJson, startedAt: parsed.started_at || Math.floor(Date.now() / 1000) });
+    } catch (e: any) {
+      // The transaction rolled back: the session's earlier rows are as they were.
+      console.error(`[error] ${result.session_id.slice(0, 8)} (${projectName}): ${e?.message ?? e} — nothing written`);
+      db.close();
+      process.exit(1);
+    }
+    console.log(`[ok] ${result.session_id.slice(0, 8)} (${projectName}): inserted ${r.inserted}m, updated ${r.updated}m, unchanged ${r.unchanged}m, left ${r.leftInPlace}m, ${r.edits}e (0 deleted)`);
     db.close();
     return;
   }
@@ -256,47 +199,13 @@ async function main() {
         projectEntityId = Number(ins.lastInsertRowid);
       }
 
-      // Idempotent: wipe any prior data for THIS session before re-inserting (Phase B).
-      // Distilled rewrites survive the wipe and suppress re-insertion of their raw turn.
-      wipeSession(db, result.session_id);
-      const distilledTurns = makeDistilledTurnSet(db, result.session_id);
-
-      // Insert memories + file_edits in a single transaction per session.
-      // created_at = source-turn timestamp (see single-file mode above for why).
-      const insMem = db.prepare('INSERT INTO memories (entity_id, layer, content, importance, source, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-      const insEdit = db.prepare(`INSERT INTO session_file_edits (session_id, memory_id, file_path, operation, turn_uuid, context_snippet, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-      const insEvt = db.prepare('INSERT INTO events (entity_id, kind, payload, occurred_at) VALUES (?, ?, ?, ?)');
-
-      const tx = db.transaction(() => {
-        const memContentToId = new Map<string, number>();
-
-        for (const m of result.memories) {
-          if (m.source.turn_uuid && distilledTurns.has(m.source.turn_uuid)) continue; // distilled rewrite wins
-          const srcJson = sourceJson(m.source);
-          const res = insMem.run(projectEntityId, m.layer, m.content, m.importance, srcJson, m.thread_id ?? null, m.occurred_at ?? Math.floor(Date.now() / 1000));
-          memContentToId.set(m.content, Number(res.lastInsertRowid));
-          agg.memories_inserted++;
-        }
-
-        for (const fe of result.file_edits) {
-          const memId = fe.memory_content ? memContentToId.get(fe.memory_content) ?? null : null;
-          insEdit.run(fe.session_id, memId, fe.file_path, fe.operation, fe.turn_uuid ?? null, fe.context_snippet, fe.occurred_at);
-          agg.file_edits_inserted++;
-        }
-
-        insEvt.run(projectEntityId, 'session_imported', JSON.stringify({
-          session_id: result.session_id,
-          memories: result.memories.length,
-          file_edits: result.file_edits.length,
-          stats: result.stats,
-        }), parsed.started_at || Math.floor(Date.now() / 1000));
-      });
-
       try {
-        tx();
+        const r = importSession(db, result, { entityId: projectEntityId, sourceJson, startedAt: parsed.started_at || Math.floor(Date.now() / 1000) });
+        agg.memories_inserted += r.inserted;
+        agg.file_edits_inserted += r.edits;
       } catch (e: any) {
         agg.errors++;
-        console.warn(`  [tx error] ${f}: ${e?.message ?? e}`);
+        console.warn(`  [tx error] ${f}: ${e?.message ?? e} (rolled back; earlier rows kept)`);
       }
     }
   }

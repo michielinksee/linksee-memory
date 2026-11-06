@@ -52,24 +52,26 @@ const noise = raw('OK. Aからいこう');
 const stale = raw('公開・10社パイロット展開前に直すべきP0は4件です。評価レコードの主キーが深層の評価単位と一致していない。', { ageDays: 120 });
 const keep = raw('O1を採用します。E1-FRはPARKED（不要見込み）とし、run固有承認・Live transport実装は後回しにする。');
 const caveat = raw('うん', { layer: 'caveat', protectedRow: 1 });
+const pinned = raw('はい', { layer: 'learning', protectedRow: 1 }); // protected, not caveat
 const fresh = raw('OK. 次いこう', { ageDays: 0 }); // inside the settle window
 
 const dry = triageDistillQueue(db, { dryRun: true });
-check('dry run counts without writing', dry.noise === 2 && dry.stale === 1 && dry.remaining === 1 && content(noise).distill_verdict === undefined, JSON.stringify(dry));
+check('dry run counts without writing', dry.noise === 1 && dry.stale === 1 && dry.remaining === 1 && content(noise).distill_verdict === undefined, JSON.stringify(dry));
 
 const rep = triageDistillQueue(db);
-check('sweep archives noise and stale, keeps the decision', rep.noise === 2 && rep.stale === 1 && rep.remaining === 1, JSON.stringify(rep));
+check('sweep archives noise and stale, keeps the decision', rep.noise === 1 && rep.stale === 1 && rep.remaining === 1, JSON.stringify(rep));
 check('archived row: verdict recorded, state superseded, type note — and needs_distill stays TRUE (anchor #70: never drop the flag; no agent rewrote it)',
   (() => { const c = content(noise); return c.needs_distill === true && c.distill_verdict === 'auto-noise' && c.state === 'superseded' && c.type === 'note' && c.what === 'OK. Aからいこう'; })(), JSON.stringify(content(noise)));
 check('stale row records its reason', /never recalled/.test(content(stale).distill_reason ?? ''));
 check('kept row untouched', content(keep).needs_distill === true && content(keep).distill_verdict === undefined);
 check('settle window respected: a fresh row is not triaged', content(fresh).distill_verdict === undefined);
 check('caveat layer and protection untouched', (() => { const r = db.prepare('SELECT layer, protected FROM memories WHERE id = ?').get(caveat); return r.layer === 'caveat' && r.protected === 1; })());
-check('…but the caveat noise still gets a verdict and leaves the queue', content(caveat).distill_verdict === 'auto-noise');
+check('0.18.1: a caveat is never triaged (no verdict, state not superseded)', content(caveat).distill_verdict === undefined && content(caveat).state === 'decided', JSON.stringify(content(caveat)));
+check('0.18.1: a protected row is never triaged', content(pinned).distill_verdict === undefined && content(pinned).state === 'decided', JSON.stringify(content(pinned)));
 
 const again = triageDistillQueue(db);
 check('idempotent: second sweep archives nothing', again.noise === 0 && again.stale === 0, JSON.stringify(again));
-check('distillPending counts what remains (fresh row excluded)', distillPending(db) === 1, `${distillPending(db)}`);
+check('distillPending counts what remains (fresh row excluded)', distillPending(db) === 3, `${distillPending(db)}` /* kept + caveat + protected */);
 
 db.close();
 rmSync(dir, { recursive: true, force: true });

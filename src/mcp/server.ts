@@ -17,7 +17,6 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, runMigrations, DbRefusedError } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
-import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
 import { consolidate as runConsolidate, autoConsolidateEnabled, planConsolidate, CONSOLIDATED_SQL } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
@@ -1192,52 +1191,10 @@ function handleForget(args: any): string {
     return JSON.stringify({ ok: true, deleted: res.changes, memory_id: args.memory_id });
   }
 
-  // Auto-sweep — also respect pin (importance >= 0.9) as protection
-  const rows = db
-    .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected, altitude
-              FROM memories
-              WHERE protected = 0 AND importance < 0.9`)
-    .all() as any[];
-
-  const now = Math.floor(Date.now() / 1000);
-  const actions: { id: number; action: string }[] = [];
-
-  for (const r of rows) {
-    const daysSince = (now - r.last_accessed_at) / 86400;
-    const heat = computeHeat({
-      accessesLast30d: daysSince < 30 ? r.access_count : 0,
-      accessesLast90d: daysSince < 90 ? r.access_count : 0,
-      daysSinceLastAccess: daysSince,
-      totalAccesses: r.access_count,
-      baseImportance: r.importance,
-    });
-    const action = decideForgetting({
-      daysSinceLastAccess: daysSince,
-      importance: r.importance,
-      heatScore: heat.score,
-      protected: r.protected === 1,
-      layer: r.layer,
-      altitude: r.altitude ?? undefined,
-    });
-    if (action !== 'keep') actions.push({ id: r.id, action });
-  }
-
-  const toDropIds = actions.filter((a) => a.action === 'drop').map((a) => a.id);
-
-  if (!args.dry_run) {
-    const del = db.prepare('DELETE FROM memories WHERE id = ?');
-    const tx = db.transaction((ids: number[]) => { for (const id of ids) del.run(id); });
-    tx(toDropIds);
-  }
-
-  return JSON.stringify({
-    ok: true,
-    dry_run: !!args.dry_run,
-    scanned: rows.length,
-    to_drop: toDropIds.length,
-    to_compress: actions.filter((a) => a.action === 'compress').length,
-    sample_ids_to_drop: toDropIds.slice(0, 10),
-  });
+  // 0.18.1: the id-less auto-sweep that used to follow here (DELETE every row whose forgetting
+  // score crossed a threshold) is removed. No caller reached it; it is gone so that the only
+  // memory DELETE in the server is the explicit one above.
+  return JSON.stringify({ ok: false, error: 'memory_id required: forget deletes one memory by id; there is no sweep' });
 }
 
 function handleConsolidate(args: any): string {

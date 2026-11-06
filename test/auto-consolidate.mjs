@@ -38,6 +38,7 @@ console.log('auto-consolidate regression');
 check('default: off', !autoConsolidateEnabled({}, []));
 check('LINKSEE_AUTO_CONSOLIDATE=1: on', autoConsolidateEnabled({ LINKSEE_AUTO_CONSOLIDATE: '1' }, []));
 check('LINKSEE_AUTO_CONSOLIDATE=0: off', !autoConsolidateEnabled({ LINKSEE_AUTO_CONSOLIDATE: '0' }, []));
+for (const v of ['true', 'on', 'yes', 'weekly']) check(`LINKSEE_AUTO_CONSOLIDATE=${v}: off (0.18.1: only 1)`, !autoConsolidateEnabled({ LINKSEE_AUTO_CONSOLIDATE: v }, []));
 check('--auto-consolidate: on', autoConsolidateEnabled({}, ['--auto-consolidate']));
 
 // seed: 3 cold, old, unprotected context rows on one entity — a cluster consolidate would merge

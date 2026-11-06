@@ -27,6 +27,7 @@ import type Database from 'better-sqlite3';
 import { computeHeat } from './heat-index.js';
 import { decideForgetting } from './forgetting.js';
 import { detectMemoryEdges } from './edge-detection.js';
+import { faultPoint } from './test-faults.js';
 
 export interface ConsolidateResult {
   scanned: number;
@@ -40,6 +41,9 @@ export interface ConsolidateResult {
   /** Cold rows with plain-text content, left out because the mark needs JSON. */
   skippedPlainText: number;
   learningIdsCreated: number[];
+  /** Row counts read inside the run's transaction (0.18.1). after = before + summaries, or the run rolls back. */
+  memoriesBefore: number;
+  memoriesAfter: number;
   stalledTransitions: number;
   memoryEdgesCreated: number;
   decisionsSuperseded: number;
@@ -194,21 +198,6 @@ export function consolidate(
   opts: { scope?: 'all' | 'session'; min_age_days?: number } = {}
 ): ConsolidateResult {
   const now = Math.floor(Date.now() / 1000);
-  // 'session' scope → same query currently (session filter needs session_id plumbing).
-  const plan = planConsolidate(db, { min_age_days: opts.min_age_days }, now);
-
-  const result: ConsolidateResult = {
-    scanned: plan.scanned,
-    clustersCompressed: 0,
-    memoriesFolded: 0,
-    memoriesDropped: 0,
-    coldUnclustered: plan.coldUnclustered,
-    skippedPlainText: plan.skippedPlainText,
-    learningIdsCreated: [],
-    stalledTransitions: 0,
-    memoryEdgesCreated: 0,
-    decisionsSuperseded: 0,
-  };
 
   const insertLearning = db.prepare(
     `INSERT INTO memories (entity_id, layer, content, importance, protected, source)
@@ -232,10 +221,40 @@ export function consolidate(
     'INSERT INTO events (entity_id, kind, payload) VALUES (?, ?, ?)'
   );
 
-  // Order inside the transaction: summary row first, then the audit row, then the marks on the
-  // originals. If any step throws, the transaction rolls back and no original is marked while
-  // no summary exists (and the reverse). Nothing is deleted at any step.
-  const tx = db.transaction(() => {
+  const markStalled = db.prepare(`
+    UPDATE memories SET content = json_set(content, '$.state', 'stalled')
+    WHERE json_valid(content)
+      AND json_extract(content, '$.state') = 'in_progress'
+      AND last_accessed_at < ?
+      AND protected = 0
+  `);
+
+  // ONE BEGIN IMMEDIATE transaction for the whole run (Codex review 1 of #23): the write lock is
+  // taken before the plan is read, so no other connection can change a candidate between the
+  // read and the mark; and the stalled sweep and edge detection are inside it too, so a failure
+  // anywhere rolls the whole run back (no summaries without marks, no folds without the rest).
+  // Order inside: plan → per cluster (summary row, audit row, marks, event) → stalled → edges.
+  // Nothing is deleted at any step.
+  const tx = db.transaction((): ConsolidateResult => {
+    // 'session' scope → same query currently (session filter needs session_id plumbing).
+    const countRows = () => (db.prepare('SELECT COUNT(*) AS c FROM memories').get() as { c: number }).c;
+    const memoriesBefore = countRows();
+    const plan = planConsolidate(db, { min_age_days: opts.min_age_days }, now);
+    const result: ConsolidateResult = {
+      scanned: plan.scanned,
+      clustersCompressed: 0,
+      memoriesFolded: 0,
+      memoriesDropped: 0,
+      coldUnclustered: plan.coldUnclustered,
+      skippedPlainText: plan.skippedPlainText,
+      learningIdsCreated: [],
+      memoriesBefore,
+      memoriesAfter: memoriesBefore,
+      stalledTransitions: 0,
+      memoryEdgesCreated: 0,
+      decisionsSuperseded: 0,
+    };
+
     for (const cluster of plan.clusters) {
       const { entity_id: entityId, entity_name: entityName, layer, members } = cluster;
 
@@ -315,31 +334,31 @@ export function consolidate(
       result.clustersCompressed++;
       result.memoriesFolded += members.length;
     }
+    faultPoint('consolidate-after-mark');
+
+    // State transition sweep: in_progress memories untouched for 30+ days → stalled.
+    const STALLED_THRESHOLD_DAYS = 30;
+    result.stalledTransitions = markStalled.run(now - STALLED_THRESHOLD_DAYS * 86400).changes;
+
+    // Memory→memory edge detection: link superseding/contradicting decisions so the
+    // dashboard can render Pivot Chains and recall can surface superseded decisions.
+    // (Its own db.transaction becomes a savepoint inside this one.)
+    const edgeRes = detectMemoryEdges(db);
+    result.memoryEdgesCreated = edgeRes.edgesCreated;
+    result.decisionsSuperseded = edgeRes.supersededMarked;
+    faultPoint('consolidate-after-edges');
+
+    // Last line of defence, inside the transaction: the only rows a run may add are its
+    // summaries, and it may remove none. Anything else → throw → the whole run rolls back.
+    result.memoriesAfter = countRows();
+    if (result.memoriesAfter !== memoriesBefore + result.learningIdsCreated.length) {
+      throw new Error(`consolidate: memories ${memoriesBefore} → ${result.memoriesAfter} with ${result.learningIdsCreated.length} summaries; rolled back, nothing written`);
+    }
+
+    // 0.18.1: the forget-sweep that deleted every remaining cold row is gone.
+    return result;
   });
-  tx();
-
-  // State transition sweep: in_progress memories untouched for 30+ days → stalled.
-  // Uses json_set() to update the state field in content JSON atomically.
-  const STALLED_THRESHOLD_DAYS = 30;
-  const stalledCutoff = now - STALLED_THRESHOLD_DAYS * 86400;
-  const stalledResult = db.prepare(`
-    UPDATE memories SET content = json_set(content, '$.state', 'stalled')
-    WHERE json_valid(content)
-      AND json_extract(content, '$.state') = 'in_progress'
-      AND last_accessed_at < ?
-      AND protected = 0
-  `).run(stalledCutoff);
-  result.stalledTransitions = stalledResult.changes;
-
-  // Memory→memory edge detection: link superseding/contradicting decisions so the
-  // dashboard can render Pivot Chains and recall can surface superseded decisions.
-  const edgeRes = detectMemoryEdges(db);
-  result.memoryEdgesCreated = edgeRes.edgesCreated;
-  result.decisionsSuperseded = edgeRes.supersededMarked;
-
-  // 0.18.1: the forget-sweep that deleted every remaining cold row is gone. Nothing below this
-  // line touches `memories`.
-  return result;
+  return tx.immediate();
 }
 
 /**
@@ -369,13 +388,12 @@ export function countSweepCandidates(db: Database.Database, now: number = Math.f
 /**
  * Should the MCP server run consolidate on its own at start-up? (0.17.1, L-1-106 / audit F1)
  *
- * No, unless the user asked. Opt in with LINKSEE_AUTO_CONSOLIDATE=1|true|on|yes|weekly, or
- * `--auto-consolidate` on the server command line. The weekly gate inside the server still
+ * No, unless the user asked. Opt in with exactly LINKSEE_AUTO_CONSOLIDATE=1 (0.18.1: true/on/
+ * yes/weekly no longer count), or `--auto-consolidate` on the server command line. The weekly gate inside the server still
  * applies once enabled. Since 0.18.1 consolidate marks rows instead of deleting them, but it
  * still rewrites content and hides rows from the default recall, so it stays opt-in.
  */
 export function autoConsolidateEnabled(env: Record<string, string | undefined>, argv: readonly string[]): boolean {
-  if (argv.includes('--auto-consolidate')) return true;
-  const v = (env.LINKSEE_AUTO_CONSOLIDATE ?? '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'on' || v === 'yes' || v === 'weekly';
+  if (argv.includes('--auto-consolidate')) return true; // kept for compatibility (documented since 0.17.1)
+  return (env.LINKSEE_AUTO_CONSOLIDATE ?? '').trim() === '1';
 }

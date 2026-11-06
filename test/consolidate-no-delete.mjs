@@ -14,7 +14,8 @@
 // Run: node test/consolidate-no-delete.mjs   (needs `pnpm build`)
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -123,16 +124,36 @@ try {
   check('plan: plain-text row counted as skipped', plan.skippedPlainText === 1, String(plan.skippedPlainText));
   check('plan: writes nothing', JSON.stringify(afterPlan) === JSON.stringify(beforeRows));
 
-  // failure path first: the audit table is missing → the whole run rolls back, nothing marked
-  {
-    db.exec('ALTER TABLE consolidations RENAME TO consolidations_hidden');
+  // failure paths first, INSIDE the transaction (after summaries/marks were written; after the
+  // stalled sweep and edge detection): the whole run must roll back.
+  const fullSnap = () => JSON.stringify({
+    m: snapshot(db),
+    c: db.prepare('SELECT COUNT(*) c FROM consolidations').get().c,
+    e: db.prepare('SELECT COUNT(*) c FROM memory_edges').get().c,
+    ev: db.prepare('SELECT COUNT(*) c FROM events').get().c,
+  });
+  const base = fullSnap();
+  for (const point of ['consolidate-after-mark', 'consolidate-after-edges']) {
+    process.env.LINKSEE_TEST_FAULT = point;
     let threw = false;
-    try { consolidate(db); } catch { threw = true; }
-    db.exec('ALTER TABLE consolidations_hidden RENAME TO consolidations');
-    check('failure (audit insert fails): consolidate throws', threw);
-    check('failure: no summary row written', count(db, `layer = 'learning'`) === 0, String(count(db, `layer = 'learning'`)));
-    check('failure: no original marked', JSON.stringify(snapshot(db)) === JSON.stringify(beforeRows));
-    check('failure: row count unchanged', count(db) === before, String(count(db)));
+    try { consolidate(db); } catch (e) { threw = /injected fault/.test(String(e?.message)); }
+    delete process.env.LINKSEE_TEST_FAULT;
+    check(`failure at ${point}: consolidate throws the injected fault`, threw);
+    check(`failure at ${point}: count, every content, consolidated_into, audit, edges, events unchanged`, fullSnap() === base);
+  }
+  check('failure: no summary row and no consolidated_into anywhere', count(db, `layer = 'learning'`) === 0 && count(db, `json_valid(content) AND json_extract(content, '$.consolidated_into') IS NOT NULL`) === 0);
+
+  // another connection holds the write lock → BEGIN IMMEDIATE refuses; nothing written
+  {
+    const holder = openDb();
+    holder.exec('BEGIN IMMEDIATE');
+    db.pragma('busy_timeout = 200');
+    let busy = false;
+    try { consolidate(db); } catch { busy = true; }
+    holder.exec('ROLLBACK');
+    holder.close();
+    check('write lock held elsewhere: consolidate refuses before reading the plan', busy);
+    check('…and nothing was written', fullSnap() === base);
   }
 
   // the real run
@@ -159,6 +180,13 @@ try {
   const r2 = consolidate(db);
   check('second run: nothing folded', r2.clustersCompressed === 0 && r2.memoriesFolded === 0, JSON.stringify(r2));
   check('second run: writes nothing to memories', JSON.stringify(snapshot(db)) === JSON.stringify(snap2));
+
+  // rows the start-up triage used to archive (short, needs_distill, outside the settle window):
+  // a caveat and a protected row must stay visible in the default recall after a server start.
+  const triProj = Number(db.prepare(`INSERT INTO entities (name, kind, normalized_name) VALUES ('proj-c', 'project', 'proj-c')`).run().lastInsertRowid);
+  const triContent = (what) => JSON.stringify({ altitude: 'implementation', type: 'decision', state: 'decided', what, needs_distill: true });
+  const triCaveat = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'caveat', ?, 0.7, 1, ?, ?)`).run(triProj, triContent('rmは使わない'), OLD, OLD).lastInsertRowid);
+  const triPinned = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'learning', ?, 0.95, 1, ?, ?)`).run(triProj, triContent('はい、本番は触らない'), OLD, OLD).lastInsertRowid);
   db.close();
 
   // ── MCP recall ─────────────────────────────────────────────────────────────────────────
@@ -177,6 +205,11 @@ try {
   const shownDecision = (rAll.memories ?? []).find((m) => m.id === a1);
   check('…each carries consolidated_into (summary id)', typeof shownDecision?.consolidated_into === 'number', JSON.stringify(shownDecision));
   check('…and no consolidated_hidden count', rAll.consolidated_hidden === undefined, String(rAll.consolidated_hidden));
+
+  const rTri = await server.call('recall', { entity_name: 'proj-c', mark_accessed: false });
+  const triIds = (rTri.memories ?? []).map((m) => m.id);
+  check('after server start (triage ran): the caveat is in the default recall', triIds.includes(triCaveat), JSON.stringify(rTri).slice(0, 300));
+  check('after server start (triage ran): the protected row is in the default recall', triIds.includes(triPinned), JSON.stringify(triIds));
 
   const rQuery = await server.call('recall', { query: 'sqlite', mark_accessed: false });
   check('recall text search: the folded decision is hidden and counted', !(rQuery.memories ?? []).some((m) => m.id === a1) && rQuery.consolidated_hidden === 1, JSON.stringify({ ids: (rQuery.memories ?? []).map((m) => m.id), hidden: rQuery.consolidated_hidden }));
@@ -202,7 +235,11 @@ try {
     const both = run(['--dry-run', '--apply']);
     check('subcommand with both flags: exit 1', both.status === 1, String(both.status));
 
+    const fileState = () => readdirSync(dir).filter((f) => f.startsWith('memory.db')).sort()
+      .map((f) => `${f}:${createHash('sha256').update(readFileSync(join(dir, f))).digest('hex')}`).join('|');
+    const fsBefore = fileState();
     const dry = run(['--dry-run']);
+    check('--dry-run: memory.db / -wal / -shm byte-identical, no file added or removed', fileState() === fsBefore, `${fsBefore}\n→ ${fileState()}`);
     check('--dry-run: exit 0', dry.status === 0, dry.stderr);
     check('--dry-run: shows what would be marked and 0 deletes', /would mark:\s+2/.test(dry.stdout) && /would delete: 0/.test(dry.stdout), dry.stdout);
     check('--dry-run: shows an example cluster', /proj-b \/ context: 2 rows/.test(dry.stdout) && /- cli one/.test(dry.stdout), dry.stdout);
@@ -213,6 +250,24 @@ try {
     const dryJson = run(['--dry-run', '--json']);
     let dj = null; try { dj = JSON.parse(dryJson.stdout); } catch { /* fail below */ }
     check('--dry-run --json: parses, would_delete 0', dj && dj.would_delete === 0 && dj.would_fold === 2, dryJson.stdout.slice(0, 200));
+
+    // an old schema: --dry-run refuses (migrate first), writes nothing
+    {
+      const oldDir = mkdtempSync(join(tmpdir(), 'linksee-consolidate-oldschema-'));
+      const oldEnv = { ...env, LINKSEE_MEMORY_DIR: oldDir };
+      const mk = spawnSync(process.execPath, ['-e', `
+        process.env.LINKSEE_MEMORY_DIR=${JSON.stringify(oldDir)};
+        const m = await import(${JSON.stringify(new URL('../dist/db/migrate.js', import.meta.url).href)});
+        const d = m.openDb(); m.runMigrations(d);
+        d.prepare("UPDATE meta SET value = '15' WHERE key = 'schema_version'").run();
+        d.pragma('journal_mode = DELETE'); d.close();`], { encoding: 'utf8', input: '', env: oldEnv });
+      const oldState = () => readdirSync(oldDir).sort().map((f) => `${f}:${createHash('sha256').update(readFileSync(join(oldDir, f))).digest('hex')}`).join('|');
+      const st0 = oldState();
+      const r = spawnSync(process.execPath, ['dist/mcp/server.js', 'consolidate', '--dry-run'], { env: oldEnv, encoding: 'utf8' });
+      check('--dry-run on schema 15: exit 1, says migrate first', mk.status === 0 && r.status === 1 && /Migrate first/.test(r.stderr), `${mk.stderr} ${r.status} ${r.stderr}`);
+      check('--dry-run on schema 15: the folder is byte-identical', oldState() === st0, `${st0} → ${oldState()}`);
+      try { rmSync(oldDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
 
     const apply = run(['--apply']);
     check('--apply: exit 0', apply.status === 0, apply.stderr + apply.stdout);
