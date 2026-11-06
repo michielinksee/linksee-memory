@@ -52,7 +52,7 @@ Where the [first round trip](#first-round-trip) is known to work. Most cells are
 | Windsurf | untested | untested | untested |
 | Gemini CLI | untested | untested | untested |
 
-- **verified**: run by the maintainer with a record. Claude Code on Windows: the maintainer's daily use, with hooks, remembers and recalls across sessions; the 0.18.0 plugin (`/plugin install`, into a throwaway `CLAUDE_CONFIG_DIR`) connected on 2026-11-05.
+- **verified**: run by the maintainer with a record. Claude Code on Windows: remember in one session, recall in a new one, on 0.18.1 ([record](docs/works-for-me/claude-code-windows-2026-11-06.md)). The plugin install path connected on 2026-11-05; its round trip is not in the record.
 - **reported**: someone said it works, without a version or log. Claude Code on macOS: the maintainer on one Mac ([#16](https://github.com/michielinksee/linksee-memory/discussions/16)); the hooks there are not checked.
 - **untested**: nobody has reported it either way.
 
