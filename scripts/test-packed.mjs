@@ -2,7 +2,9 @@
 // test-packed — run the preservation tests against what npm would actually ship.
 //
 //   node scripts/test-packed.mjs                    pack, install into a throwaway project, run `packed` tests
-//   node scripts/test-packed.mjs --integrity-out f  also write the tarball's integrity to f (publish.yml compares)
+//   node scripts/test-packed.mjs --keep-tarball f   after the tests pass, copy the tested .tgz to f (and its
+//                                                   integrity to f.integrity) — publish.yml then runs
+//                                                   `npm publish f`, so the bytes published are the bytes tested
 //
 // Why: the working tree can pass while the tarball does not — a file missing from package.json "files",
 // a dist that was not rebuilt, a dependency that only resolves through devDependencies. The 0.18.1
@@ -17,7 +19,8 @@
 // tarball's dist and the consumer's node_modules, never the repo's.
 
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,9 +34,9 @@ const fail = (msg) => {
 };
 
 const args = process.argv.slice(2);
-let integrityOut;
+let keepTarball;
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--integrity-out' && args[i + 1]) integrityOut = resolve(args[++i]);
+  if (args[i] === '--keep-tarball' && args[i + 1]) keepTarball = resolve(args[++i]);
   else fail(`unknown argument ${args[i]}`);
 }
 
@@ -98,7 +101,14 @@ cpSync(join(REPO, 'test'), join(installed, 'test'), { recursive: true });
 const r = spawnSync(process.execPath, [join(REPO, 'scripts', 'run-tests.mjs'), '--set', 'packed', '--root', installed], { stdio: 'inherit' });
 if (r.error || r.status !== 0) fail(`packed tests failed against the tarball (${r.error?.message ?? `exit ${r.status}`})`);
 
-if (integrityOut) writeFileSync(integrityOut, `${packed.integrity}\n`);
+if (keepTarball) {
+  // the copy must hash to what npm pack reported — otherwise we would hand publish something untested
+  copyFileSync(tgz, keepTarball);
+  const got = `sha512-${createHash('sha512').update(readFileSync(keepTarball)).digest('base64')}`;
+  if (got !== packed.integrity) fail(`kept tarball ${keepTarball} hashes to ${got}, npm pack said ${packed.integrity}`);
+  writeFileSync(`${keepTarball}.integrity`, `${packed.integrity}\n`);
+  console.log(`✓ kept the tested tarball at ${keepTarball}`);
+}
 try { rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* temp */ }
 work = undefined;
 console.log(`\n✓ tarball ${packed.filename} passed the packed preservation tests (${packed.integrity})`);

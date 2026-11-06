@@ -86,7 +86,17 @@ jobs:
             echo "manual run · package.json $PKG"
           fi
 
-      - name: Build
+      - name: Release gate (explicit — `npm publish <tarball>` does not run prepublishOnly)
+        # Same checks prepublishOnly used to run: clean tree, v<version> tag at HEAD, the three
+        # manifests agree. Run once, here, before the one build. Skipped only for a dry-run
+        # rehearsal, which sits on a branch tip and cannot pass the tag check by construction
+        # (it fired correctly on the first rehearsal: tag v0.12.0 at 10e1081, HEAD at 06cce40).
+        # A manual run with dry_run=false gets the full gate, like a tag push.
+        env:
+          LINKSEE_RELEASE_GATE: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'skip' || '' }}
+        run: node scripts/release-gate.mjs
+
+      - name: Build (the only build — the tarball below is made from it and published as is)
         run: pnpm run build
 
       - name: Tests (one list — test/suite.json, same as PR CI)
@@ -94,10 +104,10 @@ jobs:
         # the 0.18.1 no-delete tests never ran before a publish. Now both read test/suite.json.
         run: node scripts/run-tests.mjs
 
-      - name: Preservation tests against the npm tarball
+      - name: Pack once + preservation tests against that tarball
         # npm pack → install into an empty project → run test/required-tests.json `packed` there.
-        # Records the tested tarball's integrity for the check right before publishing.
-        run: node scripts/test-packed.mjs --integrity-out "$RUNNER_TEMP/tested-integrity"
+        # The tested .tgz is kept (with its integrity) and is the exact file published below.
+        run: node scripts/test-packed.mjs --keep-tarball "$RUNNER_TEMP/linksee-memory.tgz"
 
       - name: MCP initialize + tools/list handshake
         run: |
@@ -114,55 +124,49 @@ jobs:
           done
           echo "✓ MCP handshake passed"
 
-      - name: Publish only what was tested
-        # prepublishOnly rebuilds dist (release gate + `npm run build`). Rebuild now and re-pack
-        # without writing a file: the content npm is about to publish must hash the same as the
-        # tarball the preservation tests just passed on. Any difference stops the release.
+      - name: The file to publish is the tested tarball
+        # Re-hash the kept file right before publishing; it must still be what the tests passed on.
         run: |
           set -euo pipefail
-          pnpm run build
-          # npm <= 11 prints [ {...} ]; npm 12 prints { "<name>": {...} } — take the single entry of either.
-          NOW=$(npm pack --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const e=Array.isArray(j)?j:Object.values(j);if(e.length!==1)process.exit(1);console.log(e[0].integrity)})")
-          TESTED=$(cat "$RUNNER_TEMP/tested-integrity")
+          TGZ="$RUNNER_TEMP/linksee-memory.tgz"
+          TESTED=$(cat "$TGZ.integrity")
+          NOW="sha512-$(openssl dgst -sha512 -binary "$TGZ" | base64 -w0)"
           echo "tested:  $TESTED"
           echo "publish: $NOW"
-          if [ -z "$TESTED" ] || [ -z "$NOW" ] || [ "$NOW" != "$TESTED" ]; then
-            echo "::error::the package about to be published differs from the tarball that passed the preservation tests"
+          if [ -z "$TESTED" ] || [ "$NOW" != "$TESTED" ]; then
+            echo "::error::the tarball about to be published is not the one that passed the preservation tests"
             exit 1
           fi
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
-        # A manual run sits on a branch tip, not on a tag, so the gate's "v<version> at HEAD"
-        # check cannot pass here by construction — it fired correctly on the first rehearsal
-        # (tag v0.12.0 at 10e1081, HEAD at 06cce40) and would block every dry run forever.
-        # Skip it for the rehearsal only; a real publish is tag-triggered, where it must pass.
-        #
         # `--dry-run` DOES reach the registry (it authenticates, then refuses to overwrite an
         # existing version). So when the current version is already published, "cannot publish
-        # over" is the success signal for a rehearsal: packing worked AND OIDC authenticated.
+        # over" is the success signal for a rehearsal: the tarball was accepted AND OIDC authenticated.
         # An auth failure looks different — ENEEDAUTH / EOTP / E401 — and still fails the step.
-        env:
-          LINKSEE_RELEASE_GATE: skip
         run: |
           set -o pipefail
-          if npm publish --dry-run 2>&1 | tee /tmp/publish.log; then
+          echo "npm $(npm -v) · node $(node -v)"
+          if npm publish "$RUNNER_TEMP/linksee-memory.tgz" --provenance --dry-run 2>&1 | tee /tmp/publish.log; then
             echo "✓ dry run clean — this version is not on the registry yet"
             exit 0
           fi
           if grep -q "cannot publish over the previously published versions" /tmp/publish.log; then
-            echo "✓ rehearsal passed: authenticated via OIDC and packed successfully."
+            echo "✓ rehearsal passed: authenticated via OIDC and the tested tarball was accepted."
             echo "  Refused only because $(node -p "require('./package.json').version") is already published — expected for a rehearsal."
             exit 0
           fi
           echo "::error::dry run failed for a reason other than an existing version"
           exit 1
 
-      - name: Publish to npm
+      - name: Publish to npm (the tested tarball)
         if: github.event_name == 'push' || !inputs.dry_run
-        # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for short-lived
-        # credentials. Provenance is attached automatically for public repos.
-        run: npm publish
+        # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for short-lived credentials.
+        # A tarball argument means npm neither runs prepublishOnly nor re-packs: the bytes published
+        # are the bytes tested. The release gate ran explicitly above.
+        run: |
+          echo "npm $(npm -v) · node $(node -v)"
+          npm publish "$RUNNER_TEMP/linksee-memory.tgz" --provenance
 
       - name: Summary
         if: always()
