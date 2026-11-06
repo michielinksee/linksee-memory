@@ -40,6 +40,26 @@ A new install has an empty memory, so "how did we solve this before?" finds noth
 3. Two repos: record a decision in repo A, then in repo B (e.g. Codex) ask the same. It **does** come back — the memory is per machine, not per repo — labelled `entity: repo-a` and `by: <client>`; `entity_name` on the recall narrows by a part of the entity name (`repo-a` also matches `repo-a-backup`).
 4. Reverse it: `remember` the new decision with `supersedes: <old memory_id>`. `recall` then shows only the new one (`supersedes #<id>`); `include_superseded: true` shows both.
 
+## Works for me
+
+Where the [first round trip](#first-round-trip) is known to work. Most cells are empty because nobody has tried them yet, not because they fail.
+
+| Client | Windows | macOS | Linux |
+|---|---|---|---|
+| Claude Code | verified | reported | untested |
+| Codex | untested | untested | untested |
+| Cursor | untested | untested | untested |
+| Windsurf | untested | untested | untested |
+| Gemini CLI | untested | untested | untested |
+
+- **verified**: run by the maintainer with a record. Claude Code on Windows: remember in one session, recall in a new one, on 0.18.1 ([record](docs/works-for-me/claude-code-windows-2026-11-06.md)). The plugin install path connected on 2026-11-05; its round trip is not in the record.
+- **reported**: someone said it works, without a version or log. Claude Code on macOS: the maintainer on one Mac ([#16](https://github.com/michielinksee/linksee-memory/discussions/16)); the hooks there are not checked.
+- **untested**: nobody has reported it either way.
+
+If you fill one cell, your name goes in the weekly report under "Added by others". [Report your client and OS](https://github.com/michielinksee/linksee-memory/issues/new?template=works-for-me.yml) — five fields, no database contents.
+
+Weekly report: [Discussion #16](https://github.com/michielinksee/linksee-memory/discussions/16).
+
 ## What it does not do
 
 - Reminders and blocks before an edit are Claude Code hooks. Cursor, Windsurf, Codex and Gemini CLI share the memory but get no warning before an edit.
