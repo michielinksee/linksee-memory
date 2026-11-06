@@ -77,6 +77,16 @@ jobs:
 
           echo "✓ MCP handshake passed"
 
+      - name: The test floor is not lowered vs the base branch (PRs only)
+        # Reads test/required-tests.json from the PR base, not from the PR, so a PR cannot drop a
+        # required name and the matching entry together. (It could still edit this step or the
+        # script; that is what CODEOWNERS is for, once main requires code-owner review.)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          node scripts/run-tests.mjs --check --base FETCH_HEAD
+
       - name: Tests (one list — test/suite.json, throwaway HOME and DB per test)
         # The same list `pnpm test` and publish.yml run. Never enumerate test files here:
         # scripts/run-tests.mjs --check fails if a workflow does (L-1-328).
@@ -85,4 +95,25 @@ jobs:
       - name: Preservation tests against the npm tarball
         # npm pack → npm install into an empty project → run the `packed` names from
         # test/required-tests.json there. Catches a package that passes in the tree but not as shipped.
-        run: node scripts/test-packed.mjs
+        run: node scripts/test-packed.mjs --keep-tarball "$RUNNER_TEMP/linksee-memory.tgz"
+
+      - name: "Observe only: npm 12, plain npx, no allowScripts (allowed to fail)"
+        # npm 12 blocks dependency install scripts by default; a project-less npx has no package.json
+        # allowScripts to unblock better-sqlite3. This shows what a user on npm 12 gets today.
+        # Not a gate — continue-on-error — until the install instructions are fixed separately.
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          P="$RUNNER_TEMP/npm12"
+          npm install --prefix "$P" --no-audit --no-fund --loglevel=error npm@12 >/dev/null
+          NPX12="$P/node_modules/.bin/npx"
+          echo "npm $("$P/node_modules/.bin/npm" -v) · node $(node -v)"
+          H="$RUNNER_TEMP/npx-home"; mkdir -p "$H"
+          export HOME="$H" USERPROFILE="$H" npm_config_cache="$H/.npm-cache" LINKSEE_MEMORY_DIR="$H/.linksee-memory" LINKSEE_TELEMETRY=off
+          cd "$H"
+          OUT=$(timeout 300 "$NPX12" --yes --package="$RUNNER_TEMP/linksee-memory.tgz" -- linksee-memory-stats 2>&1); RC=$?
+          echo "$OUT" | tail -30
+          if [ "$RC" -eq 0 ]; then VERDICT="works"; else VERDICT="fails (exit $RC)"; fi
+          echo "npm 12 + plain npx linksee-memory-stats: $VERDICT"
+          { echo "### npm 12 · plain npx (observe only)"; echo ""; echo "- linksee-memory-stats: $VERDICT"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RC" -ne 0 ]; then echo "::warning::npm 12 + plain npx: linksee-memory-stats $VERDICT (install scripts blocked?)"; exit 1; fi

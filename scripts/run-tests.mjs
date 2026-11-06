@@ -6,6 +6,8 @@
 //   node scripts/run-tests.mjs --set packed    run only the `packed` names from test/required-tests.json
 //   node scripts/run-tests.mjs --root <dir>    run the tests found in <dir>/test with <dir> as cwd
 //                                              (scripts/test-packed.mjs points this at an installed tarball)
+//   node scripts/run-tests.mjs --check --base <ref>   also fail if test/required-tests.json names fewer
+//                                              tests than on <ref> (PR CI passes the base branch)
 //
 // Why one list: before this, ci.yml, publish.yml and package.json each enumerated tests by hand and had
 // drifted — the 0.18.1 no-delete tests ran on PRs but not before `npm publish` (L-1-284, L-1-322).
@@ -28,10 +30,10 @@ const fail = (msg) => { console.error(`\n✖ run-tests: ${msg}\n`); process.exit
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const opt = (name) => { const i = args.indexOf(name); if (i < 0) return undefined; const v = args[i + 1]; if (!v || v.startsWith('--')) fail(`${name} needs a value`); return v; };
-const known = new Set(['--check', '--set', '--root']);
+const known = new Set(['--check', '--set', '--root', '--base']);
 for (let i = 0; i < args.length; i++) {
   if (!known.has(args[i])) fail(`unknown argument ${args[i]}`);
-  if (args[i] === '--set' || args[i] === '--root') i++;
+  if (args[i] === '--set' || args[i] === '--root' || args[i] === '--base') i++;
 }
 
 function readJson(rel) {
@@ -88,9 +90,35 @@ function checkLists() {
   if (!readFileSync(join(REPO, '.github/workflows/publish.yml'), 'utf8').split(/\r?\n/).some((l) => !/^\s*#/.test(l) && /scripts\/test-packed\.mjs/.test(l))) {
     problems.push('.github/workflows/publish.yml does not run scripts/test-packed.mjs before publishing');
   }
+  // publish the tested tarball, never a fresh pack: a bare `npm publish` re-runs prepublishOnly + pack
+  if (readFileSync(join(REPO, '.github/workflows/publish.yml'), 'utf8').split(/\r?\n/).some((l) => !/^\s*#/.test(l) && /\bnpm publish(\s*$|\s+-)/.test(l))) {
+    problems.push('.github/workflows/publish.yml has a bare `npm publish`; publish the tested tarball (`npm publish <file>.tgz`)');
+  }
 
   if (problems.length) fail(`test lists are inconsistent:\n  - ${problems.join('\n  - ')}`);
   return { suite, req, listed };
+}
+
+// ---- 1b. the floor may not shrink within a PR --------------------------------------------------
+// Compared with the base branch, so one PR cannot lower the floor and pass — unless it also edits
+// this script or ci.yml, which is what CODEOWNERS is for once review by code owners is enforced.
+function checkAgainstBase(ref, req) {
+  const git = (a) => spawnSync('git', a, { cwd: REPO, encoding: 'utf8' });
+  if (git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).status !== 0) fail(`--base ${ref}: not a commit here (fetch it first)`);
+  if (git(['cat-file', '-e', `${ref}:test/required-tests.json`]).status !== 0) {
+    console.log(`○ ${ref} has no test/required-tests.json yet — nothing to compare (the PR that introduces it)`);
+    return;
+  }
+  const shown = git(['show', `${ref}:test/required-tests.json`]);
+  let old;
+  try { if (shown.status !== 0) throw new Error(shown.stderr); old = JSON.parse(shown.stdout); } catch (e) { fail(`cannot read ${ref}:test/required-tests.json: ${e.message}`); }
+  const lost = [];
+  for (const key of ['required', 'packed']) {
+    if (!Array.isArray(old[key])) fail(`${ref}:test/required-tests.json has no "${key}" array`);
+    for (const f of old[key]) if (!req[key].includes(f)) lost.push(`${key}: ${f}`);
+  }
+  if (lost.length) fail(`test/required-tests.json drops names that ${ref} requires:\n  - ${lost.join('\n  - ')}\nLowering the floor is its own owner-approved PR that says why.`);
+  console.log(`✓ floor not lowered vs ${ref}: required ${old.required.length}→${req.required.length}, packed ${old.packed.length}→${req.packed.length}`);
 }
 
 // ---- 2. run ------------------------------------------------------------------------------------
@@ -100,6 +128,8 @@ function rmQuiet(p) { try { rmSync(p, { recursive: true, force: true, maxRetries
 {
   const { req, listed } = checkLists();
   console.log(`✓ test lists consistent: ${listed.size} tests, ${req.required.length} required, ${req.packed.length} packed`);
+  const base = opt('--base');
+  if (base) checkAgainstBase(base, req);
   if (flag('--check')) process.exit(0);
 
   const set = opt('--set') ?? 'all';
