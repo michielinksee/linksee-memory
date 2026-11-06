@@ -89,3 +89,12 @@ jobs:
 
       - name: remember → recall live check (throwaway DB in a temp folder)
         run: timeout 30 node test/live-check.mjs
+
+      - name: no memory DELETE (session re-import, triage, consolidate) + auto-consolidate off (throwaway DB)
+        run: |
+          export LINKSEE_TELEMETRY=off
+          timeout 60 node test/session-import.mjs
+          timeout 90 node test/import-cli-append-only.mjs
+          timeout 60 node test/distill-triage.mjs
+          timeout 120 node test/consolidate-no-delete.mjs
+          timeout 60 node test/auto-consolidate.mjs

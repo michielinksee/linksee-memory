@@ -17,9 +17,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, runMigrations, DbRefusedError } from '../db/migrate.js';
 import { computeHeat } from '../lib/heat-index.js';
-import { decideForgetting } from '../lib/forgetting.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
-import { consolidate as runConsolidate, autoConsolidateEnabled } from '../lib/consolidate.js';
+import { consolidate as runConsolidate, autoConsolidateEnabled, planConsolidate, CONSOLIDATED_SQL } from '../lib/consolidate.js';
 import { isPastedExternalContent } from '../lib/session-parser.js';
 import { inferAltitude, inferType, inferState } from '../lib/session-extractor.js';
 import { normalizeEntityName } from '../lib/normalize.js';
@@ -78,6 +77,7 @@ const SUBCOMMANDS: Record<string, string> = {
   'share-draft': 'share-draft.js',
   migrate: 'migrate-legacy.js',   // 0.17.2: schema 1–5 → current, without starting the server
   runtime: 'runtime.js',          // 0.17.2: runtime list | prune
+  consolidate: 'consolidate.js',  // 0.18.1: consolidate --dry-run | --apply (marks, never deletes)
 };
 const subcommand = process.argv[2];
 if (subcommand && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, subcommand)) {
@@ -113,14 +113,28 @@ try {
 
 // Auto-maintenance: consolidate stale memories on startup (non-blocking).
 //
-// OFF by default since 0.17.1 (L-1-106 / audit F1): consolidate deletes the original rows after
-// writing a summary that keeps only the top 3 × 200 characters, ignores thread_id, and cascades
-// away their edges — reasons and history lost with no action from the user. It now runs only
-// when asked: LINKSEE_AUTO_CONSOLIDATE=1 (or `--auto-consolidate` on the server command line).
-// There is no `consolidate` tool (merged away in 0.7.0). Rows already removed by earlier versions
-// are not restored.
-if (autoConsolidateEnabled(process.env, process.argv.slice(2))) setTimeout(() => {
+// OFF by default (0.17.1 intended this; 0.18.1 makes it hold and takes the delete out):
+// up to 0.18.0 consolidate deleted the original rows after writing a summary that kept only the
+// top 3 × 200 characters, then a forget-sweep deleted every other cold row — reasons and history
+// lost with no action from the user (1,360 rows on 2026-10-29, 559 on 2026-11-05 on the
+// maintainer's DB). Since 0.18.1 nothing is deleted: originals are marked `consolidated_into`
+// and hidden from the default recall. It still runs only when asked: LINKSEE_AUTO_CONSOLIDATE=1
+// (or `--auto-consolidate` on the server command line); by hand: `npx linksee-memory consolidate
+// --dry-run | --apply`. When off, one stderr line says how many rows a run would fold, so a
+// growing database is noticed without anything being touched. There is no `consolidate` MCP tool
+// (merged away in 0.7.0). Rows already removed by earlier versions are not restored.
+const autoConsolidateOn = autoConsolidateEnabled(process.env, process.argv.slice(2));
+setTimeout(() => {
   try {
+    if (!autoConsolidateOn) {
+      // Read-only: count what a run would fold. Never throws out of here, never writes.
+      const plan = planConsolidate(db, { min_age_days: 7 });
+      process.stderr.write(
+        `[linksee-memory] auto-consolidate is off (set LINKSEE_AUTO_CONSOLIDATE=1 to enable); ${plan.wouldFold} cold memories would be folded` +
+        ` (run: npx linksee-memory consolidate --dry-run)\n`
+      );
+      return;
+    }
     let shouldRun = true;
     try {
       // Check if consolidations table exists before querying
@@ -131,8 +145,8 @@ if (autoConsolidateEnabled(process.env, process.argv.slice(2))) setTimeout(() =>
       }
     } catch { shouldRun = false; /* genuinely unexpected — skip to be safe */ }
     if (shouldRun) {
-      runConsolidate(db, { scope: 'all', min_age_days: 7 });
-      process.stderr.write('[linksee-memory] auto-consolidate complete\n');
+      const r = runConsolidate(db, { scope: 'all', min_age_days: 7 });
+      process.stderr.write(`[linksee-memory] auto-consolidate complete: ${r.clustersCompressed} summaries, ${r.memoriesFolded} rows marked consolidated_into (0 deleted)\n`);
     }
   } catch { /* non-fatal */ }
 }, 3000);
@@ -248,6 +262,7 @@ const TOOLS = [
         max_intents: { type: 'number', description: 'For file mode: max user-intent snippets. Default 10.', default: 10 },
         scope_to_roots: { type: 'boolean', default: false, description: 'For file mode: filter to client-provided roots.' },
         include_superseded: { type: 'boolean', default: false, description: 'Also return memories that a newer memory superseded (hidden by default; each carries superseded_by).' },
+        include_consolidated: { type: 'boolean', default: false, description: 'Also return memories that consolidate folded into a summary (hidden by default, still in the DB; each carries consolidated_into = the summary id).' },
         explain: { type: 'boolean', default: false, description: 'Include ranking internals (composite, heat, band, momentum, match_reasons, score_breakdown). Off by default so more memories fit the token budget.' },
         where: { description: 'Locate on the Current Truth Map. A topic string, or true to auto-locate from the files you edited recently. Returns your node, journey stage, blast radius, and the decision behind it.', anyOf: [{ type: 'string' }, { type: 'boolean' }] },
         project: { type: 'string', description: 'With where: the Map project slug, when several maps are imported.' },
@@ -760,13 +775,26 @@ type SupersededMode = 'exclude' | 'include' | 'only';
 // NULL-safe: plain-text rows and JSON without a state have mem_state NULL, and
 // `NOT (NULL = 'superseded' OR …)` is NULL — which would drop them (Codex review 2 of #21).
 const SUPERSEDED_SQL = `(COALESCE(m.mem_state, '') = 'superseded' OR EXISTS (SELECT 1 FROM memory_edges me WHERE me.to_memory_id = m.id AND me.relation = 'supersedes'))`;
+// Consolidated rows (0.18.1): content JSON carries `consolidated_into: <summary id>`. Hidden by
+// default, same as superseded; shown with include_consolidated. `CONSOLIDATED_SQL` is
+// `json_valid(...) AND …`, so a plain-text row evaluates to 0, not NULL, and is kept.
+type HiddenModes = { sup: SupersededMode; con: SupersededMode };
+const SHOW_ALL: HiddenModes = { sup: 'include', con: 'include' };
 function appendSupersededFilter(sql: string, mode: SupersededMode): string {
   if (mode === 'exclude') return sql + ` AND NOT ${SUPERSEDED_SQL}`;
   if (mode === 'only') return sql + ` AND ${SUPERSEDED_SQL}`;
   return sql;
 }
+function appendConsolidatedFilter(sql: string, mode: SupersededMode): string {
+  if (mode === 'exclude') return sql + ` AND NOT ${CONSOLIDATED_SQL}`;
+  if (mode === 'only') return sql + ` AND ${CONSOLIDATED_SQL}`;
+  return sql;
+}
+function appendHiddenFilters(sql: string, h: HiddenModes): string {
+  return appendConsolidatedFilter(appendSupersededFilter(sql, h.sup), h.con);
+}
 
-function runFtsQuery(query: string, layer: string | undefined, limit: number, axis?: AxisFilters, sup: SupersededMode = 'include'): any[] {
+function runFtsQuery(query: string, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -780,13 +808,13 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
   const params: any[] = [query];
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
-  sql = appendSupersededFilter(sql, sup);
+  sql = appendHiddenFilters(sql, hidden);
   sql += ' ORDER BY bm25_score ASC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
 }
 
-function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, sup: SupersededMode = 'include'): any[] {
+function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -800,7 +828,7 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
   if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
-  sql = appendSupersededFilter(sql, sup);
+  sql = appendHiddenFilters(sql, hidden);
   if (query && !entityName) {
     sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
     params.push(`%${query}%`, `%${query}%`);
@@ -853,6 +881,13 @@ function contentSignature(raw: string, entityId: number): string {
   return `${entityId}::${norm}`;
 }
 
+// The summary id a folded row points at (0.18.1), or undefined for an unfolded / plain-text row.
+function consolidatedIntoOf(parsedContent: unknown): number | undefined {
+  if (!parsedContent || typeof parsedContent !== 'object' || Array.isArray(parsedContent)) return undefined;
+  const v = (parsedContent as any).consolidated_into;
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
 function handleRecall(args: any): string {
   // max_tokens is enforced for real at assembly time (greedy fill by measured
   // serialized size), not via a crude fixed per-memory estimate. hardLimit caps COUNT.
@@ -884,23 +919,31 @@ function handleRecall(args: any): string {
   // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
   // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
   const showSuperseded = args?.include_superseded === true || axis.mem_state === 'superseded';
+  // Consolidated rows (0.18.1: marked `consolidated_into`, kept in the table) are hidden the
+  // same way; include_consolidated shows them. The two counts do not overlap: a row that is
+  // both superseded and consolidated is counted once, under superseded.
+  const showConsolidated = args?.include_consolidated === true;
   const sup: SupersededMode = showSuperseded ? 'include' : 'exclude';
+  const con: SupersededMode = showConsolidated ? 'include' : 'exclude';
+  const hidden: HiddenModes = { sup, con };
   const HIDDEN_COUNT_CAP = 1000;
-  let supersededHidden = 0;
-  if (!showSuperseded) {
+  const countHidden = (h: HiddenModes): number => {
     const hiddenIds = new Set<number>();
     if (canUseFts) {
-      for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
-      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
+      for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
     } else {
-      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, 'only')) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
     }
-    supersededHidden = hiddenIds.size;
-  }
+    return hiddenIds.size;
+  };
+  const supersededHidden = showSuperseded ? 0 : countHidden({ sup: 'only', con: 'include' });
+  const consolidatedHidden = showConsolidated ? 0 : countHidden({ sup, con: 'only' });
+  const capped = (n: number) => (n >= HIDDEN_COUNT_CAP ? `${HIDDEN_COUNT_CAP}+` : n);
 
   if (canUseFts) {
-    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, sup);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, sup);
+    const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, hidden);
+    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, hidden);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -915,7 +958,7 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, sup).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, hidden).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
   }
 
@@ -1077,6 +1120,7 @@ function handleRecall(args: any): string {
       ...(byFromSource(r._source) ? { by: byFromSource(r._source) } : {}),
       ...(supersedesOf.has(r.id) ? { supersedes: supersedesOf.get(r.id)!.map((x) => `#${x}`).join(' ') } : {}),
       ...(supersededBy.has(r.id) ? { superseded_by: supersededBy.get(r.id) } : {}),
+      ...(consolidatedIntoOf(parsedContent) !== undefined ? { consolidated_into: consolidatedIntoOf(parsedContent) } : {}),
       // Ranking internals only on request — they roughly double the per-memory cost and an
       // agent acting on the memory needs what/why/state, not the scorer's arithmetic.
       ...(args?.explain ? {
@@ -1119,7 +1163,8 @@ function handleRecall(args: any): string {
       type: axis.mem_type ?? null,
       state: axis.mem_state ?? null,
     },
-    ...(supersededHidden > 0 ? { superseded_hidden: supersededHidden >= HIDDEN_COUNT_CAP ? `${HIDDEN_COUNT_CAP}+` : supersededHidden, superseded_hint: 'include_superseded: true to show them' } : {}),
+    ...(supersededHidden > 0 ? { superseded_hidden: capped(supersededHidden), superseded_hint: 'include_superseded: true to show them' } : {}),
+    ...(consolidatedHidden > 0 ? { consolidated_hidden: capped(consolidatedHidden), consolidated_hint: 'include_consolidated: true to show them (rows folded into a summary; still in the DB)' } : {}),
     memories: memoriesOut,
   });
 }
@@ -1146,86 +1191,29 @@ function handleForget(args: any): string {
     return JSON.stringify({ ok: true, deleted: res.changes, memory_id: args.memory_id });
   }
 
-  // Auto-sweep — also respect pin (importance >= 0.9) as protection
-  const rows = db
-    .prepare(`SELECT id, layer, importance, access_count, last_accessed_at, protected, altitude
-              FROM memories
-              WHERE protected = 0 AND importance < 0.9`)
-    .all() as any[];
-
-  const now = Math.floor(Date.now() / 1000);
-  const actions: { id: number; action: string }[] = [];
-
-  for (const r of rows) {
-    const daysSince = (now - r.last_accessed_at) / 86400;
-    const heat = computeHeat({
-      accessesLast30d: daysSince < 30 ? r.access_count : 0,
-      accessesLast90d: daysSince < 90 ? r.access_count : 0,
-      daysSinceLastAccess: daysSince,
-      totalAccesses: r.access_count,
-      baseImportance: r.importance,
-    });
-    const action = decideForgetting({
-      daysSinceLastAccess: daysSince,
-      importance: r.importance,
-      heatScore: heat.score,
-      protected: r.protected === 1,
-      layer: r.layer,
-      altitude: r.altitude ?? undefined,
-    });
-    if (action !== 'keep') actions.push({ id: r.id, action });
-  }
-
-  const toDropIds = actions.filter((a) => a.action === 'drop').map((a) => a.id);
-
-  if (!args.dry_run) {
-    const del = db.prepare('DELETE FROM memories WHERE id = ?');
-    const tx = db.transaction((ids: number[]) => { for (const id of ids) del.run(id); });
-    tx(toDropIds);
-  }
-
-  return JSON.stringify({
-    ok: true,
-    dry_run: !!args.dry_run,
-    scanned: rows.length,
-    to_drop: toDropIds.length,
-    to_compress: actions.filter((a) => a.action === 'compress').length,
-    sample_ids_to_drop: toDropIds.slice(0, 10),
-  });
+  // 0.18.1: the id-less auto-sweep that used to follow here (DELETE every row whose forgetting
+  // score crossed a threshold) is removed. No caller reached it; it is gone so that the only
+  // memory DELETE in the server is the explicit one above.
+  return JSON.stringify({ ok: false, error: 'memory_id required: forget deletes one memory by id; there is no sweep' });
 }
 
 function handleConsolidate(args: any): string {
   const dryRun = !!args?.dry_run;
   if (dryRun) {
-    // Preview: simulate by running against a transaction we roll back
-    // We don't have a clean "preview" path in lib/consolidate, so do a best-effort
-    // read-only audit: count candidates using the same rules.
-    const now = Math.floor(Date.now() / 1000);
-    const ageCutoff = now - (args.min_age_days ?? 7) * 86400;
-    const candidates = db.prepare(`
-      SELECT m.entity_id, e.name as entity_name, m.layer, COUNT(*) as c
-      FROM memories m
-      JOIN entities e ON e.id = m.entity_id
-      WHERE m.protected = 0
-        AND m.importance < 0.9
-        AND m.layer IN ('context', 'emotion', 'implementation')
-        AND m.created_at <= ?
-      GROUP BY m.entity_id, m.layer
-      HAVING c >= 2
-      ORDER BY c DESC
-    `).all(ageCutoff) as any[];
-    const totalReplaced = candidates.reduce((s, c) => s + c.c, 0);
+    // Read-only preview, the same plan `--apply` would act on (0.18.1).
+    const plan = planConsolidate(db, { min_age_days: typeof args?.min_age_days === 'number' ? args.min_age_days : undefined });
     return JSON.stringify({
       ok: true,
       dry_run: true,
-      clusters: candidates.length,
-      memories_replaced_if_run: totalReplaced,
-      preview: candidates.slice(0, 20).map((c) => ({
+      clusters: plan.clusters.length,
+      memories_folded_if_run: plan.wouldFold,
+      deleted_if_run: 0,
+      preview: plan.clusters.slice(0, 20).map((c) => ({
         entity: c.entity_name,
         layer: c.layer,
-        count: c.c,
+        count: c.ids.length,
       })),
-      hint: 'Set dry_run=false to actually consolidate.',
+      hint: 'Set dry_run=false to consolidate (originals are kept and marked consolidated_into).',
     });
   }
   const result = runConsolidate(db, {

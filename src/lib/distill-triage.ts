@@ -14,8 +14,13 @@
 // Both are archived, never deleted: type → note, state → superseded, distill_verdict records
 // why. needs_distill stays TRUE — anchor #70 says the flag must not be dropped, and it stays
 // truthful: no agent ever rewrote this row. The queue, the pending count and the boot digest
-// exclude rows that carry a verdict. Layer and protection are untouched (a caveat stays a
-// caveat — it just stops being asked about). Reversible: delete distill_verdict from the JSON.
+// exclude rows that carry a verdict. Reversible: delete distill_verdict from the JSON.
+//
+// 0.18.1 (Codex review 1 of #23): protected rows and the caveat layer are NOT triaged. The
+// archive sets state → superseded, and the default recall hides superseded rows, so a short
+// caveat ("never X") was being hidden at every server start. They stay in the queue instead.
+// Rows archived by earlier versions are not un-archived automatically
+// (recall({ include_superseded: true }) shows them).
 //
 // Measured before shipping (2026-09-07, 389 raw): noise 88, stale 51, queue 250 — and the
 // noise sample was read by a human before the rule was trusted.
@@ -64,6 +69,8 @@ export function triageDistillQueue(db: Database.Database, opts: { dryRun?: boole
         WHERE json_valid(content)
           AND json_extract(content, '$.needs_distill') = 1
           AND json_extract(content, '$.distill_verdict') IS NULL
+          AND protected = 0
+          AND layer != 'caveat'
           AND created_at < ?`,
     )
     .all(now - SETTLE_SECONDS) as Array<{ id: number; content: string; access_count: number; created_at: number }>;

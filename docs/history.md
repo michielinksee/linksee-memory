@@ -43,7 +43,7 @@ Moved out of the README on 2026-11-04 so its first screen fits on one screen. Ba
 | Feature | Detail |
 |---|---|
 | **3-tool unified surface** | At 0.7.0, eight tools became three (today there are 7 — see the README): `remember` (create + update + delete), `recall` (search + file history + overview), `read_smart` (token-saving reads). Fewer tools = better cross-LLM consistency. Follows Context7's proven pattern. |
-| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. *(Off by default since 0.17.1 — opt in with `LINKSEE_AUTO_CONSOLIDATE=1`.)* |
+| **Auto-consolidate** | Consolidation runs automatically on server startup (non-blocking, 7-day threshold). No manual `consolidate()` calls needed. *(Off by default since 0.17.1 — opt in with `LINKSEE_AUTO_CONSOLIDATE=1`. Since 0.18.1 it marks the originals `consolidated_into` instead of deleting them; `consolidate --dry-run | --apply` runs it by hand.)* |
 | **Deprecation guidance** | Old tool names (`forget`, `recall_file`, etc.) return specific migration examples instead of silent failures. |
 | **"Use Linksee Memory" trigger** | Add "Use Linksee Memory" to any prompt to force memory recall — same adoption pattern as Context7. |
 | **Claude Code Plugin** | `claude plugin add -- linksee-memory` — ships MCP server + auto-invocation skill in one install. |

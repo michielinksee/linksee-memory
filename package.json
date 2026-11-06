@@ -1,6 +1,6 @@
 {
   "name": "linksee-memory",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "mcpName": "io.github.michielinksee/linksee-memory",
   "description": "Hand a project over — to your next session, to Cursor/Codex/Gemini, to your successor — with the reasons attached. Local-first memory MCP for coding agents: decisions re-injected before the agent acts, drift detection across every project you run. One SQLite file, nothing leaves your machine.",
   "type": "module",
@@ -16,7 +16,8 @@
     "linksee-memory-guard": "dist/bin/guard-hook.js",
     "linksee-memory-map": "dist/bin/map-import.js",
     "linksee-memory-export": "dist/bin/export-report.js",
-    "linksee-memory-share-draft": "dist/bin/share-draft.js"
+    "linksee-memory-share-draft": "dist/bin/share-draft.js",
+    "linksee-memory-consolidate": "dist/bin/consolidate.js"
   },
   "main": "./dist/mcp/server.js",
   "files": [
@@ -30,6 +31,7 @@
   "scripts": {
     "build": "tsc && node -e \"require('fs').copyFileSync('src/db/schema.sql','dist/db/schema.sql'); require('fs').mkdirSync('dist/skill',{recursive:true}); require('fs').copyFileSync('src/skill/SKILL.md','dist/skill/SKILL.md')\"",
     "start": "node dist/mcp/server.js",
+    "test": "node test/share-draft.mjs && node test/live-check.mjs && node test/supersede-source.mjs && node test/session-import.mjs && node test/import-cli-append-only.mjs && node test/distill-triage.mjs && node test/consolidate-no-delete.mjs && node test/auto-consolidate.mjs",
     "dev": "tsx src/mcp/server.ts",
     "migrate": "node dist/db/migrate.js",
     "migrate:dev": "tsx src/db/migrate.ts",

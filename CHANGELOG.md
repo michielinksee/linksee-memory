@@ -1,6 +1,125 @@
 # Changelog
 
-## v0.18.0 — unreleased (Reversal and who-wrote-it)
+## v0.18.1 — unreleased (Consolidate stops deleting)
+
+No new MCP tools (still 7), no schema change. One optional argument on `recall`
+(`include_consolidated`), one CLI subcommand (`consolidate --dry-run | --apply`), and one
+change in what the package does to your rows: **no memory row is deleted any more except the
+one you name in `remember({ memory_id, forget: true })`.** Three paths deleted or hid rows on
+their own: consolidate, the Stop-hook re-import, and the start-up distill triage.
+
+### What was happening
+
+Up to 0.18.0, `consolidate` — the "sleep" pass — did two things to every memory that was
+unprotected, in the `context` / `emotion` / `implementation` layer, older than 7 days and not
+accessed lately ("cold"):
+
+1. Rows that clustered (2 or more on the same entity and layer) were replaced by one
+   `learning`-layer summary that kept three 200-character fragments and the sentence
+   "N cold observations on X consolidated during sleep". The originals were **DELETEd**, and
+   their `memory_edges` went with them (ON DELETE CASCADE).
+2. A forget-sweep then **DELETEd** every remaining cold row whose forgetting score crossed a
+   threshold — no summary at all.
+
+On the maintainer's own database this removed 1,360 rows on 2026-10-29 and 559 rows (11 of
+them `type: decision`) on 2026-11-05, with no notice to the user and no way to opt out other
+than the `LINKSEE_AUTO_CONSOLIDATE` switch that 0.17.1 added (0.17.1 made the start-up run
+opt-in; whatever still ran it — an older runtime, an explicit opt-in — deleted). A memory
+server whose point is "hand over with the reasons attached" and "do not repeat the same
+mistake" was quietly discarding the reasons.
+
+**Rows that earlier versions deleted are not in the database and this version cannot bring
+them back.** They come back only from a backup of `~/.linksee-memory/memory.db` (and its
+`-wal` file) taken before the run. The `consolidations` table still lists the deleted ids per
+summary (`replaced_ids`), and the summaries keep three fragments each — that is all that is
+left of them.
+
+### Changed
+
+- **The Stop-hook re-import is append-only.** Every re-import (one per turn) used to DELETE the
+  session's undistilled rows (outside the insert transaction), its `session_file_edits` — which
+  cascaded into `drift_edges` and erased dismiss/ack verdicts — and every event mentioning the
+  session, then insert them again: a failed insert lost the rows, a successful one renumbered
+  them, and a user's `remember({ memory_id, content })` correction of a captured row was undone
+  at the next turn. Now a re-import only adds: memories are keyed by source kind, turn id, layer
+  and the file path (file-edit rows) or ordinal; `session_file_edits` by turn, path, operation,
+  time and ordinal. A row the DB already has is **not touched** — no UPDATE, no DELETE — so user
+  edits, ids, `memory_edges` and drift verdicts stay. New keys are inserted; a row whose key the
+  extractor no longer produces is left. The one `session_imported` event per session is updated
+  in place. All of it is one `BEGIN IMMEDIATE` transaction; a failure leaves every table as it
+  was. Before importing, the normal schema migration runs: it can raise `protected` (0 → 1
+  only, for rows with importance ≥ 0.9) and fill columns an older schema lacks; it does not
+  change the text, relations or verdicts of a memory.
+- **The start-up distill triage skips caveats and protected rows.** It runs at every server
+  start and archives short or stale raw captures as `state: superseded`, which the default
+  `recall` hides — so a short caveat ("never X") was hidden at every start. Protected rows and
+  the `caveat` layer are now left in the queue. Rows archived by earlier versions are not
+  un-archived automatically; `recall({ include_superseded: true })` shows them.
+- **`consolidate` never deletes.** A cluster still gets one summary (now listing `folded_ids`
+  as well as the old `replaced_ids` key, and the exemplars carry their ids); the originals get
+  `consolidated_into: <summary id>` added to their content JSON (`json_set`) and stay in the
+  table with everything else they had. The whole run — reading the plan, summaries, audit rows,
+  marks, the `in_progress → stalled` sweep and decision-edge detection — is one
+  `BEGIN IMMEDIATE` transaction: the write lock is taken before the plan is read, and a failure
+  at any step (including a row count other than before + summaries, checked inside it) rolls
+  everything back. A member that is no longer a JSON object, or already marked, aborts the run
+  rather than guess. Plain-text memories (content that is not a JSON object) are never folded —
+  the mark can only go into JSON — and are counted as `skippedPlainText`.
+- **The forget-sweep is gone**, not replaced by a `cold: true` mark. Reasons: heat is computed
+  from access data at read time, so a stored `cold` flag would be stale the moment the row was
+  read again and nothing would clear it; and it would rewrite rows nothing summarised, for no
+  reader. The count is still visible: `consolidate --dry-run` prints how many rows the sweep of
+  earlier versions would have deleted, and the result reports `coldUnclustered`.
+- **Default `recall` hides folded rows** the same way it hides superseded ones (in SQL, before
+  the limit) and reports `consolidated_hidden: <n>` (number, or `"1000+"`) with a hint;
+  `include_consolidated: true` shows them, each carrying `consolidated_into`. A row that is both
+  superseded and folded is counted once, under `superseded_hidden`. The filter is NULL-safe:
+  plain-text rows are kept.
+- **Start-up stays off** unless `LINKSEE_AUTO_CONSOLIDATE=1` exactly (`true` / `on` / `yes` /
+  `weekly`, accepted since 0.17.1, no longer turn it on), or `--auto-consolidate` on the server
+  command line (kept for compatibility). When
+  off, the server prints one stderr line 3 s after start: `auto-consolidate is off (set
+  LINKSEE_AUTO_CONSOLIDATE=1 to enable); N cold memories would be folded` — a read-only count,
+  so a growing database is noticed without anything being touched. When on, the weekly gate is
+  unchanged and the completion line now says how many rows were marked and `0 deleted`.
+- **`consolidations.replaced_ids`** keeps its name and now lists the ids that were marked, not
+  deleted. `events` rows of kind `memory_consolidated` carry `deleted: 0`.
+
+### Added
+
+- **`npx -y linksee-memory consolidate --dry-run`** — counts (rows in the DB, candidates,
+  clusters, rows `--apply` would mark, `0` it would delete, cold-but-unclustered, plain-text
+  skipped, what the old sweep would have deleted) and up to 3 example clusters with ids and a
+  fragment each. Opens the DB read-only and does not run migrations, so `memory.db` is not
+  written; a database at an older schema is refused ("migrate first", exit 1). `--json` for
+  machine output; `--min-age-days N` (default 7).
+- **`npx -y linksee-memory consolidate --apply`** — the fold described above. Prints the row
+  count before and after (read inside the transaction). Any failure: rolled back, exit 2.
+  **No flag, or both flags: the DB is not opened, exit 1.**
+- `pnpm test` — runs the regression suites that use a throwaway DB (`share-draft`, `live-check`,
+  `supersede-source`, `session-import`, `distill-triage`, `consolidate-no-delete`,
+  `auto-consolidate`).
+- The id-less "auto-sweep" branch of the internal forget handler (unreachable from any tool) is
+  removed; `src/` now has one `DELETE FROM memories` — the explicit `forget` by id.
+
+### Not changed (limits)
+
+- `remember({ memory_id, forget: true })` still deletes that one row on request (unchanged;
+  caveats refuse). Nothing else in the server deletes a memory row.
+- A raw Stop-hook capture is still refused as a `supersedes` target (the reason given — its id
+  changes at the next import — no longer holds; the refusal is left as it is for now).
+- **A re-import does not refresh rows it already wrote.** A file-edit memory keeps the op count
+  of the turn it was first imported in, a summary-type row keeps its first text, and an improved
+  extractor does not reach old rows. Accepted to keep user edits and drift verdicts safe;
+  0.18.2 will look at updating only rows that are still raw and untouched since import.
+- If the extractor changes how it splits a session, a re-import can leave an old row next to its
+  new form (nothing is deleted to make room).
+- The summary text is the same rule-based one as before (three fragments, no LLM). It is a
+  pointer to the originals now, not a replacement for them.
+- Rows folded by this version are hidden from the default `recall`; a reader who does not pass
+  `include_consolidated` sees the summary (learning layer) and the count, not the rows.
+
+## v0.18.0 — 2026-11-05 (Reversal and who-wrote-it)
 
 No new MCP tools (still 7) and no schema change (the `memory_edges` table and the
 `memories.source` column were already there; nothing wrote them). Two optional arguments on

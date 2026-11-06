@@ -31,3 +31,19 @@ export function rmGuarded(path: string, opts: RmOptions): void {
   inject('RM');
   rmSync(path, opts);
 }
+
+/**
+ * Named fault points inside a transaction (0.18.1, Codex review 1 of #23): the rollback tests
+ * need a failure AFTER some rows were written, not one at prepare() time.
+ *   LINKSEE_TEST_FAULT=consolidate-after-mark | consolidate-after-edges | import-after-memories
+ * Unset (the normal case) this is a no-op.
+ */
+export function faultPoint(name: string): void {
+  const spec = process.env.LINKSEE_TEST_FAULT;
+  if (!spec) return;
+  if (spec.split(',').map((s) => s.trim()).includes(name)) {
+    const e = new Error(`injected fault at ${name}`) as NodeJS.ErrnoException;
+    e.code = 'EINJECTED';
+    throw e;
+  }
+}

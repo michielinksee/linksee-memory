@@ -11,7 +11,8 @@ export interface ForgettingInput {
   altitude?: string;  // mission/strategy/architecture/implementation — higher altitude = slower decay
 }
 
-// Returns true if this memory should be forgotten (compressed to summary or deleted).
+// Risk score for forgetting. Since 0.18.1 nothing in the server acts on 'drop' by deleting:
+// consolidate marks clustered rows and only counts the rest (see consolidate.ts).
 // Higher forgettingRisk → more likely to forget.
 export function forgettingRisk(input: ForgettingInput): number {
   if (input.protected) return 0;
@@ -35,10 +36,10 @@ export function forgettingRisk(input: ForgettingInput): number {
   return heatFactor * importanceFactor * timeFactor * altitudeMultiplier;
 }
 
-// Risk threshold above which memory is compressed (→ learning layer summary) and the original deleted.
+// Risk threshold above which memory is compressed (→ learning layer summary; the original is kept and marked).
 export const COMPRESS_THRESHOLD = 50;
 
-// Risk threshold above which memory is entirely dropped.
+// Risk threshold that earlier versions used to delete a row outright. Reported only, since 0.18.1.
 export const DROP_THRESHOLD = 200;
 
 export type ForgettingAction = 'keep' | 'compress' | 'drop';
