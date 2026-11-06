@@ -6,8 +6,8 @@
 //   node dist/bin/import-sessions.js --all                   (scans all ~/.claude/projects/*)
 //   node dist/bin/import-sessions.js --session-file <path>   (single jsonl — used by hook)
 //
-// Re-imports are idempotent and delete no memory (0.18.1): rows are matched by a stable key and
-// updated in place, in one BEGIN IMMEDIATE transaction per session — see lib/session-import.ts.
+// Re-imports are idempotent and append-only (0.18.1): rows already imported are never touched;
+// new ones are inserted, in one BEGIN IMMEDIATE transaction per session — see lib/session-import.ts.
 
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -109,7 +109,7 @@ async function main() {
       db.close();
       process.exit(1);
     }
-    console.log(`[ok] ${result.session_id.slice(0, 8)} (${projectName}): inserted ${r.inserted}m, updated ${r.updated}m, unchanged ${r.unchanged}m, left ${r.leftInPlace}m, ${r.edits}e (0 deleted)`);
+    console.log(`[ok] ${result.session_id.slice(0, 8)} (${projectName}): inserted ${r.inserted}m + ${r.edits}e, kept ${r.kept}m + ${r.editsKept}e untouched, left ${r.leftInPlace}m (append-only, 0 deleted)`);
     db.close();
     return;
   }

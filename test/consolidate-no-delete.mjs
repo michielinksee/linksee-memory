@@ -112,9 +112,16 @@ try {
   const cav = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'caveat', '{"what":"never again"}', 0.9, 1, ?, ?)`).run(proj, OLD, OLD).lastInsertRowid);
   const hot = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, access_count, created_at, last_accessed_at) VALUES (?, 'context', '{"what":"hot"}', 0.8, 0, 50, ?, ?)`).run(proj, OLD, Math.floor(Date.now() / 1000)).lastInsertRowid);
 
+  // rows the rest of a run really updates, so the rollback tests prove more than "nothing ran":
+  //   stalled: in_progress, untouched 60 days → state 'stalled'
+  //   edge + superseded: two same-topic decisions, the later one "replaces" the earlier
+  const stalledRow = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'goal', ?, 0.5, 0, ?, ?)`).run(proj, JSON.stringify({ altitude: 'implementation', type: 'work', state: 'in_progress', what: 'migrate the billing cron' }), OLD, OLD).lastInsertRowid);
+  const decOld = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'learning', ?, 0.7, 0, ?, ?)`).run(other, JSON.stringify({ altitude: 'architecture', type: 'decision', state: 'decided', what: 'Use PostgreSQL database for orders service storage with replication, pgbouncer pooling and nightly backups' }), OLD - 10, OLD).lastInsertRowid);
+  const decNew = Number(db.prepare(`INSERT INTO memories (entity_id, layer, content, importance, protected, created_at, last_accessed_at) VALUES (?, 'learning', ?, 0.7, 0, ?, ?)`).run(other, JSON.stringify({ altitude: 'architecture', type: 'decision', state: 'decided', what: 'Switch to SQLite database for orders service storage, replaces PostgreSQL entirely' }), OLD, OLD).lastInsertRowid);
+
   const before = count(db);
   const beforeRows = snapshot(db);
-  check('seeded 9 rows', before === 9, String(before));
+  check('seeded 12 rows', before === 12, String(before));
 
   // plan is read-only
   const plan = planConsolidate(db);
@@ -126,12 +133,16 @@ try {
 
   // failure paths first, INSIDE the transaction (after summaries/marks were written; after the
   // stalled sweep and edge detection): the whole run must roll back.
-  const fullSnap = () => JSON.stringify({
-    m: snapshot(db),
-    c: db.prepare('SELECT COUNT(*) c FROM consolidations').get().c,
-    e: db.prepare('SELECT COUNT(*) c FROM memory_edges').get().c,
-    ev: db.prepare('SELECT COUNT(*) c FROM events').get().c,
-  });
+  // every table, every column, every row (SELECT *)
+  const fullSnap = () => {
+    const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all().map((r) => r.name);
+    const out = {};
+    for (const t of tables) {
+      try { out[t] = db.prepare(`SELECT * FROM "${t}" ORDER BY rowid`).all(); }
+      catch { out[t] = db.prepare(`SELECT * FROM "${t}"`).all(); }
+    }
+    return JSON.stringify(out, (_k, v) => (Buffer.isBuffer(v) ? v.toString('hex') : v));
+  };
   const base = fullSnap();
   for (const point of ['consolidate-after-mark', 'consolidate-after-edges']) {
     process.env.LINKSEE_TEST_FAULT = point;
@@ -139,9 +150,9 @@ try {
     try { consolidate(db); } catch (e) { threw = /injected fault/.test(String(e?.message)); }
     delete process.env.LINKSEE_TEST_FAULT;
     check(`failure at ${point}: consolidate throws the injected fault`, threw);
-    check(`failure at ${point}: count, every content, consolidated_into, audit, edges, events unchanged`, fullSnap() === base);
+    check(`failure at ${point}: every table, every column identical (SELECT *)`, fullSnap() === base);
   }
-  check('failure: no summary row and no consolidated_into anywhere', count(db, `layer = 'learning'`) === 0 && count(db, `json_valid(content) AND json_extract(content, '$.consolidated_into') IS NOT NULL`) === 0);
+  check('failure: no summary row and no consolidated_into anywhere', count(db, `source LIKE '%"origin":"consolidate"%'`) === 0 && count(db, `json_valid(content) AND json_extract(content, '$.consolidated_into') IS NOT NULL`) === 0);
 
   // another connection holds the write lock → BEGIN IMMEDIATE refuses; nothing written
   {
@@ -158,6 +169,8 @@ try {
 
   // the real run
   const r = consolidate(db);
+  check('the fixture really exercises the rest of the run: 1 stalled, ≥1 edge, ≥1 superseded', r.stalledTransitions >= 1 && r.memoryEdgesCreated >= 1 && r.decisionsSuperseded >= 1, JSON.stringify(r));
+  check('…stalled row is stalled, the older decision superseded', JSON.parse(db.prepare('SELECT content FROM memories WHERE id = ?').get(stalledRow).content).state === 'stalled' && JSON.parse(db.prepare('SELECT content FROM memories WHERE id = ?').get(decOld).content).state === 'superseded' && db.prepare('SELECT COUNT(*) c FROM memory_edges WHERE from_memory_id = ? AND to_memory_id = ?').get(decNew, decOld).c === 1);
   const after = count(db);
   check('result: 2 clusters, 5 folded, 0 dropped', r.clustersCompressed === 2 && r.memoriesFolded === 5 && r.memoriesDropped === 0, JSON.stringify(r));
   check('memories count did not go down (before + summaries == after)', after === before + r.learningIdsCreated.length, `${before} → ${after}`);

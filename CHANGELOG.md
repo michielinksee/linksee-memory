@@ -36,16 +36,18 @@ left of them.
 
 ### Changed
 
-- **The Stop-hook re-import no longer deletes.** Every re-import (one per turn) used to DELETE
-  the session's undistilled rows and insert them again, with the DELETE outside the insert
-  transaction: a failed insert lost the session's rows, a successful one gave every row a new id
-  (anything pointing at the old id lost its target). Now rows are matched by a stable key
-  (source kind, turn id, layer, and the file path for file-edit rows / the ordinal otherwise),
-  updated in place (id kept) when their content changed, and inserted when new; a row whose key
-  the extractor no longer produces is left as it is. Fields added to a row later (a triage
-  verdict, `consolidated_into`) are carried over. All of it — plus the session's
-  `session_file_edits` and `session_imported` event, which are still replaced — is one
-  `BEGIN IMMEDIATE` transaction; a failure leaves the session exactly as it was.
+- **The Stop-hook re-import is append-only.** Every re-import (one per turn) used to DELETE the
+  session's undistilled rows (outside the insert transaction), its `session_file_edits` — which
+  cascaded into `drift_edges` and erased dismiss/ack verdicts — and every event mentioning the
+  session, then insert them again: a failed insert lost the rows, a successful one renumbered
+  them, and a user's `remember({ memory_id, content })` correction of a captured row was undone
+  at the next turn. Now a re-import only adds: memories are keyed by source kind, turn id, layer
+  and the file path (file-edit rows) or ordinal; `session_file_edits` by turn, path, operation,
+  time and ordinal. A row the DB already has is **not touched** — no UPDATE, no DELETE — so user
+  edits, ids, `memory_edges` and drift verdicts stay. New keys are inserted; a row whose key the
+  extractor no longer produces is left. The one `session_imported` event per session is updated
+  in place. All of it is one `BEGIN IMMEDIATE` transaction; a failure leaves every table as it
+  was.
 - **The start-up distill triage skips caveats and protected rows.** It runs at every server
   start and archives short or stale raw captures as `state: superseded`, which the default
   `recall` hides — so a short caveat ("never X") was hidden at every start. Protected rows and
@@ -104,6 +106,10 @@ left of them.
   caveats refuse). Nothing else in the server deletes a memory row.
 - A raw Stop-hook capture is still refused as a `supersedes` target (the reason given — its id
   changes at the next import — no longer holds; the refusal is left as it is for now).
+- **A re-import does not refresh rows it already wrote.** A file-edit memory keeps the op count
+  of the turn it was first imported in, a summary-type row keeps its first text, and an improved
+  extractor does not reach old rows. Accepted to keep user edits and drift verdicts safe;
+  0.18.2 will look at updating only rows that are still raw and untouched since import.
 - If the extractor changes how it splits a session, a re-import can leave an old row next to its
   new form (nothing is deleted to make room).
 - The summary text is the same rule-based one as before (three fragments, no LLM). It is a
