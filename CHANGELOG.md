@@ -1,6 +1,89 @@
 # Changelog
 
-## v0.18.0 — unreleased (Reversal and who-wrote-it)
+## v0.18.1 — unreleased (Consolidate stops deleting)
+
+No new MCP tools (still 7), no schema change. One optional argument on `recall`
+(`include_consolidated`), one CLI subcommand (`consolidate --dry-run | --apply`), and one
+change in what the server does to your rows: **nothing is deleted any more.**
+
+### What was happening
+
+Up to 0.18.0, `consolidate` — the "sleep" pass — did two things to every memory that was
+unprotected, in the `context` / `emotion` / `implementation` layer, older than 7 days and not
+accessed lately ("cold"):
+
+1. Rows that clustered (2 or more on the same entity and layer) were replaced by one
+   `learning`-layer summary that kept three 200-character fragments and the sentence
+   "N cold observations on X consolidated during sleep". The originals were **DELETEd**, and
+   their `memory_edges` went with them (ON DELETE CASCADE).
+2. A forget-sweep then **DELETEd** every remaining cold row whose forgetting score crossed a
+   threshold — no summary at all.
+
+On the maintainer's own database this removed 1,360 rows on 2026-10-29 and 559 rows (11 of
+them `type: decision`) on 2026-11-05, with no notice to the user and no way to opt out other
+than the `LINKSEE_AUTO_CONSOLIDATE` switch that 0.17.1 added (0.17.1 made the start-up run
+opt-in; whatever still ran it — an older runtime, an explicit opt-in — deleted). A memory
+server whose point is "hand over with the reasons attached" and "do not repeat the same
+mistake" was quietly discarding the reasons.
+
+**Rows that earlier versions deleted are not in the database and this version cannot bring
+them back.** They come back only from a backup of `~/.linksee-memory/memory.db` (and its
+`-wal` file) taken before the run. The `consolidations` table still lists the deleted ids per
+summary (`replaced_ids`), and the summaries keep three fragments each — that is all that is
+left of them.
+
+### Changed
+
+- **`consolidate` never deletes.** A cluster still gets one summary (now listing `folded_ids`
+  as well as the old `replaced_ids` key, and the exemplars carry their ids); the originals get
+  `consolidated_into: <summary id>` added to their content JSON (`json_set`) and stay in the
+  table with everything else they had. The summary row, the audit row and the marks are one
+  transaction: if any step fails, nothing is written. A member that changed between planning
+  and writing (no longer a JSON object, or already marked) aborts and rolls back the whole run
+  rather than guess. Plain-text memories (content that is not a JSON object) are never folded —
+  the mark can only go into JSON — and are counted as `skippedPlainText`.
+- **The forget-sweep is gone**, not replaced by a `cold: true` mark. Reasons: heat is computed
+  from access data at read time, so a stored `cold` flag would be stale the moment the row was
+  read again and nothing would clear it; and it would rewrite rows nothing summarised, for no
+  reader. The count is still visible: `consolidate --dry-run` prints how many rows the sweep of
+  earlier versions would have deleted, and the result reports `coldUnclustered`.
+- **Default `recall` hides folded rows** the same way it hides superseded ones (in SQL, before
+  the limit) and reports `consolidated_hidden: <n>` (number, or `"1000+"`) with a hint;
+  `include_consolidated: true` shows them, each carrying `consolidated_into`. A row that is both
+  superseded and folded is counted once, under `superseded_hidden`. The filter is NULL-safe:
+  plain-text rows are kept.
+- **Start-up stays off** unless `LINKSEE_AUTO_CONSOLIDATE=1` (or `--auto-consolidate`). When
+  off, the server prints one stderr line 3 s after start: `auto-consolidate is off (set
+  LINKSEE_AUTO_CONSOLIDATE=1 to enable); N cold memories would be folded` — a read-only count,
+  so a growing database is noticed without anything being touched. When on, the weekly gate is
+  unchanged and the completion line now says how many rows were marked and `0 deleted`.
+- **`consolidations.replaced_ids`** keeps its name and now lists the ids that were marked, not
+  deleted. `events` rows of kind `memory_consolidated` carry `deleted: 0`.
+
+### Added
+
+- **`npx -y linksee-memory consolidate --dry-run`** — counts (rows in the DB, candidates,
+  clusters, rows `--apply` would mark, `0` it would delete, cold-but-unclustered, plain-text
+  skipped, what the old sweep would have deleted) and up to 3 example clusters with ids and a
+  fragment each. Writes nothing. `--json` for machine output; `--min-age-days N` (default 7).
+- **`npx -y linksee-memory consolidate --apply`** — the fold described above. Prints the row
+  count before and after; exits 2 and says so if the count moved by anything other than the
+  summaries written (it must not). **No flag, or both flags: nothing is read or written, exit 1.**
+- `pnpm test` — runs the regression suites that use a throwaway DB (`share-draft`, `live-check`,
+  `supersede-source`, `consolidate-no-delete`, `auto-consolidate`).
+
+### Not changed (limits)
+
+- `remember({ memory_id, forget: true })` still deletes that one row on request (unchanged;
+  caveats refuse). Nothing else in the server deletes a memory row.
+- The Stop-hook re-import still deletes a session's raw rows outside the transaction that
+  re-inserts them (unchanged from 0.17.x).
+- The summary text is the same rule-based one as before (three fragments, no LLM). It is a
+  pointer to the originals now, not a replacement for them.
+- Rows folded by this version are hidden from the default `recall`; a reader who does not pass
+  `include_consolidated` sees the summary (learning layer) and the count, not the rows.
+
+## v0.18.0 — 2026-11-05 (Reversal and who-wrote-it)
 
 No new MCP tools (still 7) and no schema change (the `memory_edges` table and the
 `memories.source` column were already there; nothing wrote them). Two optional arguments on

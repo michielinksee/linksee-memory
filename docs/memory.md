@@ -46,7 +46,9 @@ It is a Model Context Protocol (MCP) server with **7 tools** (six for memory and
                   Returns match_reasons explaining each hit
 ```
 
-Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories can be consolidated into `learning` entries, but only if you opt in (`LINKSEE_AUTO_CONSOLIDATE=1` on the server — it deletes the originals; off by default since 0.17.1).
+Every memory is tagged with **exactly one layer**. `caveat`-layer entries are protected from auto-forgetting. Cold low-importance memories can be consolidated into `learning` entries, by hand (`npx -y linksee-memory consolidate --dry-run | --apply`) or by opting in at start-up (`LINKSEE_AUTO_CONSOLIDATE=1`; off by default since 0.17.1).
+
+**Consolidation keeps the originals (0.18.1).** Up to 0.18.0 it deleted them (and a forget-sweep deleted every other cold row); that is gone. Each cluster — 2 or more unprotected, cold, JSON-content memories on the same entity and layer, older than 7 days — gets one `learning`-layer summary, and each original gets `consolidated_into: <summary id>` in its content JSON and stays, with its reasons and edges. Nothing in the server deletes a memory row except `remember({ memory_id, forget: true })`. `recall` hides folded rows by default and reports `consolidated_hidden`; `include_consolidated: true` shows them. Plain-text memories are never folded (the mark needs JSON). Rows that an earlier version deleted are not in the database; only a backup of `~/.linksee-memory/memory.db` taken before that run has them — the `consolidations` table lists their ids under `replaced_ids`.
 
 ---
 

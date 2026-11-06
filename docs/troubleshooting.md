@@ -92,7 +92,7 @@ Or delete individual memories via `remember({ forget: true, memory_id: <id> })`.
 <details>
 <summary><b>DB is getting large (>100 MB). How do I trim it?</b></summary>
 
-Since 0.17.1 nothing is consolidated automatically: consolidation deletes the original rows (keeping a short summary), so it runs only if you start the server with `LINKSEE_AUTO_CONSOLIDATE=1` (then at most weekly, 7-day threshold). When enabled it clusters old cold memories into compressed learning-layer summaries and deletes the originals; caveat and active-goal layers are always preserved. Back up `~/.linksee-memory/` before turning it on. There is no `consolidate` tool to call.
+Since 0.18.1 consolidation does not trim it: it writes one learning-layer summary per cluster of cold memories and marks the originals `consolidated_into` (they stay; `recall` hides them by default). Nothing in the server deletes a memory row except `remember({ memory_id, forget: true })`. Run `npx -y linksee-memory consolidate --dry-run` to see what a fold would touch, `--apply` to do it; or start the server with `LINKSEE_AUTO_CONSOLIDATE=1` (off by default; then at most weekly, 7-day threshold). Caveat and active-goal layers are never candidates. To actually shrink the file, delete rows by id with `remember({ memory_id, forget: true })` after taking a backup, then `VACUUM` with a SQLite client. Up to 0.18.0 consolidation deleted the originals and swept other cold rows; those rows come back only from a backup. There is no `consolidate` MCP tool.
 </details>
 
 ## FAQ

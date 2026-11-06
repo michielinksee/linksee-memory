@@ -89,3 +89,9 @@ jobs:
 
       - name: remember → recall live check (throwaway DB in a temp folder)
         run: timeout 30 node test/live-check.mjs
+
+      - name: consolidate never deletes + auto-consolidate off by default (throwaway DB)
+        run: |
+          export LINKSEE_TELEMETRY=off
+          timeout 120 node test/consolidate-no-delete.mjs
+          timeout 60 node test/auto-consolidate.mjs

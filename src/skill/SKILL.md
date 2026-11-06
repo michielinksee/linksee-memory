@@ -374,7 +374,7 @@ Recording `prior_belief` leaves a **belief-update history**. Later, this becomes
 2. ❌ Solve an error on the spot without recording — future you (or another agent) will hit the same failure
 3. ❌ Use `Read` everywhere instead of `read_smart` (wastes tokens)
 4. ❌ Write caveats in a flippant tone — preserve them seriously
-5. ❌ Try to call a `consolidate` tool — there is none; consolidation is a server opt-in that deletes originals (see below)
+5. ❌ Try to call a `consolidate` tool — there is none; consolidation is a CLI subcommand / server opt-in (see below)
 6. ❌ Recall the same entity twice in one session without new context (wastes tokens)
 7. ❌ Write `recall({ query: "what happened last time" })` — use specific keywords
 
@@ -382,9 +382,9 @@ Recording `prior_belief` leaves a **belief-update history**. Later, this becomes
 
 ## 🔁 Consolidation — off unless the user turns it on
 
-There is no `consolidate` tool. Consolidation clusters cold, low-importance memories older than 7 days into one `learning`-layer entry and **deletes the originals**, so since 0.17.1 it never runs on its own. The user can opt in by starting the server with `LINKSEE_AUTO_CONSOLIDATE=1` (then it runs at start-up, at most weekly).
+There is no `consolidate` tool. Consolidation clusters cold, low-importance memories older than 7 days into one `learning`-layer entry. Since 0.18.1 it **keeps the originals**: each gets `consolidated_into: <summary id>` and `recall` hides it by default (`consolidated_hidden` says how many; `include_consolidated: true` shows them). Up to 0.18.0 it deleted them — rows lost that way come back only from a backup. It never runs on its own: the user runs `npx -y linksee-memory consolidate --dry-run` (shows) / `--apply` (folds), or starts the server with `LINKSEE_AUTO_CONSOLIDATE=1` (at start-up, at most weekly).
 
-Do not suggest turning it on as routine housekeeping. If the user asks about a large DB, explain the trade-off (originals are deleted) and suggest backing up `~/.linksee-memory/` first.
+Do not suggest turning it on as routine housekeeping. If the user asks about a large DB, say what it does (summaries + hidden originals, nothing deleted) and point at `--dry-run` first.
 
 **`caveat` memories and active `goal` memories are never consolidated away.**
 
