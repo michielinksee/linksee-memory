@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import Database from './sqlite.js';
 import { readFileSync } from 'node:fs';
 import { mkdirSync, renameSync, existsSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -138,7 +138,7 @@ function precheckBeforeWrite(path: string): void {
   }
 }
 
-function openAt(path: string): Database.Database {
+function openAt(path: string): Database {
   precheckBeforeWrite(path);
   const db = new Database(path);
   try {
@@ -155,7 +155,7 @@ function openAt(path: string): Database.Database {
   }
 }
 
-export function openDb(): Database.Database {
+export function openDb(): Database {
   mkdirSync(DEFAULT_DB_DIR, { recursive: true });
   try {
     return openAt(DB_PATH);
@@ -246,7 +246,7 @@ export class HotJournalError extends DbRefusedError {
 }
 
 /** Read meta.schema_version without writing (0 when the table or row is absent). */
-export function readSchemaVersion(db: Database.Database): number {
+export function readSchemaVersion(db: Database): number {
   const metaTable = db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
   ).get() as { name?: string } | undefined;
@@ -261,10 +261,10 @@ export type MigrateOptions = {
   /** v4→v5 dedupe merges duplicate entities (deletes rows). Default true; `migrate` passes false. */
   mergeDuplicateEntities?: boolean;
   /** Called before each step (tests inject a failure here). */
-  onStep?: (step: string, db: Database.Database) => void;
+  onStep?: (step: string, db: Database) => void;
 };
 
-export function runMigrations(db: Database.Database, opts: MigrateOptions = {}): void {
+export function runMigrations(db: Database, opts: MigrateOptions = {}): void {
   const step = (name: string) => opts.onStep?.(name, db);
   const __filename = fileURLToPath(import.meta.url);
   const schemaPath = join(dirname(__filename), 'schema.sql');
@@ -464,7 +464,7 @@ export function runMigrations(db: Database.Database, opts: MigrateOptions = {}):
 /**
  * v5 migration: add normalized_name column and backfill + merge duplicates.
  */
-function migrateV5EntityNormalization(db: Database.Database, merge: boolean): void {
+function migrateV5EntityNormalization(db: Database, merge: boolean): void {
   // Column + index already added before db.exec(sql) above.
   // Now backfill normalized_name for all entities.
   const entities = db.prepare('SELECT id, name FROM entities').all() as Array<{ id: number; name: string }>;
@@ -504,7 +504,7 @@ function migrateV5EntityNormalization(db: Database.Database, merge: boolean): vo
  * Picks the entity with the most memories (ties broken by canonical_key presence).
  * Reassigns all memories, events, edges, consolidations to the kept entity.
  */
-function mergeEntityCluster(db: Database.Database, ids: number[]): void {
+function mergeEntityCluster(db: Database, ids: number[]): void {
   if (ids.length < 2) return;
 
   // Score each entity: prefer most memories, then has canonical_key, then lowest id

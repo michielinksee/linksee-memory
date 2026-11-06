@@ -13,7 +13,7 @@
 // Codex review of #15: copying npx's node_modules tree was replaced by this install — a real
 // install has no links back into the cache and its size is known. Old versions are never removed
 // here; `linksee-memory runtime prune` (src/bin/runtime.ts, 0.17.2) removes unreferenced ones.
-//   • the new runtime must load better-sqlite3 before anything else happens;
+//   • the new runtime must open a SQLite database (node:sqlite or better-sqlite3) before anything else happens;
 //   • older runtime/<version> folders are NOT deleted (0.17.1); setup says where they are;
 //   • on any failure the existing runtime is left as it was and the hooks keep the npx form.
 // The node path written is process.execPath at setup time. If Node is later upgraded to another
@@ -23,6 +23,7 @@ import { existsSync, readFileSync, readdirSync, renameSync, rmSync, mkdirSync, r
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { NPX_HOOK_COMMANDS, nodeHookCommands, shellSafePath, type HookCommands } from './guard-wiring.js';
 
 export type HookRuntime = {
@@ -53,13 +54,18 @@ export function isEphemeralRoot(packageRoot: string): boolean {
   return p === t || p.startsWith(t + sep) || p.startsWith(t + '/');
 }
 
-/** Can a node process load the native dependency from this root? (the part most likely to break) */
+/**
+ * Can a node process open a database through this root's driver layer? (the part most likely to break)
+ * 0.19.0: goes through dist/db/sqlite.js, so it checks what the hooks will really use — node:sqlite
+ * on Node 22.16+, better-sqlite3 below that (or whatever LINKSEE_SQLITE_DRIVER forces).
+ */
 export function verifyRoot(root: string, nodePath: string): boolean {
   const pkg = join(root, 'package.json');
-  if (!existsSync(join(root, 'dist', 'bin', 'guard-hook.js')) || !existsSync(pkg)) return false;
+  const layer = join(root, 'dist', 'db', 'sqlite.js');
+  if (!existsSync(join(root, 'dist', 'bin', 'guard-hook.js')) || !existsSync(pkg) || !existsSync(layer)) return false;
   const r = spawnSync(
     nodePath,
-    ['-e', `const r=require('node:module').createRequire(${JSON.stringify(pkg)});const D=r('better-sqlite3');new D(':memory:').close()`],
+    ['-e', `import(${JSON.stringify(pathToFileURL(layer).href)}).then((m)=>{new m.Database(':memory:').close()}).catch(()=>process.exit(1))`],
     { encoding: 'utf8', timeout: 30000 },
   );
   return r.status === 0;
@@ -187,7 +193,7 @@ export function resolveHookRuntime(o: ResolveOpts): HookRuntime {
   const res = install(spec, staging, o.nodePath);
   if (!res.ok) return fail(`npm install ${spec} failed (${res.detail ?? 'unknown error'})`);
   if (versionAt(stagingRoot) !== o.version) return fail(`npm installed ${versionAt(stagingRoot) ?? 'nothing'} instead of ${o.version}`);
-  if (!verify(stagingRoot, o.nodePath)) return fail(`the installed runtime could not load better-sqlite3`);
+  if (!verify(stagingRoot, o.nodePath)) return fail(`the installed runtime could not open a SQLite database (node:sqlite / better-sqlite3)`);
   // Same-version replacement must be undoable: move the old folder aside, move the new one in,
   // and only then delete the old one. If the second move fails, put the old one back.
   const aside = `${dest}.old-${process.pid}`;

@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.19.0 — unreleased (SQLite from Node itself: npm 12's `npx` starts again)
+
+No new tools, no schema change, same `memory.db`. The SQLite driver underneath changed.
+
+### What was happening
+
+npm 12 stops dependency install scripts by default. `npx -y linksee-memory` then got
+`better-sqlite3` without its native binding, and the server died on start with
+"Could not locate the bindings file". npm 11 still built it, so it depended on the user's npm.
+
+### What changed
+
+- **`node:sqlite` is the default driver** when the running Node has it with FTS5 (22.16+; 24 LTS). Node 22.13–22.15
+  ship node:sqlite without FTS5; that is detected (not version-matched) and they use better-sqlite3. Nothing is
+  compiled on install, so npm 12's script blocking no longer matters. All SQLite access goes through
+  one layer, `src/db/sqlite.ts`, which gives node:sqlite better-sqlite3's behaviour where the code
+  relies on it: plain-object rows, Buffer blobs, Number `changes` / `lastInsertRowid`, `SQLITE_*`
+  string error codes (e.g. `SQLITE_READONLY_ROLLBACK`, `SQLITE_BUSY`), a 5 s busy timeout,
+  `transaction()` with `.immediate` and savepoints when nested, `pragma(…, { simple })`, foreign keys
+  on and a 16 MB page cache as in better-sqlite3's build.
+- **`better-sqlite3` is now an optionalDependency**, used only on a Node without node:sqlite
+  (Node 20, 22.0–22.15). If it cannot be built either, the server prints one line (upgrade Node, or
+  allow better-sqlite3's install script) and exits 1 — no stack trace, nothing on stdout.
+- node:sqlite's own `ExperimentalWarning` is silenced; every other warning is kept. Output stays on stderr.
+- `LINKSEE_SQLITE_DRIVER=node | better` forces a driver. CI runs the whole test list under each.
+- setup's runtime check (`verifyRoot`) now opens a database through the same layer instead of
+  loading better-sqlite3 directly.
+
+### Known differences that do not change results
+
+- node:sqlite's SQLite (3.50.x in Node 22.19) can be older than the one bundled in better-sqlite3
+  (3.53.x). The file format is the same; a DB written by either opens in the other (tested both ways).
+- In WAL mode node:sqlite's build syncs with `synchronous=FULL`, better-sqlite3's with `NORMAL`:
+  slightly slower writes, never less durable.
+
 ## v0.18.1 — unreleased (Consolidate stops deleting)
 
 No new MCP tools (still 7), no schema change. One optional argument on `recall`

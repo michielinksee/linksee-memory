@@ -11,7 +11,7 @@
 //   memory://layer/{layer}  — all memories in a layer (goal/context/emotion/implementation/caveat/learning)
 //   memory://memory/{id}    — single memory by ID
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export const STATIC_RESOURCES = [
   {
@@ -84,7 +84,7 @@ const SELECT_MEMORY_BASE = `
   FROM memories m JOIN entities e ON e.id = m.entity_id
 `;
 
-export function readResource(db: Database.Database, uri: string): { uri: string; mimeType: string; text: string } {
+export function readResource(db: Database, uri: string): { uri: string; mimeType: string; text: string } {
   // Static endpoints
   if (uri === 'memory://stats') {
     const entityCount = (db.prepare('SELECT COUNT(*) as c FROM entities').get() as any).c;

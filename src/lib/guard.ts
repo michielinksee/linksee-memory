@@ -12,7 +12,7 @@
 // FAIL-OPEN by construction: every DB op is best-effort; only an explicit 'hard' contradiction yields
 // a block. Lexical only (no embeddings): reuses lexical-match.ts (the same logic as the detector).
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { normPath, compileGlob, parseArray, matchViolation, SCRAPE_ANCHOR } from './lexical-match.js';
 import { supersededAnchorIds } from './truth-engine.js';
 
@@ -90,7 +90,7 @@ function bestEffort(fn: () => void): void {
   }
 }
 
-export function acceptedAnchors(db: Database.Database): AcceptedAnchor[] {
+export function acceptedAnchors(db: Database): AcceptedAnchor[] {
   const rows = db
     .prepare(
       `SELECT id, kind, statement, rationale, affects, detect_terms, violation_signal, card_policy
@@ -132,7 +132,7 @@ function buildActionCtx(input: ActionInput): ActionCtx {
  * Keyed by anchor and (optionally) the exact term that matched, so dismissing "this anchor
  * matched my file path" does not throw away the anchor's real detections.
  */
-function dismissedFor(db: Database.Database): Map<number, Set<string>> {
+function dismissedFor(db: Database): Map<number, Set<string>> {
   const out = new Map<number, Set<string>>();
   let rows: Array<{ anchor_id: number; hit_term: string | null }> = [];
   try {
@@ -147,7 +147,7 @@ function dismissedFor(db: Database.Database): Map<number, Set<string>> {
   return out;
 }
 
-export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] {
+export function matchAction(db: Database, act: ActionCtx): GateMatch[] {
   const out: GateMatch[] = [];
   const dismissed = dismissedFor(db);
 
@@ -230,7 +230,7 @@ export function matchAction(db: Database.Database, act: ActionCtx): GateMatch[] 
   );
 }
 
-function withinCooldown(db: Database.Database, anchorId: number, sessionId: string | undefined): boolean {
+function withinCooldown(db: Database, anchorId: number, sessionId: string | undefined): boolean {
   if (!sessionId) return false;
   const minutes = jsonGet<number>(
     (db.prepare(`SELECT card_policy FROM drift_anchors WHERE id = ?`).get(anchorId) as { card_policy?: string } | undefined)
@@ -248,7 +248,7 @@ function withinCooldown(db: Database.Database, anchorId: number, sessionId: stri
 }
 
 function logInjection(
-  db: Database.Database,
+  db: Database,
   matches: GateMatch[],
   act: ActionCtx,
   surface: GateLevel,
@@ -265,7 +265,7 @@ function logInjection(
   tx();
 }
 
-export function gateAction(db: Database.Database, input: ActionInput, opts: { sessionId?: string } = {}): GateResult {
+export function gateAction(db: Database, input: ActionInput, opts: { sessionId?: string } = {}): GateResult {
   const act = buildActionCtx(input);
   let matches = matchAction(db, act);
   if (matches.length === 0) return { gate: 'allow', matched: [], reinject: '' };
@@ -324,7 +324,7 @@ If you are intentionally changing this decision, supersede it on the record:
 // SessionStart boot digest — re-load the accepted anchors + open forks into a fresh session, killing
 // cross-session amnesia ("groundhog day"). Kept small (top-N) and budget-bounded by caller.
 export function buildBootDigest(
-  db: Database.Database,
+  db: Database,
   opts: { maxAnchors?: number; maxForks?: number } = {}
 ): { text: string; anchors: number; forks: number; distill: number } {
   const maxAnchors = opts.maxAnchors ?? 8;
@@ -417,7 +417,7 @@ export interface FrictionItem {
 // re-injection failed to prevent the violation (the anchor still has an OPEN reality contradiction);
 // heeded=1 for blocks (the tool was denied) and for soft injections whose anchor's reality is clean.
 // Intentionally NOT timestamp-correlated — it powers the "ignored" tally only, never a gating decision.
-export function backfillHeeded(db: Database.Database): void {
+export function backfillHeeded(db: Database): void {
   bestEffort(() => {
     const live = `SELECT anchor_id FROM drift_edges WHERE verdict = 'contradicts' AND status = 'open'`;
     db.prepare(
@@ -438,7 +438,7 @@ export function backfillHeeded(db: Database.Database): void {
 // inference): gate_contradicts (pre-action) × reality_contradicts (post-action). Both > 0 ⇒ re-injection
 // isn't holding ⇒ escalate (soft→hard) or review/supersede (if reality has outrun the rule).
 export function getReinjectionFriction(
-  db: Database.Database,
+  db: Database,
   opts: { minContradicts?: number } = {}
 ): FrictionItem[] {
   const minC = opts.minContradicts ?? 3;
@@ -523,7 +523,7 @@ export function getReinjectionFriction(
 // into the anchor's card_policy (preserving other keys). Exposed via resolve_drift(action:'harden'|'soften'),
 // NOT a new tool — honoring anchor #1 ("public tools = 3, don't add a 4th"; the surface already drifted to 10).
 export function setGateMode(
-  db: Database.Database,
+  db: Database,
   anchorId: number,
   mode: GateMode
 ): { ok: boolean; anchor_id: number; gate_mode: GateMode; card_policy: Record<string, unknown> } {

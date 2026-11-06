@@ -8,7 +8,7 @@
 // A card = [anchor statement + WHY] / [reality file_path:snippet + occurred_at] /
 //          [verdict + confidence] / dismiss → status='dismissed' (the precision feedback loop).
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import type { AnchorKind } from './drift-anchors.js';
 
 export type DriftEdgeStatus = 'open' | 'ack' | 'dismissed' | 'resolved';
@@ -68,7 +68,7 @@ function parseEvidence(s: string | null | undefined): Record<string, unknown> {
  * (human > explicit), then recency. Only OPEN edges on ACTIVE anchors — a dismissed card
  * stays gone, a retired anchor stops surfacing.
  */
-export function getDriftHeadline(db: Database.Database, opts: { limit?: number } = {}): DriftHeadlineCard[] {
+export function getDriftHeadline(db: Database, opts: { limit?: number } = {}): DriftHeadlineCard[] {
   const limit = opts.limit ?? 3;
   const rows = db
     .prepare(
@@ -105,7 +105,7 @@ export function getDriftHeadline(db: Database.Database, opts: { limit?: number }
  * §7②  Secondary: absence (decided-but-no-reality), staleness-gated at write time.
  * Oldest unfulfilled decision first.
  */
-export function getDriftAbsences(db: Database.Database, opts: { limit?: number } = {}): DriftAbsenceCard[] {
+export function getDriftAbsences(db: Database, opts: { limit?: number } = {}): DriftAbsenceCard[] {
   const limit = opts.limit ?? 10;
   const rows = db
     .prepare(
@@ -133,7 +133,7 @@ export function getDriftAbsences(db: Database.Database, opts: { limit?: number }
   });
 }
 
-function countOpen(db: Database.Database, verdict: 'contradicts' | 'absent'): number {
+function countOpen(db: Database, verdict: 'contradicts' | 'absent'): number {
   return (
     db
       .prepare(
@@ -147,7 +147,7 @@ function countOpen(db: Database.Database, verdict: 'contradicts' | 'absent'): nu
 
 /** The whole Drift View in one call — headline + absences + the badge counts step 5 needs. */
 export function getDriftView(
-  db: Database.Database,
+  db: Database,
   opts: { headlineLimit?: number; absenceLimit?: number } = {}
 ): DriftView {
   const dismissed = (
@@ -169,7 +169,7 @@ export function getDriftView(
  * marking a false positive teaches us to tune. (The detector's contradicts upsert never
  * resurrects a non-open row, so a dismissal sticks across re-runs.) Returns true if it changed.
  */
-export function setDriftEdgeStatus(db: Database.Database, edgeId: number, status: DriftEdgeStatus): boolean {
+export function setDriftEdgeStatus(db: Database, edgeId: number, status: DriftEdgeStatus): boolean {
   if (!EDGE_STATUSES.has(status)) {
     throw new Error(`invalid status "${status}" — one of: open, ack, dismissed, resolved`);
   }

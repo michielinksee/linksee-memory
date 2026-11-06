@@ -16,6 +16,7 @@ import {
   GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { openDb, runMigrations, DbRefusedError } from '../db/migrate.js';
+import { NoSqliteDriverError } from '../db/sqlite.js';
 import { computeHeat } from '../lib/heat-index.js';
 import { refreshMomentumForEntity } from '../lib/momentum.js';
 import { consolidate as runConsolidate, autoConsolidateEnabled, planConsolidate, CONSOLIDATED_SQL } from '../lib/consolidate.js';
@@ -95,6 +96,12 @@ try {
   // A pre-June-2026 DB (schema < 6) is refused before any write; print what to do
   // instead of a stack trace. MCP clients show the server's stderr in their logs.
   if (e instanceof DbRefusedError) {
+    process.stderr.write(`${e.message}\n`);
+    process.exit(1);
+  }
+  // 0.19.0: no SQLite driver at all (Node < 22.16 and better-sqlite3 not built, e.g. npm 12 blocked
+  // its install script) → one line saying how to get one, not a bindings stack trace.
+  if (e instanceof NoSqliteDriverError) {
     process.stderr.write(`${e.message}\n`);
     process.exit(1);
   }

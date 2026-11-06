@@ -32,7 +32,7 @@
 //   The work folder is removed at the end; if that fails it says so.
 // It never starts the server, consolidates, merges duplicate entities or deletes rows.
 
-import Database from 'better-sqlite3';
+import Database from '../db/sqlite.js';
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync,
   readdirSync, rmdirSync, statSync, statfsSync, writeFileSync, constants as fsc,
@@ -51,7 +51,7 @@ export type MigrateLegacyOpts = {
   /** Called before each step with the connection it is about to use; tests inject failures here.
    *  Steps: 'vacuum-into' (the recovered copy), 'verify-replica' (the replica), every migrate.ts
    *  step (the replica, inside the transaction), 'commit' (the replica, just before COMMIT). */
-  onStep?: (step: string, db: Database.Database) => void;
+  onStep?: (step: string, db: Database) => void;
   log?: (line: string) => void;
 };
 
@@ -79,7 +79,7 @@ export function currentSchemaVersion(): number {
 }
 
 /** Row count of every ordinary table (FTS shadow tables and sqlite_* excluded). */
-export function rowCounts(db: Database.Database): Record<string, number> {
+export function rowCounts(db: Database): Record<string, number> {
   const names = (db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'memories_fts%' ORDER BY name",
   ).all() as Array<{ name: string }>).map((r) => r.name);
@@ -154,7 +154,7 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
   const path = resolve(o.dbPath);
   const name = basename(path);
   const target = currentSchemaVersion();
-  const step = (s: string, db: Database.Database) => o.onStep?.(s, db);
+  const step = (s: string, db: Database) => o.onStep?.(s, db);
 
   if (!existsSync(path)) {
     // A run killed during the swap can leave memory.db inside a backup folder: say so, do not say "nothing".
@@ -194,7 +194,7 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
     mkdirSync(work);
   }
   ctx.work = work;
-  const conns: Database.Database[] = [];
+  const conns: Database[] = [];
   const open = (p: string) => { const d = new Database(p, { fileMustExist: true, timeout: 0 }); conns.push(d); return d; };
   const closeAll = () => { for (const d of conns.splice(0)) { try { if (d.open) d.close(); } catch { /* ignore */ } } };
   const state0 = liveState(path);
@@ -217,7 +217,7 @@ function migrateInner(o: MigrateLegacyOpts, log: (l: string) => void, ctx: { wor
 
     // 2. recover and read the copy
     const hadJournal = existsSync(raw + '-journal') && statSync(raw + '-journal').size > 0;
-    let rdb!: Database.Database; let from!: number;
+    let rdb!: Database; let from!: number;
     try {
       rdb = open(raw);
       from = readSchemaVersion(rdb);

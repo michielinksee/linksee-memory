@@ -41,7 +41,7 @@ import { join, dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
-import Database from 'better-sqlite3';
+import Database from '../db/sqlite.js';
 import { guardFullyWired, wireGuard, syncWiredFor, rewireLegacyHooks, unmanagedLinkseeHooks, type ClaudeSettings } from '../lib/guard-wiring.js';
 import { resolveHookRuntime, formatBytes } from '../lib/hook-runtime.js';
 import { readSettingsFile, stripBom, writeSettingsFile } from '../lib/settings-file.js';

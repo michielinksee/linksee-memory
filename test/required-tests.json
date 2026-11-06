@@ -26,7 +26,8 @@
     "import-cli-append-only.mjs",
     "distill-triage.mjs",
     "consolidate-no-delete.mjs",
-    "auto-consolidate.mjs"
+    "auto-consolidate.mjs",
+    "sqlite-driver.mjs"
   ],
   "packed": [
     "consolidate-no-delete.mjs",

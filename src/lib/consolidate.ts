@@ -23,7 +23,7 @@
 // written into JSON, and rewriting a user's text to add it is not this module's call. They are
 // counted in `skippedPlainText`.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { computeHeat } from './heat-index.js';
 import { decideForgetting } from './forgetting.js';
 import { detectMemoryEdges } from './edge-detection.js';
@@ -107,7 +107,7 @@ function heatOf(now: number, r: { last_accessed_at: number; access_count: number
  * the `consolidate --dry-run` subcommand, and the start-up notice.
  */
 export function planConsolidate(
-  db: Database.Database,
+  db: Database,
   opts: { min_age_days?: number } = {},
   now: number = Math.floor(Date.now() / 1000),
 ): ConsolidatePlan {
@@ -194,7 +194,7 @@ function fragment(content: string, max: number): string {
 }
 
 export function consolidate(
-  db: Database.Database,
+  db: Database,
   opts: { scope?: 'all' | 'session'; min_age_days?: number } = {}
 ): ConsolidateResult {
   const now = Math.floor(Date.now() / 1000);
@@ -365,7 +365,7 @@ export function consolidate(
  * How many rows the (removed) forget-sweep would have dropped — reported, never acted on.
  * Kept for `consolidate --dry-run` so the user can see what earlier versions were deleting.
  */
-export function countSweepCandidates(db: Database.Database, now: number = Math.floor(Date.now() / 1000)): number {
+export function countSweepCandidates(db: Database, now: number = Math.floor(Date.now() / 1000)): number {
   const remaining = db
     .prepare('SELECT id, layer, importance, access_count, last_accessed_at, protected, altitude FROM memories WHERE protected = 0')
     .all() as any[];

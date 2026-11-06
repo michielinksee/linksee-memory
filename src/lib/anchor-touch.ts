@@ -12,7 +12,7 @@
 // statement text, rationale, or content. Best-effort: a failure here must NEVER break
 // the tool call that triggered it.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export type AnchorInteraction = 'create' | 'inspect' | 'review' | 'resolve' | 'resurface';
 
@@ -20,7 +20,7 @@ const DAY = 86400;
 
 /** Record one interaction with a decision/anchor. Best-effort — never throws. */
 export function logAnchorTouch(
-  db: Database.Database,
+  db: Database,
   t: { anchorId?: number | null; sessionId?: string | null; tool: string; interaction: AnchorInteraction },
 ): void {
   try {
@@ -40,7 +40,7 @@ export function logAnchorTouch(
  * session within 7 days has anchor_returns>0.
  */
 export function getSessionAnchorCounts(
-  db: Database.Database,
+  db: Database,
   startSec: number,
   endSec: number,
 ): { anchor_creates: number; anchor_returns: number } {
@@ -82,7 +82,7 @@ export interface AnchorRetention {
  * different, cohort-entry metric — computed server-side from the per-session telemetry
  * counts in getSessionAnchorCounts(), not here.
  */
-export function getAnchorRetention(db: Database.Database, opts: { windowDays?: number } = {}): AnchorRetention {
+export function getAnchorRetention(db: Database, opts: { windowDays?: number } = {}): AnchorRetention {
   const windowDays = opts.windowDays ?? 7;
   const empty: AnchorRetention = {
     totalAnchors: 0, firstAnchorAt: null, lastAnchorAt: null, returnInteractions: 0,

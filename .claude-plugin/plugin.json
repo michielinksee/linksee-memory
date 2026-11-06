@@ -1,7 +1,7 @@
 {
   "name": "linksee-memory",
   "displayName": "Linksee Memory",
-  "version": "0.18.1",
+  "version": "0.19.0",
   "description": "A local MCP memory server: one SQLite file on your machine that Claude Code, Cursor, Windsurf, OpenAI Codex and Gemini CLI all read and write. No account, no credit card, no cloud, no API key.",
   "author": {
     "name": "Synapse Arrows Pte. Ltd.",

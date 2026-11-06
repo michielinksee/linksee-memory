@@ -7,7 +7,7 @@
 // This is where a hand-declared suspect meets the ground truth: declare
 // "telemetry-contract: not implemented", scan the code, find sendTelemetry →
 // the suspect is REFUTED (convergence). The Map self-corrects.
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
@@ -223,7 +223,7 @@ function evaluate(reality: Reality, repoRoot: string): EvalResult {
   return { verdict, reason, why, fix: reality.fix ?? [], checks: results, expected: null, check: null };
 }
 
-export function reconcile(db: Database.Database, project: string, repoRoot: string): ReconcileResult {
+export function reconcile(db: Database, project: string, repoRoot: string): ReconcileResult {
   const rows = db.prepare('SELECT id, status, reality FROM map_nodes WHERE project = ?').all(project) as Array<{ id: string; status: string; reality: string }>;
   const upd = db.prepare('UPDATE map_nodes SET live_verdict = ?, verdict_evidence = ?, reconciled_at = unixepoch() WHERE project = ? AND id = ?');
 
