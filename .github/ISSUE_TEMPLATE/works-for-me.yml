@@ -1,0 +1,61 @@
+name: Works for me
+description: Tell us whether linksee-memory worked with your client and OS. One report fills one cell of the README table.
+title: "Works for me: <client> on <OS>"
+labels: ["works-for-me"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. One report fills one cell of the [Works for me](https://github.com/michielinksee/linksee-memory#works-for-me) table, and your name goes in the weekly report under "Added by others".
+        **Do not paste anything from your memory database, your file paths with personal names, or other personal information.** "Yes / no" and an error message are enough.
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      description: Claude Code, Codex, Cursor, Windsurf, Gemini CLI, or another MCP client.
+      placeholder: "Claude Code 2.1.3"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: OS and version. Add Node.js version if you know it (`node -v`).
+      placeholder: "macOS 15.1, Node 22.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - npx -y linksee-memory setup
+        - Claude Code plugin (/plugin install)
+        - claude mcp add
+        - codex mcp add
+        - Hand-written JSON config (Cursor, Windsurf, Gemini CLI, Claude Desktop)
+        - Other (say which below)
+    validations:
+      required: true
+  - type: textarea
+    id: round-trip
+    attributes:
+      label: First round trip
+      description: |
+        Follow [First round trip](https://github.com/michielinksee/linksee-memory#first-round-trip): `remember` a decision, open a new session, `recall` it. Did it come back? If not, paste the error.
+      placeholder: |
+        Yes. Said "Remember: we use pnpm, because of the lockfile. Use Linksee." Opened a new session, asked "What did we decide about pnpm? Use Linksee." It came back with by: claude-code.
+    validations:
+      required: true
+  - type: dropdown
+    id: hooks
+    attributes:
+      label: Did the hooks run?
+      description: Only `npx -y linksee-memory setup` on Claude Code installs hooks (Stop auto-capture, re-injection guard). Pick "Not applicable" for any other route.
+      options:
+        - "Yes"
+        - "No"
+        - "I don't know"
+        - Not applicable (no setup, or not Claude Code)
+    validations:
+      required: true
