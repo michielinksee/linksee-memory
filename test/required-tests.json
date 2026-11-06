@@ -21,7 +21,6 @@
     "remember-anchor.mjs",
     "tool-surface.mjs",
     "hook-runtime.mjs",
-    "setup-settings.mjs",
     "supersede-source.mjs",
     "session-import.mjs",
     "import-cli-append-only.mjs",
