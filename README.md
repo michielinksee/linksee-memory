@@ -75,7 +75,12 @@ Weekly report: [Discussion #16](https://github.com/michielinksee/linksee-memory/
 Docs: [docs.linksee.app](https://docs.linksee.app) · Site: [linksee.app](https://linksee.app) (setup guides for non-developers) · Free, MIT, local only — there is no paid tier you need.
 
 <!-- releases: tag-driven, published from CI via npm trusted publishing (OIDC).
-     See .github/workflows/publish.yml — no token, no OTP, provenance attached automatically. -->
+     See .github/workflows/publish.yml — no token, no OTP, provenance attached automatically.
+     The same tag push also publishes server.json to the official MCP registry
+     (io.github.michielinksee/linksee-memory), after npm succeeds: a pinned, Sigstore-verified
+     mcp-publisher runs validate → login github-oidc → publish. A dry run stops at validate. If the
+     registry step fails, npm is already published and the job goes red with a notice — then publish
+     by hand from the tagged commit: `mcp-publisher login github` → `mcp-publisher publish`. -->
 
 <a id="what-setup-writes"></a>
 

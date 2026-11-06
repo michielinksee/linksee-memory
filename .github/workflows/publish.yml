@@ -8,6 +8,10 @@ name: Publish
 # code. OIDC removes the whole class of problem: GitHub proves the workflow's identity to npm
 # directly, and npm mints provenance from it.
 #
+# Also publishes server.json to the official MCP registry after npm succeeds (see the
+# "Official MCP registry" steps below). If that part fails, npm is already done: the job goes red
+# with a one-line "publish by hand" notice.
+#
 # Trigger: push a version tag.
 #     npm version <patch|minor|major>   # bumps package.json (also update server.json + .well-known)
 #     git push origin main --follow-tags
@@ -39,7 +43,7 @@ permissions:
 
 jobs:
   publish:
-    name: Verify + publish to npm
+    name: Verify + publish to npm + MCP registry
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -160,6 +164,7 @@ jobs:
           exit 1
 
       - name: Publish to npm (the tested tarball)
+        id: npm_publish
         if: github.event_name == 'push' || !inputs.dry_run
         # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for short-lived credentials.
         # A tarball argument means npm neither runs prepublishOnly nor re-packs: the bytes published
@@ -167,6 +172,82 @@ jobs:
         run: |
           echo "npm $(npm -v) · node $(node -v)"
           npm publish "$RUNNER_TEMP/linksee-memory.tgz" --provenance
+
+      # ── Official MCP registry (registry.modelcontextprotocol.io) ──────────────────────────────
+      # Runs only after the npm publish above succeeded (a failed npm step skips everything below
+      # except the notices). Follows the registry's own GitHub Actions guide:
+      #   https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/github-actions.mdx
+      # mcp-publisher is pinned to one release and its Sigstore bundle is verified before use —
+      # never `releases/latest`. To upgrade, change MCP_PUBLISHER_VERSION on purpose.
+      # A dry run stops after `validate`: no login, no publish.
+
+      - name: Install cosign (verifies the mcp-publisher download)
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher (pinned)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.7
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob             --bundle "$archive.sigstore.json"             --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}"             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"             "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+          echo "mcp-publisher ${MCP_PUBLISHER_VERSION} (Sigstore-verified) at $RUNNER_TEMP/mcp-publisher"
+
+      - name: server.json matches the tarball that went to npm
+        # Second check, separate from the release gate: compare server.json with the package.json
+        # INSIDE the published tarball (name ↔ mcpName, both versions), and with the tag on a push.
+        # Any mismatch → nothing is sent to the registry.
+        run: |
+          set -euo pipefail
+          tar -xzOf "$RUNNER_TEMP/linksee-memory.tgz" package/package.json > "$RUNNER_TEMP/packed-package.json"
+          TAG=""
+          if [ "${{ github.event_name }}" = "push" ]; then TAG="${GITHUB_REF_NAME#v}"; fi
+          TAG="$TAG" PACKED="$RUNNER_TEMP/packed-package.json" node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync(process.env.PACKED, "utf8"));
+            const srv = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const npmPkg = (srv.packages || []).find((p) => p.registryType === "npm" && p.identifier === pkg.name);
+            const bad = [];
+            if (srv.name !== pkg.mcpName) bad.push(`server.json name ${srv.name} != packed mcpName ${pkg.mcpName}`);
+            if (srv.version !== pkg.version) bad.push(`server.json version ${srv.version} != packed version ${pkg.version}`);
+            if (!npmPkg) bad.push(`server.json has no npm package entry for ${pkg.name}`);
+            else if (npmPkg.version !== pkg.version) bad.push(`server.json packages[npm].version ${npmPkg.version} != packed version ${pkg.version}`);
+            if (process.env.TAG && process.env.TAG !== pkg.version) bad.push(`tag v${process.env.TAG} != packed version ${pkg.version}`);
+            if (bad.length) { for (const b of bad) console.log(`::error::${b}`); process.exit(1); }
+            console.log(`server.json ${srv.name}@${srv.version} == npm tarball ${pkg.name}@${pkg.version}`);
+          '
+
+      - name: mcp-publisher validate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/mcp-publisher" --version || true
+          "$RUNNER_TEMP/mcp-publisher" validate server.json
+
+      - name: Publish to the MCP registry
+        id: registry_publish
+        if: github.event_name == 'push' || !inputs.dry_run
+        # login github-oidc uses the same id-token: write permission as npm above; no secret.
+        # The registry checks the npm package (mcpName) exists, so wait briefly for npm to serve it.
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./server.json').version")
+          for i in $(seq 1 12); do
+            if [ "$(npm view "linksee-memory@$VERSION" version 2>/dev/null || true)" = "$VERSION" ]; then break; fi
+            echo "waiting for npm to serve linksee-memory@$VERSION ($i/12)"; sleep 10
+          done
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish server.json
+
+      - name: Registry not updated — publish by hand
+        if: failure() && steps.npm_publish.outcome == 'success'
+        run: |
+          echo "::error::npm has this version but the MCP registry was not updated. Run by hand from the tagged commit: mcp-publisher login github && mcp-publisher publish"
 
       - name: Summary
         if: always()
@@ -177,4 +258,5 @@ jobs:
             echo "- version: \`$(node -p "require('./package.json').version")\`"
             echo "- npm: \`$(npm --version)\` · node: \`$(node --version)\`"
             echo "- auth: trusted publishing (OIDC) — no token, no OTP"
+            echo "- npm publish: \`${{ steps.npm_publish.outcome || 'not run' }}\` · MCP registry publish: \`${{ steps.registry_publish.outcome || 'not run' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

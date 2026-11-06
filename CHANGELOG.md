@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Release CI:** a version tag now also publishes `server.json` to the official MCP registry after the npm publish succeeds (pinned, Sigstore-verified `mcp-publisher`, `login github-oidc`, no secret; server.json is re-checked against the published tarball first). A dry run stops at `validate`. If the registry step fails, the job goes red with a "publish by hand" notice.
+
 ## v0.19.0 — unreleased (SQLite from Node itself: npm 12's `npx` starts again)
 
 No new tools, no schema change, same `memory.db`. The SQLite driver underneath changed.
