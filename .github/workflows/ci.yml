@@ -94,6 +94,7 @@ jobs:
         run: |
           export LINKSEE_TELEMETRY=off
           timeout 60 node test/session-import.mjs
+          timeout 90 node test/import-cli-append-only.mjs
           timeout 60 node test/distill-triage.mjs
           timeout 120 node test/consolidate-no-delete.mjs
           timeout 60 node test/auto-consolidate.mjs

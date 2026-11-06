@@ -47,7 +47,9 @@ left of them.
   edits, ids, `memory_edges` and drift verdicts stay. New keys are inserted; a row whose key the
   extractor no longer produces is left. The one `session_imported` event per session is updated
   in place. All of it is one `BEGIN IMMEDIATE` transaction; a failure leaves every table as it
-  was.
+  was. Before importing, the normal schema migration runs: it can raise `protected` (0 → 1
+  only, for rows with importance ≥ 0.9) and fill columns an older schema lacks; it does not
+  change the text, relations or verdicts of a memory.
 - **The start-up distill triage skips caveats and protected rows.** It runs at every server
   start and archives short or stale raw captures as `state: superseded`, which the default
   `recall` hides — so a short caveat ("never X") was hidden at every start. Protected rows and
