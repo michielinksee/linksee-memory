@@ -52,7 +52,14 @@ work = mkdtempSync(join(tmpdir(), 'linksee-packed-'));
 // 1. pack (no lifecycle scripts of ours run on pack; prepublishOnly is publish-only)
 const packOut = npm(`pack --json --pack-destination ${q(work)}`, REPO);
 let packed;
-try { packed = JSON.parse(packOut)[0]; } catch (e) { fail(`could not parse npm pack --json output: ${e.message}\n${packOut}`); }
+// npm <= 11 prints [ {...} ]; npm 12 prints { "<name>": {...} }. Accept exactly one entry of either shape.
+try {
+  const j = JSON.parse(packOut);
+  const entries = Array.isArray(j) ? j : Object.values(j);
+  if (entries.length !== 1) throw new Error(`expected one package, got ${entries.length}`);
+  packed = entries[0];
+} catch (e) { fail(`could not parse npm pack --json output: ${e.message}\n${packOut}`); }
+if (!packed?.filename || !/^sha512-/.test(packed?.integrity ?? '')) fail(`npm pack --json gave no filename/integrity:\n${packOut}`);
 const tgz = join(work, packed.filename);
 if (!existsSync(tgz)) fail(`npm pack reported ${packed.filename} but it is not in ${work}`);
 console.log(`✓ packed ${packed.filename} · ${packed.entryCount} files · ${packed.integrity}`);

@@ -121,11 +121,12 @@ jobs:
         run: |
           set -euo pipefail
           pnpm run build
-          NOW=$(npm pack --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].integrity))")
+          # npm <= 11 prints [ {...} ]; npm 12 prints { "<name>": {...} } — take the single entry of either.
+          NOW=$(npm pack --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const e=Array.isArray(j)?j:Object.values(j);if(e.length!==1)process.exit(1);console.log(e[0].integrity)})")
           TESTED=$(cat "$RUNNER_TEMP/tested-integrity")
           echo "tested:  $TESTED"
           echo "publish: $NOW"
-          if [ -z "$TESTED" ] || [ "$NOW" != "$TESTED" ]; then
+          if [ -z "$TESTED" ] || [ -z "$NOW" ] || [ "$NOW" != "$TESTED" ]; then
             echo "::error::the package about to be published differs from the tarball that passed the preservation tests"
             exit 1
           fi
