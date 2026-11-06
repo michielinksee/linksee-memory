@@ -67,8 +67,17 @@ console.log(`✓ packed ${packed.filename} · ${packed.entryCount} files · ${pa
 // 2. install into an empty consumer project
 const consumer = join(work, 'consumer');
 mkdirSync(consumer);
-writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'linksee-packed-consumer', version: '0.0.0', private: true }, null, 2));
+// npm 12 blocks dependency install scripts unless the project's `allowScripts` covers them, so
+// better-sqlite3 would get no native binding and every test would fail on `bindings`, not on what
+// it checks. Allow exactly that one package (npm 11 ignores the field; npm 12 rejects the
+// --allow-scripts flag in a project install). NOTE: a user on npm 12 running `npx linksee-memory`
+// or `npm i -g linksee-memory` without --allow-scripts=better-sqlite3 hits that same wall — tracked
+// separately; this script tests the preservation guarantees, not the install instructions.
+writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'linksee-packed-consumer', version: '0.0.0', private: true, allowScripts: { 'better-sqlite3': true } }, null, 2));
 npm(`install --no-save ${q(tgz)}`, consumer);
+if (!existsSync(join(consumer, 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'))) {
+  fail('better-sqlite3 has no native binding after install (install script blocked or failed)');
+}
 const installed = join(consumer, 'node_modules', 'linksee-memory');
 if (!existsSync(installed) || lstatSync(installed).isSymbolicLink()) fail(`${installed} is missing or a symlink — not a real install of the tarball`);
 const real = realpathSync(installed);
