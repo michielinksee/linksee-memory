@@ -41,7 +41,7 @@ jobs:
   publish:
     name: Verify + publish to npm
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -89,19 +89,15 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Regression tests
-        # The two defects that shipped in 0.11.5 are covered here. A release must not
-        # reintroduce them silently.
-        run: |
-          node test/supersede-gate.mjs
-          node test/edges-state.mjs
-          node test/guard-wiring.mjs
-          node test/guard-scope.mjs
-          node test/guard-dismiss.mjs
-          node test/remember-anchor.mjs
-          node test/tool-surface.mjs
-          node test/distill-triage.mjs
-          node test/supersede-source.mjs
+      - name: Tests (one list — test/suite.json, same as PR CI)
+        # Before L-1-328 this step had its own hand-written list and had drifted from ci.yml:
+        # the 0.18.1 no-delete tests never ran before a publish. Now both read test/suite.json.
+        run: node scripts/run-tests.mjs
+
+      - name: Preservation tests against the npm tarball
+        # npm pack → install into an empty project → run test/required-tests.json `packed` there.
+        # Records the tested tarball's integrity for the check right before publishing.
+        run: node scripts/test-packed.mjs --integrity-out "$RUNNER_TEMP/tested-integrity"
 
       - name: MCP initialize + tools/list handshake
         run: |
@@ -117,6 +113,22 @@ jobs:
             fi
           done
           echo "✓ MCP handshake passed"
+
+      - name: Publish only what was tested
+        # prepublishOnly rebuilds dist (release gate + `npm run build`). Rebuild now and re-pack
+        # without writing a file: the content npm is about to publish must hash the same as the
+        # tarball the preservation tests just passed on. Any difference stops the release.
+        run: |
+          set -euo pipefail
+          pnpm run build
+          NOW=$(npm pack --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].integrity))")
+          TESTED=$(cat "$RUNNER_TEMP/tested-integrity")
+          echo "tested:  $TESTED"
+          echo "publish: $NOW"
+          if [ -z "$TESTED" ] || [ "$NOW" != "$TESTED" ]; then
+            echo "::error::the package about to be published differs from the tarball that passed the preservation tests"
+            exit 1
+          fi
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run

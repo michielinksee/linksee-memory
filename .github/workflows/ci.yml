@@ -13,9 +13,9 @@ on:
 
 jobs:
   build:
-    name: Build + handshake test
+    name: Build + handshake + tests
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -77,24 +77,12 @@ jobs:
 
           echo "✓ MCP handshake passed"
 
-      - name: share_draft (no network)
-        run: node test/share-draft.mjs
+      - name: Tests (one list — test/suite.json, throwaway HOME and DB per test)
+        # The same list `pnpm test` and publish.yml run. Never enumerate test files here:
+        # scripts/run-tests.mjs --check fails if a workflow does (L-1-328).
+        run: node scripts/run-tests.mjs
 
-      - name: Old databases + migrate + runtime prune (throwaway DBs, temp HOME)
-        run: |
-          export HOME="$RUNNER_TEMP/home" LINKSEE_MEMORY_DIR="$RUNNER_TEMP/mem" LINKSEE_TELEMETRY=off
-          mkdir -p "$HOME" "$LINKSEE_MEMORY_DIR"
-          timeout 120 node test/legacy-schema.mjs
-          timeout 120 node test/legacy-migrate.mjs
-
-      - name: remember → recall live check (throwaway DB in a temp folder)
-        run: timeout 30 node test/live-check.mjs
-
-      - name: no memory DELETE (session re-import, triage, consolidate) + auto-consolidate off (throwaway DB)
-        run: |
-          export LINKSEE_TELEMETRY=off
-          timeout 60 node test/session-import.mjs
-          timeout 90 node test/import-cli-append-only.mjs
-          timeout 60 node test/distill-triage.mjs
-          timeout 120 node test/consolidate-no-delete.mjs
-          timeout 60 node test/auto-consolidate.mjs
+      - name: Preservation tests against the npm tarball
+        # npm pack → npm install into an empty project → run the `packed` names from
+        # test/required-tests.json there. Catches a package that passes in the tree but not as shipped.
+        run: node scripts/test-packed.mjs

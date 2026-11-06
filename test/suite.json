@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "The one list of tests. `pnpm test`, .github/workflows/ci.yml and .github/workflows/publish.yml all run",
+    "it through scripts/run-tests.mjs; none of them may enumerate test files on their own (run-tests.mjs --check",
+    "refuses). Every test/*.mjs must appear exactly once: under `tests` (run everywhere) or under `excluded`",
+    "with the reason it cannot run in CI. Names in test/required-tests.json can never move to `excluded`.",
+    "timeout is in seconds, per test, and generous on purpose (Windows laptops are slower than the runner)."
+  ],
+  "tests": [
+    { "file": "share-draft.mjs", "timeout": 60 },
+    { "file": "legacy-schema.mjs", "timeout": 180 },
+    { "file": "legacy-migrate.mjs", "timeout": 240 },
+    { "file": "live-check.mjs", "timeout": 60 },
+    { "file": "supersede-gate.mjs", "timeout": 60 },
+    { "file": "edges-state.mjs", "timeout": 60 },
+    { "file": "guard-wiring.mjs", "timeout": 60 },
+    { "file": "guard-scope.mjs", "timeout": 60 },
+    { "file": "guard-dismiss.mjs", "timeout": 60 },
+    { "file": "remember-anchor.mjs", "timeout": 60 },
+    { "file": "tool-surface.mjs", "timeout": 90 },
+    { "file": "hook-runtime.mjs", "timeout": 90 },
+    { "file": "setup-settings.mjs", "timeout": 120 },
+    { "file": "supersede-source.mjs", "timeout": 120 },
+    { "file": "session-import.mjs", "timeout": 90 },
+    { "file": "import-cli-append-only.mjs", "timeout": 120 },
+    { "file": "distill-triage.mjs", "timeout": 60 },
+    { "file": "consolidate-no-delete.mjs", "timeout": 180 },
+    { "file": "auto-consolidate.mjs", "timeout": 90 }
+  ],
+  "excluded": {
+    "smoke.mjs": "writes to ~/.linksee-memory-test under the real home directory",
+    "smoke-v0.1.0.mjs": "writes to ~/.linksee-memory-test-v010 under the real home directory",
+    "smoke-v0.3.0.mjs": "writes to ~/.linksee-memory-v030-test under the real home directory",
+    "smoke-read-smart.mjs": "writes to ~/.linksee-memory-test-rs under the real home directory",
+    "final-state.mjs": "reads the real ~/.linksee-memory/memory.db",
+    "verify-recall-quality.mjs": "reads the real ~/.linksee-memory/memory.db",
+    "inspect-extraction.mjs": "reads one developer's ~/.claude/projects transcripts"
+  }
+}
