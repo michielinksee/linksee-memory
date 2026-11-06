@@ -25,7 +25,7 @@
 // Measured before shipping (2026-09-07, 389 raw): noise 88, stale 51, queue 250 — and the
 // noise sample was read by a human before the rule was trusted.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export const SETTLE_SECONDS = 30 * 60;   // a session still in motion is not triaged (matches dream)
 export const STALE_DAYS = 90;
@@ -61,7 +61,7 @@ export interface TriageReport {
  * Walk every needs_distill memory outside the settle window and archive the ones a rule can
  * settle. Idempotent — archived rows no longer match the WHERE clause.
  */
-export function triageDistillQueue(db: Database.Database, opts: { dryRun?: boolean } = {}): TriageReport {
+export function triageDistillQueue(db: Database, opts: { dryRun?: boolean } = {}): TriageReport {
   const now = Math.floor(Date.now() / 1000);
   const rows = db
     .prepare(
@@ -102,7 +102,7 @@ export function triageDistillQueue(db: Database.Database, opts: { dryRun?: boole
 }
 
 /** Count of rows still awaiting a human/agent rewrite (outside the settle window). */
-export function distillPending(db: Database.Database): number {
+export function distillPending(db: Database): number {
   const now = Math.floor(Date.now() / 1000);
   const r = db
     .prepare(

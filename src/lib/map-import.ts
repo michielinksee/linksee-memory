@@ -4,7 +4,7 @@
 // Import is a full rebuild per project: wipe the project's rows, re-insert. That
 // keeps map.yaml authoritative — a node deleted from the file disappears from the
 // index, exactly like `terraform apply` converging to the declared state.
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 
@@ -85,7 +85,7 @@ export interface ImportResult {
 // Full-rebuild import inside one transaction. Validates topology and collects
 // warnings (dangling edge endpoints, unknown stage/status) WITHOUT aborting — a
 // map mid-edit should still load so the dashboard can show what IS there.
-export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
+export function importMap(db: Database, map: ParsedMap): ImportResult {
   const warnings: string[] = [];
   const stageIds = new Set(map.stages.map((s) => s.id));
   const nodeIds = new Set(map.nodes.map((n) => n.id));
@@ -180,6 +180,6 @@ export function importMap(db: Database.Database, map: ParsedMap): ImportResult {
   return { project: map.project, nodes: map.nodes.filter((n) => n.id).length, edges: map.edges.length, linked_anchors: linked, warnings };
 }
 
-export function importMapFile(db: Database.Database, path: string): ImportResult {
+export function importMapFile(db: Database, path: string): ImportResult {
   return importMap(db, parseMapFile(path));
 }

@@ -3,7 +3,7 @@
 // or only the changed chunks + unchanged summary on real modifications.
 
 import { readFileSync, statSync } from 'node:fs';
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { chunkFile, hashFile, type Chunk } from '../lib/file-chunker.js';
 
 interface SnapshotRow {
@@ -36,7 +36,7 @@ function toMeta(c: Chunk): StoredChunkMeta {
 }
 
 export function handleReadSmart(
-  db: Database.Database,
+  db: Database,
   args: { path: string; force?: boolean }
 ): string {
   const { path, force = false } = args;

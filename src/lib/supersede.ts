@@ -11,7 +11,7 @@
 // or a row the next session import will rewrite (raw Stop-hook capture) is refused, and nothing
 // is written — no new row, no edge, no state change.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export const MAX_SUPERSEDES = 20;
 
@@ -47,7 +47,7 @@ interface OldRow { id: number; entity_id: number; content: string; source: strin
  * Check every id against the DB. Throws SupersedeRefused on the first id that cannot be
  * confirmed. Call inside the same transaction as the INSERT so the check and the write agree.
  */
-export function checkSupersedes(db: Database.Database, ids: number[], entityId: number, newId?: number): OldRow[] {
+export function checkSupersedes(db: Database, ids: number[], entityId: number, newId?: number): OldRow[] {
   const get = db.prepare('SELECT id, entity_id, content, source FROM memories WHERE id = ?');
   const rows: OldRow[] = [];
   for (const id of ids) {
@@ -84,7 +84,7 @@ function isRawSessionCapture(row: OldRow): boolean {
  * detector and distill triage already use). Plain-text content is left as written; the edge
  * alone is what recall folds on.
  */
-export function applySupersedes(db: Database.Database, newId: number, rows: OldRow[]): void {
+export function applySupersedes(db: Database, newId: number, rows: OldRow[]): void {
   const edge = db.prepare(`INSERT OR IGNORE INTO memory_edges (from_memory_id, to_memory_id, relation) VALUES (?, ?, 'supersedes')`);
   const mark = db.prepare(
     `UPDATE memories SET content = json_set(content, '$.state', 'superseded', '$.superseded_by', ?)

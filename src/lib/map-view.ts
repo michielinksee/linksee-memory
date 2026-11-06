@@ -3,7 +3,7 @@
 //   blastRadius(node) — "if THIS drifts out-of-band, what is now suspect?"  (the
 //     thing flat anchors could not compute — it needs node↔node edges)
 //   getBlueprint()    — stages × nodes with status color, the dashboard home.
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export interface NodeRow {
   id: string; project: string; layer: string; stage: string | null;
@@ -60,7 +60,7 @@ export interface ProjectMeta {
   product_status: string | null; template: string | null;
   stages: Array<{ id: string; label?: string }>; related_projects: unknown[];
 }
-export function getProjectMeta(db: Database.Database, project: string): ProjectMeta | undefined {
+export function getProjectMeta(db: Database, project: string): ProjectMeta | undefined {
   const r = db.prepare('SELECT * FROM map_projects WHERE project = ?').get(project) as any;
   if (!r) return undefined;
   const j = (s: string, dflt: unknown) => { try { return JSON.parse(s); } catch { return dflt; } };
@@ -69,14 +69,14 @@ export function getProjectMeta(db: Database.Database, project: string): ProjectM
     template: r.template, stages: j(r.stages, []), related_projects: j(r.related_projects, []),
   };
 }
-export function listMapProjects(db: Database.Database): string[] {
+export function listMapProjects(db: Database): string[] {
   return (db.prepare('SELECT project FROM map_projects ORDER BY project').all() as Array<{ project: string }>).map((r) => r.project);
 }
 
-export function getNode(db: Database.Database, project: string, id: string): NodeRow | undefined {
+export function getNode(db: Database, project: string, id: string): NodeRow | undefined {
   return db.prepare('SELECT * FROM map_nodes WHERE project = ? AND id = ?').get(project, id) as NodeRow | undefined;
 }
-export function getSuspects(db: Database.Database, project: string): NodeRow[] {
+export function getSuspects(db: Database, project: string): NodeRow[] {
   return db.prepare("SELECT * FROM map_nodes WHERE project = ? AND status = 'suspect' ORDER BY stage, id").all(project) as NodeRow[];
 }
 
@@ -89,7 +89,7 @@ export interface BlastHit { id: string; statement: string; status: string; via: 
 //     reverse for `realizes` (changing a surface's intent implicates its impl).
 //   reflux                    — informational only (expand→discover feedback), not
 //     a breakage path; excluded from the suspect set.
-export function blastRadius(db: Database.Database, project: string, id: string): BlastHit[] {
+export function blastRadius(db: Database, project: string, id: string): BlastHit[] {
   const edges = db.prepare('SELECT from_id, to_id, type, strength, note FROM map_edges WHERE project = ? AND (from_id = ? OR to_id = ?)')
     .all(project, id, id) as EdgeRow[];
   const hits = new Map<string, BlastHit>();
@@ -144,7 +144,7 @@ function queryTerms(q: string): string[] {
 }
 
 export function whereAmI(
-  db: Database.Database,
+  db: Database,
   opts: { project?: string; query?: string; node_id?: string; limit?: number }
 ): WhereAmIResult {
   // Fix ② (2026-06-17): never silently grab the most-recently-touched map. When the
@@ -236,7 +236,7 @@ export interface Blueprint {
 
 // The dashboard home: surface nodes laid out by journey stage (the columns),
 // implementation nodes in their own tray, every node carrying a status color.
-export function getBlueprint(db: Database.Database, project: string, stageOrder?: Array<{ id: string; label?: string }>): Blueprint {
+export function getBlueprint(db: Database, project: string, stageOrder?: Array<{ id: string; label?: string }>): Blueprint {
   // Fall back to the persisted canonical spine when the caller didn't pass one (the dashboard path).
   const order = stageOrder ?? getProjectMeta(db, project)?.stages ?? [];
   const all = db.prepare('SELECT * FROM map_nodes WHERE project = ? ORDER BY stage, id').all(project) as NodeRow[];

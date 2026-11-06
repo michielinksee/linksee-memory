@@ -25,6 +25,7 @@ const NATIVE_PATTERNS = [
   /mach-o, but wrong architecture|not a mach-o file/i,
   /better_sqlite3\.node/,
   /Cannot find (module|package) 'better-sqlite3'/,
+  /LINKSEE_NO_SQLITE_DRIVER/, // 0.19.0: neither node:sqlite nor better-sqlite3 (src/db/sqlite.ts)
 ];
 
 /** Does this error (or child-process stderr) look like the native addon failing to load? */

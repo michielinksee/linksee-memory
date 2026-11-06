@@ -90,6 +90,16 @@ jobs:
       - name: Tests (one list — test/suite.json, throwaway HOME and DB per test)
         # The same list `pnpm test` and publish.yml run. Never enumerate test files here:
         # scripts/run-tests.mjs --check fails if a workflow does (L-1-328).
+        # 0.19.0: forced to node:sqlite (Node 24 has it), so a broken detection cannot quietly test better-sqlite3 twice.
+        env:
+          LINKSEE_SQLITE_DRIVER: node
+        run: node scripts/run-tests.mjs
+
+      - name: Tests again on the better-sqlite3 driver (the fallback for Node < 22.13)
+        # 0.19.0: the default driver is node:sqlite (src/db/sqlite.ts); the same list must also pass
+        # through better-sqlite3, which Node 20 / Node 22 < 22.13 users still get.
+        env:
+          LINKSEE_SQLITE_DRIVER: better
         run: node scripts/run-tests.mjs
 
       - name: Preservation tests against the npm tarball

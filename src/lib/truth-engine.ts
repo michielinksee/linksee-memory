@@ -13,7 +13,7 @@
 //   commitment  → Heartbeats (cadence monitoring, alive/dead)
 //   source_of_truth → Reference (quiet, rarely changes)
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -162,7 +162,7 @@ interface ResolutionRecord {
   [key: string]: unknown;
 }
 
-function buildResolutionLookup(db: Database.Database): (id: number) => ResolutionRecord | null {
+function buildResolutionLookup(db: Database): (id: number) => ResolutionRecord | null {
   const t3res = safeJsonParse(
     (db.prepare("SELECT value FROM meta WHERE key='t3_resolutions'").get() as any)?.value,
     {} as Record<string, any>,
@@ -220,7 +220,7 @@ function buildResolutionLookup(db: Database.Database): (id: number) => Resolutio
  * make-or-break rule as the reporting layer: a divergence accounted for by a recorded
  * resolution is NOT drift.
  */
-export function supersededAnchorIds(db: Database.Database): Set<number> {
+export function supersededAnchorIds(db: Database): Set<number> {
   const out = new Set<number>();
   for (const key of ['t3_resolutions', 't2_resolutions'] as const) {
     const res = safeJsonParse(
@@ -237,7 +237,7 @@ export function supersededAnchorIds(db: Database.Database): Set<number> {
 }
 
 export function getTruthView(
-  db: Database.Database,
+  db: Database,
   opts: { domain?: string; decision_mode?: string } = {},
 ): TruthView {
   const now = Date.now();
@@ -471,7 +471,7 @@ export function getTruthView(
 // ── check_decision: single-node deep view ────────────────────────────────────
 
 export function getDecisionDetail(
-  db: Database.Database,
+  db: Database,
   anchorId: number,
 ): DecisionDetail | null {
   const row = db
@@ -617,7 +617,7 @@ export interface ResolveInput {
   superseded_by?: number; // for supersede: the new anchor
 }
 
-export function resolveDrift(db: Database.Database, input: ResolveInput): { ok: boolean; resolution: any } {
+export function resolveDrift(db: Database, input: ResolveInput): { ok: boolean; resolution: any } {
   const ACTIONS = new Set<ResolutionAction>(['fix', 'supersede', 'acknowledge', 'dismiss']);
   if (!ACTIONS.has(input.action)) {
     throw new Error(`invalid action "${input.action}" — one of: fix, supersede, acknowledge, dismiss`);

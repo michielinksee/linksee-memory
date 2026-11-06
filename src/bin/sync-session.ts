@@ -124,7 +124,7 @@ async function main(): Promise<void> {
       const dbDir = process.env.LINKSEE_MEMORY_DIR ?? join(homedir(), '.linksee-memory');
       const dbPath = join(dbDir, 'memory.db');
       if (existsSync(dbPath)) {
-        const { default: Database } = await import('better-sqlite3');
+        const { default: Database } = await import('../db/sqlite.js');
         const db = new Database(dbPath, { readonly: true });
         try {
           const payload = buildPayload(db, sessionId, { mcpServersInUse: mcpServers });

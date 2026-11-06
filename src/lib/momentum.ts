@@ -3,7 +3,7 @@
 // Agent-memory adaptation: detects "this entity is currently active in the agent's context."
 // Drives "context-dependent retrieval" (Michie's memory principle 5).
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export interface MomentumInput {
   eventsLast24h: number;
@@ -60,7 +60,7 @@ export function computeMomentum(input: MomentumInput): MomentumResult {
 }
 
 // Compute and cache momentum for an entity using DB state.
-export function refreshMomentumForEntity(db: Database.Database, entityId: number): MomentumResult {
+export function refreshMomentumForEntity(db: Database, entityId: number): MomentumResult {
   const now = Math.floor(Date.now() / 1000);
   const dayAgo = now - 86400;
   const weekAgo = now - 7 * 86400;

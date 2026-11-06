@@ -26,7 +26,7 @@
 // imported — e.g. a file_edit row keeps the op count of the turn it was first imported in.
 // Distilled rewrites still suppress the raw turn. Everything is one BEGIN IMMEDIATE transaction.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import type { ExtractedFileEdit, ExtractedMemory } from './session-extractor.js';
 import { faultPoint } from './test-faults.js';
 
@@ -86,7 +86,7 @@ function editKeyer() {
 }
 
 export function importSession(
-  db: Database.Database,
+  db: Database,
   input: SessionImportInput,
   opts: { entityId: number; sourceJson: (src: object) => string; startedAt: number },
 ): SessionImportResult {

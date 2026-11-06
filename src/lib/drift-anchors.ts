@@ -11,7 +11,7 @@
 // a friendlier error and the structural validation (a prohibition with no violation
 // signal can never fire, so we reject it at write time rather than store dead weight).
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 
 export type AnchorKind = 'prohibition' | 'decision' | 'constraint';
 export type AnchorTier = 'human' | 'explicit'; // declare-don't-mine floor — agent/inferred forbidden
@@ -88,7 +88,7 @@ function hydrate(r: any): AnchorRow {
  * Declare a drift anchor from explicit input. Clean by construction — validates the
  * declare-don't-mine tier floor and the "can this anchor ever fire?" structural rule.
  */
-export function declareAnchor(db: Database.Database, input: DeclareAnchorInput): AnchorRow {
+export function declareAnchor(db: Database, input: DeclareAnchorInput): AnchorRow {
   if (!KINDS.has(input.kind)) {
     throw new Error(`invalid kind "${input.kind}" — one of: prohibition, decision, constraint`);
   }
@@ -145,7 +145,7 @@ export function declareAnchor(db: Database.Database, input: DeclareAnchorInput):
  * that human review is what keeps the anchor pool clean.
  */
 export function curateAnchorFromMemory(
-  db: Database.Database,
+  db: Database,
   memoryId: number,
   overrides: Partial<DeclareAnchorInput> & { kind: AnchorKind }
 ): AnchorRow {
@@ -176,13 +176,13 @@ export function curateAnchorFromMemory(
   });
 }
 
-export function getAnchor(db: Database.Database, id: number): AnchorRow | null {
+export function getAnchor(db: Database, id: number): AnchorRow | null {
   const r = db.prepare('SELECT * FROM drift_anchors WHERE id = ?').get(id);
   return r ? hydrate(r) : null;
 }
 
 export function listAnchors(
-  db: Database.Database,
+  db: Database,
   opts: { status?: AnchorStatus; kind?: AnchorKind } = {}
 ): AnchorRow[] {
   let sql = 'SELECT * FROM drift_anchors WHERE 1=1';
@@ -201,7 +201,7 @@ export function listAnchors(
 }
 
 /** Retire an anchor so the detector stops firing it, without losing history (minimal change). */
-export function retireAnchor(db: Database.Database, id: number): boolean {
+export function retireAnchor(db: Database, id: number): boolean {
   const r = db
     .prepare("UPDATE drift_anchors SET status = 'retired', updated_at = unixepoch() WHERE id = ? AND status = 'active'")
     .run(id);
@@ -232,7 +232,7 @@ export interface NodeFields {
 // ⑧ read side: the active Current-Truth slice for read_smart("current truth for X").
 // Returns ONLY active nodes (the desired-state), token-cheap, optionally scoped by domain/mode.
 export function getCurrentTruth(
-  db: Database.Database,
+  db: Database,
   opts: { domain?: string; decision_mode?: string } = {}
 ): any[] {
   let sql =
@@ -244,7 +244,7 @@ export function getCurrentTruth(
   return db.prepare(sql).all(...p) as any[];
 }
 
-export function setNodeFields(db: Database.Database, id: number, f: NodeFields): boolean {
+export function setNodeFields(db: Database, id: number, f: NodeFields): boolean {
   const sets: string[] = [];
   const params: Record<string, unknown> = { id };
   const put = (col: string, val: unknown) => { sets.push(`${col} = @${col}`); params[col] = val; };
@@ -282,7 +282,7 @@ const DEFAULT_ALERT_POLICY: AlertPolicy = {
   min_confidence_for_soft_card: 0.55,
   require_two_sided_evidence: true,
 };
-export function getAlertPolicy(db: Database.Database): AlertPolicy {
+export function getAlertPolicy(db: Database): AlertPolicy {
   const row = db.prepare("SELECT value FROM meta WHERE key = 'alert_policy'").get() as { value: string } | undefined;
   if (!row) return { ...DEFAULT_ALERT_POLICY };
   try {
@@ -291,7 +291,7 @@ export function getAlertPolicy(db: Database.Database): AlertPolicy {
     return { ...DEFAULT_ALERT_POLICY };
   }
 }
-export function setAlertPolicy(db: Database.Database, partial: Partial<AlertPolicy>): AlertPolicy {
+export function setAlertPolicy(db: Database, partial: Partial<AlertPolicy>): AlertPolicy {
   const merged = { ...getAlertPolicy(db), ...partial };
   db.prepare("INSERT INTO meta (key, value) VALUES ('alert_policy', @v) ON CONFLICT(key) DO UPDATE SET value = @v").run({
     v: JSON.stringify(merged),

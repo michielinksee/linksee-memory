@@ -21,7 +21,7 @@
 // index idx_drift_absent (one open absence per anchor). Run inside the consolidation sweep
 // or on a manual trigger.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { extname } from 'node:path';
 
@@ -150,7 +150,7 @@ function tierWeight(tier: string): number {
 }
 
 export function detectDrift(
-  db: Database.Database,
+  db: Database,
   opts: { dryRun?: boolean; staleDays?: number; emitThreshold?: number } = {}
 ): DriftDetectionResult {
   const staleDays = opts.staleDays ?? STALE_DAYS_DEFAULT;
@@ -421,7 +421,7 @@ export interface FileViolationResult {
 }
 
 export function detectFileViolations(
-  db: Database.Database,
+  db: Database,
   opts: { dryRun?: boolean; emitThreshold?: number } = {}
 ): FileViolationResult {
   const emitThreshold = opts.emitThreshold ?? EMIT_THRESHOLD_DEFAULT;

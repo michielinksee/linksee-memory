@@ -18,7 +18,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, extname, join as pathJoin, dirname as pathDirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { getSessionAnchorCounts } from './anchor-touch.js';
 
 // Production endpoint: opt-in telemetry collector on linksee-site (Vercel).
@@ -100,7 +100,7 @@ interface TelemetryPayload {
 // Build a payload from a single just-imported session.
 // All inputs come from session_file_edits + events; nothing reads memories.content.
 export function buildPayload(
-  db: Database.Database,
+  db: Database,
   sessionId: string,
   options: { mcpServersInUse?: string[] } = {}
 ): TelemetryPayload | null {

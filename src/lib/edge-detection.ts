@@ -11,7 +11,7 @@
 // is flipped to 'superseded'. We link to the MOST RECENT same-topic decision so
 // chains form (A → B → C) rather than cliques.
 
-import type Database from 'better-sqlite3';
+import type Database from '../db/sqlite.js';
 import { isMetaOrNoise, isPastedExternalContent } from './session-parser.js';
 
 export interface EdgeSample {
@@ -95,7 +95,7 @@ function coreText(content: string): { title: string; body: string } {
 interface DecRow { id: number; entity_id: number; content: string; created_at: number; }
 
 export function detectMemoryEdges(
-  db: Database.Database,
+  db: Database,
   opts: { dryRun?: boolean; lookback?: number } = {}
 ): EdgeDetectionResult {
   const lookback = opts.lookback ?? 25;

@@ -21,7 +21,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
+import Database from '../db/sqlite.js';
 import { openDb, runMigrations, getDbPath, DbRefusedError, probeReadonly, migrateCommand } from '../db/migrate.js';
 import { planConsolidate, consolidate, countSweepCandidates } from '../lib/consolidate.js';
 
