@@ -33,6 +33,7 @@
     "start": "node dist/mcp/server.js",
     "test": "node scripts/run-tests.mjs",
     "test:packed": "node scripts/test-packed.mjs",
+    "bench:day028": "node test/borrowed/matsushima-day028/run.mjs",
     "dev": "tsx src/mcp/server.ts",
     "migrate": "node dist/db/migrate.js",
     "migrate:dev": "tsx src/db/migrate.ts",
