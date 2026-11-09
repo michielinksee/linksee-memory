@@ -5,12 +5,19 @@
 - Article: matsushima_a, "Day 028" — https://zenn.dev/matsushima_a/articles/day-028-naive-rag-vs-mutating-memory
 - Data and code: https://github.com/Matsushima-A-830/ai-100days/tree/2a325e42bf91/experiments/day-028
   (`datasets.py`, `memory_methods.py`, `run_experiment.py`, `results.md`)
-- Permission: on 2026-11-06 the author agreed, in a Zenn comment, that Linksee may borrow these as
-  test cases provided the article is cited as the source.
+- Permission: the author gave permission in a Zenn comment (2026-11-06) on the article above
+  (https://zenn.dev/matsushima_a/articles/day-028-naive-rag-vs-mutating-memory) to borrow these
+  as Linksee test cases, citing the article as the source.
 - The repository has **no licence**, so nothing from it is copied here. `run.mjs` downloads the
   three files it needs from the pinned commit `2a325e42bf918b1d70ac54f815941c89a1eac6fa` into a
   temp folder at run time, refuses to continue if any sha256 differs from the value pinned in
-  `run.mjs`, and deletes the folder afterwards.
+  `run.mjs`, prints each verified hash, and deletes the folder afterwards. Verified on
+  2026-11-09: `datasets.py` 531b58be…6ee5, `memory_methods.py` 5d0c24c3…407d,
+  `run_experiment.py` 9089e10d…83cf1e9 (full values in `run.mjs` and `results.md`).
+- What is tracked in git carries none of the borrowed wording: `results.md` holds question ids
+  (q01–q24, the order of the original list), current/historical, verdicts, ranks and a miss-cause
+  class. The questions, golds, conversations and extracted values only ever appear in
+  `out/details.md`, which is git-ignored and written when you run the benchmark locally.
 
 ## Run (opt-in, not in CI)
 
@@ -22,12 +29,17 @@ pnpm run bench:day028
 Needs network access and Python 3 (`python` on Windows, `python3` elsewhere; override with
 `PYTHON=`). Not listed in `test/suite.json`: it fetches external files. Every Linksee server it
 starts gets `LINKSEE_MEMORY_DIR`, `HOME` and `USERPROFILE` pointed at a fresh temp folder, so
-`~/.linksee-memory` and `~/.claude` are never read or written. Output: `results.md` here.
+`~/.linksee-memory` and `~/.claude` are never read or written; Python (with the borrowed code
+it imports) also runs with `HOME`/`USERPROFILE` set to a temp folder and no user site-packages.
+
+Output: `results.md` (tracked: ids and verdicts only) and `out/details.md` (git-ignored: the
+questions, golds, answers, extracted values and what `recall` returned on each miss). For the
+details, run `pnpm run bench:day028` locally and open `out/details.md`.
 
 ## What the original measures
 
-Three made-up conversations (Aki, Ben, Chi; 20–25 turns) in which four facts change over time:
-home city, job, pet, favourite food. 24 questions: 12 `current` (the latest value) and 12
+Three made-up conversations (20–25 turns each) in which four facts about a person change over
+time. 24 questions: 12 `current` (the latest value) and 12
 `historical` (a value that was later replaced). The author's point is "same extraction, only the
 storage differs":
 
@@ -38,9 +50,7 @@ storage differs":
   (`gold in answer or answer in gold`); for a list, any element matching counts.
 
 Author's results: Mutating current 66.67% / historical 16.67%; AppendOnly current 66.67% /
-historical 100%. The current-question misses in both are extraction misses (e.g. Ben's
-"data engineering" turn is not caught by the regex; pet lists are formatted
-"two cats, Mochi, Tofu" against gold "two cats, Mochi and Tofu").
+historical 100%. The current-question misses in both are extraction misses.
 
 ## How it is mapped onto Linksee (decided before the first run)
 
@@ -87,6 +97,11 @@ and after; see the change log below.
   historical 0/12. Run 2 (fixed): (a) 8/12, 12/12; (b) 8/12, 0/12. Store, query and answer
   selection were not touched.
 - 2026-11-09: a rank column added to the per-question table (display only).
+- 2026-11-09, after review 1 of PR #29: the per-question table in the tracked `results.md` had
+  the golds, answers and extracted values — a copy of the borrowed data. Now the tracked file has
+  ids, verdicts, ranks and cause classes only, and the full table moved to the git-ignored
+  `out/details.md`. Python's `HOME`/`USERPROFILE` now point at a temp folder too. Scores
+  unchanged (re-run: (a) 8/12, 12/12; (b) 8/12, 0/12).
 
 ## Results (Linksee 0.19.0, 2026-11-09) — full table in `results.md`
 
@@ -99,28 +114,36 @@ and after; see the change log below.
 
 Re-running the author's code reproduces the published numbers exactly.
 
+Miss-cause classes (assigned mechanically by `run.mjs`, shown per id in `results.md`):
+
+- `extraction` — the stored value is wrong: for a current question Linksee returned exactly the
+  latest value the author's extraction produced, and the author's own `AppendOnlyMemory` misses
+  the same question.
+- `spec` — a historical question where nothing came back marked `superseded_by`: the storage
+  kept no previous version.
+- `search` — no memory about the asked person and category came back at all.
+- `other` — none of the above.
+
 Why each miss happened:
 
-- **Extraction (all 4 current misses, in both (a) and (b), identical to the original's 4):**
-  - Q6 / Q22 pets: the author's `format_pet_value` writes "two cats, Mochi, Tofu"; gold is
-    "two cats, Mochi and Tofu" — neither is a substring of the other.
-  - Q12 Ben's job: the regex does not catch "now I'm doing data engineering instead of backend";
-    the last extracted value is "backend engineer".
-  - Q20 Chi's job: extracted "pediatrics specialist", gold "pediatric nurse".
-  Linksee returned the latest stored value for every one of them; the stored value was wrong.
-- **Linksee's spec, (b) historical 0/12:** an update via `memory_id` replaces the content in
+- **Extraction — all 4 current misses, in both (a) and (b): q06, q12, q20, q22.** The same 4
+  the author's code misses. Two are a list-formatting difference between the author's formatter
+  and the gold, two are a sentence the extraction regex does not catch or names differently.
+  Linksee returned the latest stored value every time; the stored value was wrong. (Exact values:
+  `out/details.md` after a local run.)
+- **Linksee's spec — (b) historical 0/12.** An update via `memory_id` replaces the content in
   place and keeps no previous version, so nothing carries `superseded_by` and
-  `include_superseded` has nothing to add. This is the overwrite behaviour the original
-  attributes to mutating memory. (b) scores below the original Mutating (0 vs 2) because the
-  original's two hits (Ben's job, Q13/Q14) come from answering every historical question with
-  the current value "backend engineer", which is a substring of both golds; our historical
-  answer is only what Linksee marks as replaced, which in (b) is nothing.
-- **Search ranking: no miss.** For every question the memory about the asked category came
-  back (the store holds 4–5 live memories per conversation). It was not always first: in (a)
-  it was rank 1 for 6 of the 12 current questions and rank 2–4 for the rest. The question text
-  goes to FTS as an OR of its words, and "Aki's" matches every memory, so relevance is nearly
-  flat. A reader that took only the top hit would score 6/12 on current in (a), not 8/12. The
-  mapping picks the first hit with the asked category (as the original is handed the category),
+  `include_superseded` has nothing to add — the overwrite behaviour the original attributes to
+  mutating memory. (b) scores below the original Mutating (0 vs 2): the original's two hits
+  (q13, q14) come from answering every historical question with the current value, which happens
+  to be a substring of both golds; our historical answer is only what Linksee marks as replaced,
+  which in (b) is nothing.
+- **Search ranking — no miss (no `search` class).** For every question the memory about the
+  asked category came back (4–5 live memories per conversation). It was not always first: in
+  (a) it was rank 1 for 6 of the 12 current questions and rank 2–4 for the rest. The question
+  goes to FTS as an OR of its words and the person's name matches every memory, so relevance is
+  nearly flat. A reader that took only the top hit would score 6/12 on current in (a), not 8/12.
+  The mapping picks the first hit with the asked category (the original is handed the category),
   so this does not change the score above, but it is the weak spot this benchmark shows.
 
 Side observation: create mode stores plain text as structured JSON while an update via
