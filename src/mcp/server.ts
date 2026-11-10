@@ -1031,14 +1031,16 @@ function handleRecall(args: any): string {
   // Relevance of an FTS-matched row (0.19.1): mostly WHICH asked words it contains, weighted
   // by rarity (termCoverage above), so a row with every asked word ranks above one with some of
   // them, and a name that is on every memory of a person no longer decides the order. bm25
-  // orders rows within the same coverage (0.2 share), normalised over the FTS rows' actual
-  // range. Before 0.19.1 relevance was bm25 alone, normalised against a range forced to include
-  // 0 and 1 (bm25 is negative), which squeezed the spread; and with the name matching every row
-  // the spread was mostly row length. Rows only the LIKE fallback found keep 0.5, as before.
-  const ftsBm = rows.filter((r) => r._via !== 'like').map((r) => r.bm25_score);
-  const minBm = ftsBm.length ? Math.min(...ftsBm) : 0; // most relevant (bm25 is lower = better)
-  const maxBm = ftsBm.length ? Math.max(...ftsBm) : 0;
-  const bmSpan = maxBm - minBm;
+  // orders rows within the same coverage (0.2 share) through a fixed, bounded transform of its
+  // own value, x / (1 + x) with x = -bm25 (FTS5's bm25 is <= 0, lower = better), NOT min-max over
+  // the candidates: min-max stretched any spread to the full 0..1, so two rows a few 1e-7 apart
+  // (a word present in every row → FTS5 clamps its IDF to 1e-6) got 0.2 of relevance between
+  // them and a long pinned caveat lost to a short low-importance note on a one-word query
+  // (Codex review 1 of #30). With the fixed transform a tiny bm25 difference stays tiny and
+  // heat / importance decide, as they did before. Before 0.19.1 relevance was bm25 alone,
+  // normalised against a range forced to include 0 and 1. Rows only the LIKE fallback found
+  // keep 0.5, as before.
+  const bmNormOf = (bm: number): number => { const x = Math.max(0, -Number(bm) || 0); return x / (1 + x); };
   const coverageOf = useFts ? termCoverage(queryTerms(args.query ?? '')) : () => 0;
 
   // Composite weights adapt to query specificity:
@@ -1065,7 +1067,7 @@ function handleRecall(args: any): string {
     // Individual weight contributions (for transparency)
     const isFtsRow = useFts && r._via !== 'like';
     const coverage = isFtsRow ? coverageOf(r.id) : 0;
-    const bmNorm = bmSpan > 0 ? (maxBm - r.bm25_score) / bmSpan : 1;
+    const bmNorm = bmNormOf(r.bm25_score);
     const relevance = isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
     const heatNorm = heat.score / 100;
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
