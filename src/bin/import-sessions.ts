@@ -59,6 +59,13 @@ async function main() {
   // `"session_id":"…"` (position does not matter, the exact text does).
   const sourceJson = (src: object): string => JSON.stringify({ ...src, client: 'claude-code', via });
 
+  // LINKSEE_NO_CAPTURE=1 (0.20.0): the Stop-hook path writes nothing — checked before openDb(),
+  // which would already run migrations. Manual and batch imports are not affected.
+  if (via === 'stop-hook' && (process.env.LINKSEE_NO_CAPTURE ?? '').trim() === '1') {
+    process.stderr.write('linksee-memory: LINKSEE_NO_CAPTURE=1 — stop-hook import skipped (nothing written)\n');
+    return;
+  }
+
   // Single-file mode (used by the Stop hook)
   if (sessionFile) {
     const db = dryRun ? null : openDb();

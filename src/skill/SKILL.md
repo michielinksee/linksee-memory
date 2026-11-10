@@ -595,25 +595,34 @@ The North Star is declared via `declare_anchor(node_type: "north_star")` and sho
 
 ### Case F4 — Distill: rewrite raw auto-captured memories (every `recall({ dream: true })` call)
 
-The session hook captures decisions/caveats as **RAW user utterances** (no LLM runs in the hook path — heuristic extraction is the best it can do). `recall({ dream: true })` returns them as `distill_queue`. **You are the distiller.**
+**Only if `setup` installed the hooks.** The Stop hook (auto-capture) and the SessionStart digest exist only when `linksee-memory setup` wrote them into `settings.json`. With the plugin alone, or in Cursor / Codex / Gemini, nothing is captured automatically and no digest appears: the queue holds only what was imported by hand, and is usually empty. `recall({ dream: true })` works either way.
 
-**When:** every `recall({ dream: true })` call — drain up to 8 items while triaging proposals. The SessionStart boot digest reminds you while the queue is non-empty.
+When the Stop hook is installed, it captures decisions/caveats as **RAW user utterances** (no LLM runs in the hook path — heuristic extraction is the best it can do). `recall({ dream: true })` returns them as `distill_queue`. **You are the distiller.**
+
+**When:** every `recall({ dream: true })` call — drain up to 8 items while triaging proposals. When `setup` installed the SessionStart hook, its boot digest reminds you while the queue is non-empty.
 
 ```
-1. recall({ dream: true }) → distill_queue: [{memory_id, layer, raw_what, context_hint, affects, created}]
+1. recall({ dream: true }) → distill_queue: [{memory_id, layer, title, altitude, type, state,
+                                               raw_what, context_hint, affects, created,
+                                               truncated?, content_full}]
+   raw_what / context_hint are cut at 220 characters; `truncated` lists the ones that were.
+   Read content_full (every stored key, uncut). Never copy a cut value back.
+   One reply carries at most 200 KiB of content_full: `more: true` means call again;
+   a row with content_full_omitted is too large — read it from the database first.
 
 2. For each item, rewrite into ONE clean record:
    - what = the actual decision/warning in one line — RESOLVE references
             ("a)やろう" → what option a actually was, using context_hint)
    - why  = the real reason, never "detected by pattern match"
-   - keep the original affects; keep layer as-is (protected caveats cannot move —
+   - keep layer as-is (protected caveats cannot move —
      put the true type in the content `type` field instead)
    - "distilled": true   ← REQUIRED. This marker protects your rewrite from the
-            next session re-import (wipe+reinsert). Omit it and the raw
-            utterance silently resurrects.
-   - drop needs_distill / context_hint from the rewritten JSON
+            next session re-import. Omit it and the raw utterance silently resurrects.
+   - "needs_distill": null, "context_hint": null   ← null removes the key
 
-3. remember({ memory_id: <id>, content: <full structured JSON> })
+3. remember({ memory_id: <id>, merge: true, content: <JSON with ONLY the keys you change> })
+   merge keeps every key you do not send (title, affects, evidence_refs, session_id, axes).
+   Without merge: true, content replaces the whole record and every key you leave out is gone.
 
 4. No real decision in raw_what?  → type: "note", state: "superseded"
    (false positives get retired in place, never deleted).

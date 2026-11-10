@@ -98,6 +98,8 @@ Docs: [docs.linksee.app](https://docs.linksee.app) · Site: [linksee.app](https:
 
 To remove everything: `claude mcp remove linksee`, delete the linksee hooks from `settings.json` (or copy the `.bak` back), then `rm -rf ~/.claude/skills/linksee-memory ~/.linksee-memory` — the last one deletes the memory stored in that folder. It does not reach copies you made yourself (for example to hand the memory over) or telemetry already sent if you opted in. Linksee itself never sends memory text anywhere. Step by step, with manual setup: [docs/install.md](docs/install.md).
 
+**Sessions that should not be captured.** Set `LINKSEE_NO_CAPTURE=1` in the environment of a session you do not want in memory — scripted or headless maintenance runs, for example (`LINKSEE_NO_CAPTURE=1 claude -p "…"`). The Stop hook then exits without writing anything (no rows, no `hook.log` line, no telemetry) and prints one line on stderr. The guard hooks and the MCP tools are not affected: `remember` called by the agent still saves.
+
 ## Other clients
 
 Every client points at the same stdio command and the same `~/.linksee-memory/memory.db`. A decision made in Claude Code is recalled in Cursor.
