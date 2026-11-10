@@ -754,28 +754,171 @@ function handleRemember(args: any): string {
 // Note: with trigram tokenizer, words shorter than 3 chars cannot match anything.
 // Such words are dropped here and the caller falls back to LIKE if FTS yields no hits.
 const EDGE_PUNCT_RE = /^[\s"'`([{<「『（【〈《]+|[\s"'`)\]}>」』）】〉》?!.,;:、。？！，；：…]+$/gu;
-function queryTerms(raw: string): string[] {
+
+// Japanese / CJK queries (0.19.2). A Japanese sentence has no spaces, so the space split above
+// made "山田のエディタは何？" ONE word that matched only rows containing that whole string. No
+// dictionary (no new dependency): a space-word that contains Han / Hiragana / Katakana is cut
+// into pieces at punctuation and at script boundaries (Han | Hiragana | Katakana | letters+digits).
+// Only FUNCTION words are dropped: the one list below (particles, auxiliaries, question endings
+// and question words). Every other Hiragana run of 2+ chars is kept as a piece (みずほの口座 →
+// みずほ + 口座; ひとり旅 → ひとり + 旅): dropping all Hiragana lost the word that told two
+// rows apart (Codex review 1 of #32). Kanji + okurigana gives both the kanji piece and the
+// kanji + okurigana piece (決める → 決 + 決める; 使う → 使 + 使う).
+// Pieces of 3+ chars go to the trigram index; 1–2 char pieces (山田, 東京) cannot, and are
+// matched with LIKE. A space-word with no CJK char is handled exactly as before, so English
+// and other space-separated queries get the same words, FTS query and ranking.
+// Known limits: a long Han-only run (a Chinese sentence) stays one piece; "公開日" does not
+// match "公開した日"; a content word made only of function-word characters inside a longer
+// Hiragana run can be split (はなし → は + なし) — the whole-query floor in handleRecall keeps
+// what the whole question matched before.
+const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const HAN_RE = /[\p{Script=Han}々〆ヶ]/u;
+const HIRA_RE = /\p{Script=Hiragana}/u;
+const KATA_RE = /[\p{Script=Katakana}ーｰ]/u;
+// Letters / digits of any other script, plus the inner symbols of names like v0.19.1, eu-north,
+// .env, #21, C++, a/b. Everything else (、。？！「」・ spaces …) separates pieces.
+const WORDISH_RE = /[\p{L}\p{N}.\-_#+/@&']/u;
+// THE list of function words (the only place): dropped as separators, never searched.
+const CJK_FUNCTION_WORDS = new Set([
+  // particles
+  'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'へ', 'や', 'か', 'ね', 'よ',
+  'から', 'まで', 'より', 'など', 'って', 'とは', 'には', 'では', 'でも', 'とも', 'のは', 'のが', 'のを', 'だけ',
+  // auxiliaries / endings
+  'て', 'た', 'だ', 'です', 'ます', 'ですか', 'ますか', 'でしょうか', 'でしょう', 'でした', 'ました', 'だっけ',
+  'いる', 'ている', 'ある', 'する', 'した', 'して', 'ない', 'たい', 'れる', 'られる',
+  // honorific suffixes
+  'さん', 'くん', 'ちゃん',
+  // question words
+  'なに', 'なん', 'だれ', 'どこ', 'いつ', 'どう', 'どれ', 'どの', '何', '誰', '何処', '何時', '何故',
+]);
+const HIRA_FUNCTION_WORDS = [...CJK_FUNCTION_WORDS].filter((w) => /^\p{Script=Hiragana}+$/u.test(w));
+// Upper bound on pieces per query (after de-duplication). Each piece is one FTS lookup or one
+// LIKE scan (coverage) plus two LIKE terms in the candidate SQL, and SQLite refuses an
+// expression deeper than 1000 ("Expression tree is too large": 499 pieces from a 500-kanji
+// question did, Codex review 1 of #32). Natural questions have well under 10 pieces; 16 leaves
+// room and keeps the cost bounded (measured on a 3,000-row store: ~45 ms at 10 pieces, ~65 ms at
+// 16). Over the cap, kanji pieces and whole-Hiragana-run pieces are dropped LAST; within each of
+// the two groups the LONGEST pieces are kept (longer = rarer), ties in question order; the kept
+// pieces go back in question order. Known limit: a short important piece (a name, 税) can still
+// fall off a very long question.
+const MAX_QUERY_PIECES = 16;
+
+// One Hiragana run → content fragments, function words dropped. Picks the split covering the most
+// characters with function words, every content fragment 2+ chars long — except a 1-char fragment
+// at the very start right after kanji (okurigana: 使う) or a run that is 1 char in total. Ties go
+// to fewer segments, so a word is not cut without a function word. starts: begins the run.
+function splitHiragana(run: string, afterHan: boolean): Array<{ text: string; starts: boolean }> {
+  const c = Array.from(run);
+  const n = c.length;
+  const best: Array<{ score: number; prev: number; content: boolean } | null> = new Array(n + 1).fill(null);
+  best[0] = { score: 0, prev: -1, content: false };
+  for (let i = 0; i < n; i++) {
+    const at = best[i];
+    if (!at) continue;
+    const offer = (j: number, score: number, content: boolean) => {
+      const cur = best[j];
+      if (!cur || score > cur.score) best[j] = { score, prev: i, content };
+    };
+    for (const f of HIRA_FUNCTION_WORDS) {
+      const len = Array.from(f).length;
+      if (i + len <= n && c.slice(i, i + len).join('') === f) offer(i + len, at.score + len * 1000 - 1, false);
+    }
+    const minLen = (i === 0 && afterHan) || n === 1 ? 1 : 2;
+    for (let j = i + minLen; j <= n; j++) offer(j, at.score - 1, true);
+  }
+  const segs: Array<{ text: string; starts: boolean }> = [];
+  for (let j = n; j > 0;) {
+    const b = best[j]!;
+    if (b.content) segs.unshift({ text: c.slice(b.prev, j).join(''), starts: b.prev === 0 });
+    j = b.prev;
+  }
+  return segs;
+}
+
+// Pieces of one CJK space-word. keep: a kanji piece or a whole Hiragana run, dropped last at the cap.
+// Every Hiragana run of 2+ chars is also a piece AS IS, besides its split: the function-word split
+// can cut a content word made of particle characters (とまと → まと, かもめ → もめ, はなし → なし;
+// Codex review 2 of #32), the run itself cannot be wrong — same idea as 決 + 決める.
+function cjkPieces(word: string): Array<{ t: string; keep: boolean }> {
+  const runs: Array<{ cls: string; text: string; joined: boolean }> = []; // joined: no separator before it
+  let cur: { cls: string; text: string; joined: boolean } | null = null;
+  let gap = true;
+  for (const ch of word) {
+    const cls = HAN_RE.test(ch) ? 'han' : HIRA_RE.test(ch) ? 'hira' : KATA_RE.test(ch) ? 'kata' : WORDISH_RE.test(ch) ? 'word' : 'sep';
+    if (cls === 'sep') { cur = null; gap = true; continue; }
+    if (cur && cur.cls === cls) cur.text += ch;
+    else { cur = { cls, text: ch, joined: !gap }; runs.push(cur); }
+    gap = false;
+  }
+  const out: Array<{ t: string; keep: boolean }> = [];
+  const push = (t: string, keep = false) => {
+    const s = t.replace(EDGE_PUNCT_RE, '');
+    if (s && !CJK_FUNCTION_WORDS.has(s)) out.push({ t: s, keep });
+  };
+  for (let k = 0; k < runs.length; k++) {
+    const r = runs[k];
+    if (r.cls !== 'hira') { push(r.text, r.cls === 'han'); continue; }
+    const prev = runs[k - 1];
+    const afterHan = !!prev && prev.cls === 'han' && r.joined;
+    if (Array.from(r.text).length >= 2) push(r.text, true); // the run itself (unless a function word)
+    const segs = splitHiragana(r.text, afterHan);
+    for (const s of segs) {
+      if (afterHan && s.starts) {
+        if (!CJK_FUNCTION_WORDS.has(prev.text)) push(prev.text + s.text); // 決 + める → 決める
+        continue;
+      }
+      if (Array.from(s.text).length >= 2 || runs.length === 1) push(s.text);
+    }
+  }
+  return out;
+}
+
+// fts: words / pieces for the trigram index (3+ chars). like: 1–2 char pieces, only for a query
+// that contains CJK (an English query's short words stay out, as before). cjk: the query had CJK.
+interface QueryPlan { fts: string[]; like: string[]; cjk: boolean }
+function queryPlan(raw: string): QueryPlan {
   const cleaned = String(raw ?? '')
     .replace(/["*:()]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!cleaned) return [];
-  const out: string[] = [];
+  const plan: QueryPlan = { fts: [], like: [], cjk: false };
+  if (!cleaned) return plan;
   const seen = new Set<string>();
-  for (const word of cleaned.split(' ')) {
-    const t = word.replace(EDGE_PUNCT_RE, '');
-    if (t.length < 3) continue;
+  const shortWords: string[] = [];
+  const all: Array<{ t: string; short: boolean; keep: boolean }> = [];
+  const add = (t: string, short: boolean, keep = false) => {
     const key = t.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) { if (keep) for (const p of all) if (p.t.toLowerCase() === key) p.keep = true; return; }
     seen.add(key);
-    out.push(t);
+    all.push({ t, short, keep });
+  };
+  for (const word of cleaned.split(' ')) {
+    if (CJK_RE.test(word)) {
+      plan.cjk = true;
+      for (const p of cjkPieces(word)) add(p.t, Array.from(p.t).length < 3, p.keep);
+      continue;
+    }
+    const t = word.replace(EDGE_PUNCT_RE, '');
+    if (t.length < 3) { if (t) shortWords.push(t); continue; }
+    add(t, false);
   }
-  return out;
+  if (plan.cjk) {
+    for (const t of shortWords) add(t, true); // "CI の設定は？": CI by LIKE
+    if (all.length > MAX_QUERY_PIECES) {
+      const keep = new Set(all.map((p, i) => ({ i, k: p.keep ? 1 : 0, len: Array.from(p.t).length }))
+        .sort((a, b) => b.k - a.k || b.len - a.len || a.i - b.i).slice(0, MAX_QUERY_PIECES).map((x) => x.i));
+      const kept = all.filter((_, i) => keep.has(i));
+      all.length = 0;
+      all.push(...kept);
+    }
+  }
+  for (const p of all) (p.short ? plan.like : plan.fts).push(p.t);
+  return plan;
 }
-function toFtsQuery(raw: string): string {
-  const terms = queryTerms(raw);
-  return terms.length ? terms.map((t) => `"${t}"`).join(' OR ') : '';
-}
+const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => '\\' + c);
+// The whole question without its edge punctuation: a memory containing it is never ranked below
+// what the pieces give it (whole-query floor, CJK only; Codex review 1 of #32).
+const wholeQuery = (q: string): string => String(q ?? '').trim().replace(EDGE_PUNCT_RE, '');
 
 // Which query words each memory contains, weighted by how rare the word is in the store
 // (0.19.1). One FTS5 lookup per word gives both its document frequency and the rows that have
@@ -784,14 +927,25 @@ function toFtsQuery(raw: string): string {
 // memories, the "what" key of every JSON memory) weighs almost nothing; a word in few rows
 // weighs a lot. Words found in no row are left out (they cannot tell rows apart).
 // coverage(row) = sum of weights of the words the row has / sum of weights of all words.
-function termCoverage(terms: string[]): (id: number) => number {
+// For a CJK query (0.19.2) the words are the pieces: 3+ char pieces through FTS as above, 1–2
+// char pieces through LIKE on the content or the entity name (the same rows the LIKE search finds).
+function termCoverage(plan: QueryPlan): (id: number) => number {
+  const terms: Array<{ t: string; like: boolean }> = [
+    ...plan.fts.map((t) => ({ t, like: false })),
+    ...plan.like.map((t) => ({ t, like: true })),
+  ];
   if (terms.length === 0) return () => 0;
   const n = (db.prepare('SELECT COUNT(*) AS c FROM memories').get() as any).c as number;
   const stmt = db.prepare('SELECT rowid AS id FROM memories_fts WHERE memories_fts MATCH ?');
+  const likeStmt = plan.like.length
+    ? db.prepare("SELECT m.id AS id FROM memories m JOIN entities e ON e.id = m.entity_id WHERE m.content LIKE ? ESCAPE '\\' OR e.name LIKE ? ESCAPE '\\'")
+    : null;
   const sets: Array<{ ids: Set<number>; w: number }> = [];
   let total = 0;
-  for (const t of terms) {
-    const ids = new Set<number>((stmt.all(`"${t}"`) as any[]).map((r) => Number(r.id)));
+  for (const { t, like } of terms) {
+    const pat = `%${likeEscape(t)}%`;
+    const found = like ? (likeStmt!.all(pat, pat) as any[]) : (stmt.all(`"${t}"`) as any[]);
+    const ids = new Set<number>(found.map((r) => Number(r.id)));
     if (ids.size === 0) continue;
     const w = Math.log(1 + (n - ids.size + 0.5) / (ids.size + 0.5));
     sets.push({ ids, w });
@@ -866,7 +1020,13 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
   return db.prepare(sql).all(...params) as any[];
 }
 
-function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL): any[] {
+// pieces (0.19.2): the 1–2 char pieces of a CJK query. A row matching any of them is a candidate
+// too, and candidates are ordered by how many of (whole query, each piece) they match before
+// importance, so a 1-char piece cannot fill the pool with rows that have nothing else asked; the
+// whole query is then taken without its edge punctuation (wholeQuery). Without pieces the SQL is
+// as before, except that % _ \ in the query / entity name are now literal (ESCAPE; before 0.19.2
+// "50%" also matched "500", "snake_case" also matched "snake-case" — Codex review 1 of #32).
+function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL, pieces: string[] = []): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -877,15 +1037,21 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
     WHERE 1=1
   `;
   const params: any[] = [];
-  if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
+  if (entityName) { sql += " AND e.name LIKE ? ESCAPE '\\'"; params.push(`%${likeEscape(entityName)}%`); }
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
   sql = appendHiddenFilters(sql, hidden);
+  const usePieces = !!query && !entityName && pieces.length > 0;
+  const one = "(e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')";
+  const pats = query ? [usePieces ? wholeQuery(query) : query, ...(usePieces ? pieces : [])].map((t) => `%${likeEscape(t)}%`) : [];
   if (query && !entityName) {
-    sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
-    params.push(`%${query}%`, `%${query}%`);
+    sql += ` AND (${pats.map(() => one).join(' OR ')})`;
+    for (const pat of pats) params.push(pat, pat);
   }
-  sql += ' ORDER BY m.importance DESC, m.last_accessed_at DESC LIMIT ?';
+  if (usePieces) {
+    sql += ` ORDER BY (${pats.map(() => one).join(' + ')}) DESC, m.importance DESC, m.last_accessed_at DESC LIMIT ?`;
+    for (const pat of pats) params.push(pat, pat);
+  } else sql += ' ORDER BY m.importance DESC, m.last_accessed_at DESC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
 }
@@ -965,8 +1131,20 @@ function handleRecall(args: any): string {
   let rows: any[] = [];
   let searchMethod: 'fts5' | 'like' | 'fts5+like' = 'like';
 
-  const ftsQuery = toFtsQuery(args.query ?? '');
+  const plan = queryPlan(args.query ?? '');
+  const ftsQuery = plan.fts.length ? plan.fts.map((t) => `"${t}"`).join(' OR ') : '';
   const canUseFts = !!ftsQuery && !args.entity_name;
+  // CJK query (0.19.2): its 1–2 char pieces also go to LIKE, and relevance is the piece
+  // coverage for every candidate (FTS- or LIKE-found). An English query has no pieces.
+  const likePieces = plan.cjk && !args.entity_name ? plan.like : [];
+  const pieceMode = plan.cjk && !args.entity_name && plan.fts.length + plan.like.length > 0;
+  const wholeNeedle = pieceMode ? wholeQuery(args.query ?? '').toLowerCase() : '';
+  // Whole-question tier only for a Japanese question WITHOUT spaces. A space-separated one
+  // (「トマト ジュース」) is ranked like English — one tier — as before (Codex review 3 of #32).
+  // tierMode also fetches the whole-question rows on their own before any LIMIT (below), and
+  // the LIKE search looks for the question without its edge punctuation (no trailing ？).
+  const tierMode = pieceMode && !/\s/.test(String(args.query ?? '').trim());
+  const likeQueryText = tierMode ? wholeQuery(args.query ?? '') : args.query;
 
   // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
   // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
@@ -983,9 +1161,9 @@ function handleRecall(args: any): string {
     const hiddenIds = new Set<number>();
     if (canUseFts) {
       for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
-      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(likeQueryText, undefined, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     } else {
-      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(likeQueryText, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     }
     return hiddenIds.size;
   };
@@ -995,7 +1173,7 @@ function handleRecall(args: any): string {
 
   if (canUseFts) {
     const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, hidden);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, hidden);
+    const likeRows = runLikeQuery(likeQueryText, undefined, layer, fetchLimit, axis, hidden, likePieces);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -1010,8 +1188,18 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, hidden).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(likeQueryText, args.entity_name, layer, fetchLimit, axis, hidden, likePieces).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
+  }
+  // The whole-question tier is the first sort key, so its rows must be candidates whatever the
+  // FTS / LIKE LIMITs kept: one long row with the whole question lost its FTS slot to 160 short
+  // rows with the pieces (Codex review 3 of #32). Fetched on their own (escaped LIKE, same
+  // hidden / layer / axis filters, at most fetchLimit rows by importance) and merged in.
+  if (tierMode) {
+    const have = new Set(rows.map((r) => r.id));
+    for (const r of runLikeQuery(likeQueryText, undefined, layer, fetchLimit, axis, hidden)) {
+      if (!have.has(r.id)) { rows.push({ ...r, _via: 'like' }); have.add(r.id); }
+    }
   }
 
   const useFts = searchMethod !== 'like';
@@ -1041,15 +1229,17 @@ function handleRecall(args: any): string {
   // normalised against a range forced to include 0 and 1. Rows only the LIKE fallback found
   // keep 0.5, as before.
   const bmNormOf = (bm: number): number => { const x = Math.max(0, -Number(bm) || 0); return x / (1 + x); };
-  const coverageOf = useFts ? termCoverage(queryTerms(args.query ?? '')) : () => 0;
+  const coverageOf = useFts || pieceMode ? termCoverage(plan) : () => 0;
 
   // Composite weights adapt to query specificity:
   //  - broad / no query → importance & heat carry more (relevance is a flat 0.5 anyway)
   //  - focused (1-2 terms) → relevance leads
   //  - narrow (3+ terms) → relevance dominates, so off-topic-but-pinned memories don't crowd in
-  const queryTermCount = String(args.query ?? '').trim().split(/\s+/).filter(Boolean).length;
+  const queryTermCount = pieceMode
+    ? plan.fts.length + plan.like.length // CJK: count pieces, not space-words
+    : String(args.query ?? '').trim().split(/\s+/).filter(Boolean).length;
   let w_rel = 0.45, w_heat = 0.25, w_mom = 0.15, w_imp = 0.15;
-  if (useFts) {
+  if (useFts || pieceMode) {
     if (queryTermCount >= 3) { w_rel = 0.72; w_heat = 0.12; w_mom = 0.08; w_imp = 0.08; }
     else { w_rel = 0.60; w_heat = 0.18; w_mom = 0.12; w_imp = 0.10; }
   }
@@ -1065,10 +1255,17 @@ function handleRecall(args: any): string {
     });
 
     // Individual weight contributions (for transparency)
-    const isFtsRow = useFts && r._via !== 'like';
+    const isFtsRow = pieceMode || (useFts && r._via !== 'like');
+    // Whole-question tier (CJK): a row that contains the whole question (edge punctuation off)
+    // ranks above every row that does not — the first sort key, not a weight: a relevance of 1
+    // inside the weighted sum still lost to a hot, important row sharing one piece (はなし vs
+    // 在庫なし, Codex review 2 of #32). Inside each tier the composite decides, as before; such a
+    // row also gets relevance 1, so among whole-question rows heat / importance decide.
+    const wholeHit = pieceMode && !!wholeNeedle &&
+      (String(r.content ?? '').toLowerCase().includes(wholeNeedle) || String(r.entity_name ?? '').toLowerCase().includes(wholeNeedle));
     const coverage = isFtsRow ? coverageOf(r.id) : 0;
     const bmNorm = bmNormOf(r.bm25_score);
-    const relevance = isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
+    const relevance = wholeHit ? 1 : isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
     const heatNorm = heat.score / 100;
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
     const importanceBoost = r.importance; // 0-1
@@ -1092,6 +1289,7 @@ function handleRecall(args: any): string {
     if (r.importance >= 0.9) reasons.push('pinned');
     else if (r.importance >= 0.8) reasons.push('high_importance');
     if (r.protected === 1 && r.layer === 'caveat') reasons.push('caveat_protected');
+    if (wholeHit) reasons.push('whole_query_match');
 
     return {
       ...r,
@@ -1099,6 +1297,7 @@ function handleRecall(args: any): string {
       heat_band: heat.band,
       composite_score: composite,
       relevance_score: relevance,
+      _whole: wholeHit && tierMode ? 1 : 0,
       _reasons: reasons,
       _breakdown: {
         relevance: Number(relevance.toFixed(3)),
@@ -1134,8 +1333,9 @@ function handleRecall(args: any): string {
   // Apply band filter AFTER scoring (needs heat.band)
   const filtered = band ? visible.filter((s) => s.heat_band === band) : visible;
 
-  // Sort by composite (best first)
-  filtered.sort((a, b) => b.composite_score - a.composite_score);
+  // Sort: rows containing the whole CJK question first (always 0 for English / space-separated
+  // queries, so their order is unchanged), then by composite (best first).
+  filtered.sort((a, b) => b._whole - a._whole || b.composite_score - a.composite_score);
 
   // Dedup near-identical memories (same entity + near-identical core text).
   // filtered is sorted desc, so the first occurrence kept is the highest-ranked.

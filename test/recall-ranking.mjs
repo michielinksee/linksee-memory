@@ -11,10 +11,26 @@
 //   2. a memory with every asked word ranks above ones with only some of them
 //   3. a superseded memory stays hidden by default and comes back with include_superseded
 //   4. words with symbols inside (v0.19.0, #21, .env, C++) still find their row
-//   5. Japanese one-word queries, with and without a full-width "？"; the sentence limit
+//   5. Japanese one-word queries, with and without a full-width "？"; Japanese sentences (0.19.2)
 //   6. superseded_hidden / consolidated_hidden with both kinds of hidden rows present
 //   7. one-word query with near-equal bm25: importance decides (Codex review 1 of #30)
-//   8. 1–2 character words go through the LIKE fallback; with a trailing ? they find nothing (known limit)
+//   8. 1–2 character words go through the LIKE fallback; English "CI?" still finds nothing (known
+//      limit), Japanese "東京？" finds its row since 0.19.2
+//   9. Japanese sentences (0.19.2): one fictional person, several items, asked in natural Japanese
+//      → the asked item is rank 1; katakana / kanji / alphanumeric mixes (v0.19.1 の公開日は？),
+//      full-width punctuation, 1–2 character pieces, another person's same item does not win
+//  10. Codex review 1 of #32 — what 0.19.1 found by the whole question is not lost to a row that
+//      shares only some pieces (みずほの口座 / ひとり旅 / 決める, the other row has higher
+//      importance); a 500-kanji question (499 pieces before the cap) answers instead of failing
+//      with "Expression tree is too large"; "50%" and "snake_case" are literal in LIKE
+//  11. Codex review 2 of #32 — a row containing the whole Japanese question ranks above every row
+//      that does not, even a hot, important one sharing a piece (はなし vs 在庫なし); several such
+//      rows are ordered by importance among themselves; Hiragana words made of particle
+//      characters (とまと, かもめ, でんき) find their row first
+//  12. Codex review 3 of #32 — one long row with the whole question and 160 short rows with only
+//      its pieces: the long row is still rank 1 (it was cut by the candidate LIMIT before the
+//      tier sort ran); a space-separated Japanese question gets no whole-question tier
+//      (「トマト ジュース」 ranks as at 653fa1a: the hot importance-1 row first)
 //
 // Drives the real MCP server over stdio against a throwaway DB and HOME. Never touches
 // ~/.linksee-memory or ~/.claude.
@@ -171,15 +187,15 @@ try {
   const a = (await recall(srv, 'エディタ')).memories?.map((m) => m.id).join(',');
   const b = (await recall(srv, 'エディタ？')).memories?.map((m) => m.id).join(',');
   check('a trailing "？" does not change the Japanese result order', a === b, `${a} vs ${b}`);
-  // Known limit (unchanged by this PR): a Japanese sentence has no spaces, so it is ONE word and
-  // matches only where that exact string appears. Before this PR a sentence ending in "？" never
-  // matched at all; now the "？" is trimmed, so a sentence that is a substring of the memory hits,
-  // and one that is not still returns nothing — the same as before, not worse.
+  // A Japanese sentence has no spaces. Up to 0.19.1 it was ONE word and matched only where that
+  // exact string appeared ("known limit" pinned here then: the second sentence returned nothing).
+  // Since 0.19.2 the sentence is cut into pieces by script (山辺 / エディタ; の, は, 何ですか
+  // dropped), so a sentence that is not a substring of the memory finds it too.
   const sentenceHit = await recall(srv, '山辺さんが普段使うエディタは？');
   check('Japanese sentence that is a substring of the memory (ending in ？) finds it', sentenceHit.memories?.[0]?.id === jp.editor,
     `rank 1 was #${sentenceHit.memories?.[0]?.id}`);
   const sentenceMiss = await recall(srv, '山辺さんのエディタは何ですか？');
-  check('Japanese sentence that is not a substring returns nothing (known limit, as before)', (sentenceMiss.memories ?? []).length === 0,
+  check('Japanese sentence that is not a substring of the memory finds it at rank 1 (0.19.2; was nothing)', sentenceMiss.memories?.[0]?.id === jp.editor,
     `got ${(sentenceMiss.memories ?? []).map((m) => m.id).join(',')}`);
 
   // 6. Hidden counts with both kinds of hidden rows, found by ONE word only. None of these rows
@@ -208,15 +224,17 @@ try {
   const got6 = (res6.memories ?? []).map((m) => m.id);
   check('include_superseded + include_consolidated show both', got6.includes(oldDot) && got6.includes(folded), `got=${got6.join(',')}`);
 
-  // 8. Words of 1–2 characters cannot use the trigram index; they go through the LIKE fallback,
-  // which matches the whole query as one substring (unchanged by this PR). With a trailing
-  // question mark the substring includes the mark and nothing matches — known limit, pinned here.
+  // 8. Words of 1–2 characters cannot use the trigram index; they go through the LIKE fallback.
+  // For an English query that is the whole query as one substring (unchanged): with a trailing
+  // "?" the substring includes the mark and nothing matches — known limit, pinned here. A Japanese
+  // query is cut into pieces since 0.19.2 ("？" is a separator), so "東京？" now finds its row
+  // (up to 0.19.1 this check pinned "finds nothing").
   const tokyo = await remember(srv, '出張の集合場所は東京駅の丸の内北口');
   const ci = await remember(srv, 'CI runs the packed-tarball tests before publish');
   const has = async (q, id) => ((await recall(srv, q)).memories ?? []).some((m) => m.id === id);
   check('2-char Japanese "東京" finds its row (LIKE fallback)', await has('東京', tokyo));
   check('2-char English "CI" finds its row (LIKE fallback)', await has('CI', ci));
-  check('known limit: "東京？" finds nothing (the LIKE substring includes the ？)', ((await recall(srv, '東京？')).memories ?? []).length === 0);
+  check('"東京？" finds its row (0.19.2: the ？ separates pieces; was nothing)', (await recall(srv, '東京？')).memories?.[0]?.id === tokyo);
   check('known limit: "CI?" does not find the CI row (the LIKE substring includes the ?)', !(await has('CI?', ci)));
 } finally {
   await srv.stop();
@@ -245,5 +263,209 @@ try {
     rmSync(dir2, { recursive: true, force: true });
   }
 }
+// 9. Japanese sentences (0.19.2). Fictional people and items, written for this test. Every item
+// row carries the person's name, so the name alone cannot pick the row; a shortest row with only
+// the name is never asked for (bm25's short-row bonus would put it first if only the name matched).
+// Up to 0.19.1 every question below was one word and returned nothing or the wrong row.
+{
+  const dir3 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja-'));
+  const home3 = join(dir3, 'home');
+  mkdirSync(home3);
+  const srv3 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir3, HOME: home3, USERPROFILE: home3 });
+  const rem = async (content, who = '森川') => {
+    const r = await srv3.call('remember', { content, entity_name: who, entity_kind: 'person', layer: 'context' });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  try {
+    await srv3.ready;
+    await rem('森川: 当番');
+    const m = {
+      editor: await rem('森川さんが普段使うエディタはZedで、配色は暗いテーマにしている'),
+      hours: await rem('森川さんの作業時間帯は日本時間の午前中'),
+      region: await rem('森川さんの検証環境のデプロイ先は北欧リージョン'),
+      drink: await rem('森川さんの好きな飲み物はほうじ茶'),
+      car: await rem('森川さんの車は青い軽自動車'),
+    };
+    const other = await rem('早瀬さんが使うエディタはVimで、設定は共有リポジトリにある', '早瀬');
+    const rel = {
+      v191date: await rem('v0.19.1 の公開日は11月10日', 'リリース'),
+      v190date: await rem('v0.19.0 の公開日は11月6日', 'リリース'),
+      v191fix: await rem('v0.19.1 で直した不具合は recall の順位', 'リリース'),
+    };
+    const asks = [
+      ['editor', '森川のエディタは何？', m.editor],                       // katakana word + 2-char name
+      ['editor', '森川さんが使っているエディタはなんですか', m.editor],   // hiragana question ending, no ？
+      ['hours', '森川さんの作業時間帯は？', m.hours],                     // kanji word
+      ['region', '森川さん、デプロイ先リージョンは？', m.region],         // full-width 、 and ？
+      ['drink', '森川さんの好きな飲み物は何ですか？', m.drink],           // only 1–2 char pieces
+      ['car', '森川の車は？', m.car],                                     // 1-char piece
+      ['region', '北欧？', m.region],                                     // 2-char question
+      ['v0.19.1 date', 'v0.19.1 の公開日は？', rel.v191date],              // alphanumeric + kanji, spaced
+      ['v0.19.1 date', 'v0.19.1の公開日は？', rel.v191date],               // alphanumeric + kanji, unspaced
+      ['other person', '早瀬のエディタは？', other],                       // same item, other person
+    ];
+    for (const [item, q, want] of asks) {
+      const res = await srv3.call('recall', { query: q, mark_accessed: false });
+      const top = res.memories?.[0];
+      check(`Japanese sentence "${q}" → ${item} row at rank 1`, top?.id === want,
+        `rank 1 was #${top?.id} (${top ? textOf(top) : 'nothing'}); order=${(res.memories ?? []).map((x) => x.id).join(',')}`);
+    }
+    // Rank 2 after 森川's editor for "森川のエディタは何？" must not be decided by the name alone:
+    // 早瀬's editor row (the item word, other name) and 森川's other rows are both below rank 1.
+    const res = await srv3.call('recall', { query: '森川のエディタは何？', mark_accessed: false, explain: true });
+    const cov = (res.memories ?? []).map((x) => x.score_breakdown?.term_coverage);
+    check('Japanese pieces get term coverage (rank 1 has every piece)', cov[0] === 1, `coverage=${JSON.stringify(cov)}`);
+  } finally {
+    await srv3.stop();
+    rmSync(dir3, { recursive: true, force: true });
+  }
+}
+
+// 10. Codex review 1 of #32. Each pair: the row asked for (low importance) contains the whole
+// question; the other row (importance 1) shares only a piece with it. 0.19.1 (whole question as
+// one word) returns the asked row first; the first CJK version dropped all Hiragana (みずほ, ひとり,
+// める), kept only 口座 / 旅 / 決, and put the importance-1 row first.
+{
+  const dir4 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja2-'));
+  const home4 = join(dir4, 'home');
+  mkdirSync(home4);
+  const srv4 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir4, HOME: home4, USERPROFILE: home4 });
+  const rem = async (content, importance) => {
+    const r = await srv4.call('remember', { content, entity_name: '家計メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  try {
+    await srv4.ready;
+    const pairs = [
+      ['みずほの口座', await rem('みずほの口座は給与の受け取り用', 0.3), await rem('あおぞらの口座は貯蓄用', 1)],
+      ['ひとり旅', await rem('ひとり旅の持ち物は小さな鞄だけ', 0.3), await rem('家族旅の予定は夏休み', 1)],
+      ['決める', await rem('期限を決める会議は金曜の午後', 0.3), await rem('決算の締めは月末', 1)],
+    ];
+    for (const [q, want, other] of pairs) {
+      const res = await srv4.call('recall', { query: q, mark_accessed: false });
+      const order = (res.memories ?? []).map((x) => x.id);
+      check(`"${q}": the row with the whole question is rank 1 (not the importance-1 row sharing a piece)`, order[0] === want,
+        `order=${order.join(',')} want=#${want} other=#${other}`);
+    }
+
+    // 500 kanji separated by 、 → 499+ distinct pieces before the cap. Must answer, not throw.
+    const kanji = Array.from({ length: 500 }, (_, i) => String.fromCodePoint(0x4e00 + i * 3)).join('、');
+    const target = await rem(`長い問いの確認用: ${kanji.slice(0, 40)}`, 0.5);
+    const big = await srv4.call('recall', { query: kanji, mark_accessed: false });
+    check('500-kanji question answers (no "Expression tree is too large")', Array.isArray(big.memories) && !big._error && !/too large/i.test(big._raw ?? ''),
+      `got ${JSON.stringify(big).slice(0, 200)}`);
+    check('500-kanji question still finds a row containing some of its pieces', (big.memories ?? []).length > 0, `target=#${target}`);
+
+    // % and _ are literal in LIKE (were wildcards before, also in 0.19.1).
+    const pct = await rem('割引の上限は50%まで', 0.5);
+    const p500 = await rem('割引の上限は500円まで', 0.5);
+    const snake = await rem('settings use snake_case keys', 0.5);
+    const kebab = await rem('settings use snake-case keys', 0.5);
+    const r50 = ((await srv4.call('recall', { query: '50%', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"50%" finds the 50% row and not the 500 row', r50.includes(pct) && !r50.includes(p500), `got=${r50.join(',')}`);
+    const rsn = ((await srv4.call('recall', { query: 'snake_case', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"snake_case" finds snake_case and not snake-case', rsn.includes(snake) && !rsn.includes(kebab), `got=${rsn.join(',')}`);
+  } finally {
+    await srv4.stop();
+    rmSync(dir4, { recursive: true, force: true });
+  }
+}
+
+// 11. Codex review 2 of #32. Decoys share one piece with the question, have importance 1 and are
+// made hot (30 accesses through a query only they match). The rows asked for contain the whole
+// question, have low importance and no accesses. 653fa1a ranked by the weighted sum alone (the
+// whole-question row got relevance 1, which heat + importance outweighed) and cut とまと → まと.
+{
+  const dir5 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja3-'));
+  const home5 = join(dir5, 'home');
+  mkdirSync(home5);
+  const srv5 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir5, HOME: home5, USERPROFILE: home5 });
+  const rem = async (content, importance) => {
+    const r = await srv5.call('remember', { content, entity_name: '作業メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  const heatUp = async (q, id) => {
+    for (let i = 0; i < 30; i++) {
+      const got = ((await srv5.call('recall', { query: q, mark_accessed: true })).memories ?? []).map((x) => x.id);
+      if (!got.includes(id)) throw new Error(`heat-up query "${q}" did not return #${id}`);
+    }
+  };
+  try {
+    await srv5.ready;
+    const hanashi = await rem('はなしを記録した', 0.3);
+    const hanashiHi = await rem('はなしの続きは来週の定例で', 0.9);
+    const hanashiLo = await rem('はなしが長くなった日の覚え書き', 0.1);
+    const zaiko = await rem('在庫なしを記録した', 1);
+    const tomato = await rem('とまとは冷蔵庫の下の段', 0.3);
+    const matome = await rem('まとめの締切は金曜', 1);
+    const kamome = await rem('かもめの写真を共有した', 0.3);
+    const momeru = await rem('もめた件は円満に解決', 1);
+    const denki = await rem('でんきの契約を見直す', 0.3);
+    const honki = await rem('ほんきで取り組む課題の一覧', 1);
+    await heatUp('在庫', zaiko);
+    await heatUp('締切', matome);
+    await heatUp('円満', momeru);
+    await heatUp('課題', honki);
+
+    const res = await srv5.call('recall', { query: 'はなし', mark_accessed: false, explain: true });
+    const order = (res.memories ?? []).map((x) => x.id);
+    const pos = (id) => { const i = order.indexOf(id); return i < 0 ? Infinity : i; };
+    check('"はなし": every row with the whole question ranks above the hot importance-1 "在庫なし" row',
+      [hanashi, hanashiHi, hanashiLo].every((id) => pos(id) < pos(zaiko)),
+      `order=${order.join(',')} whole=#${hanashi},#${hanashiHi},#${hanashiLo} zaiko=#${zaiko} ${JSON.stringify((res.memories ?? []).map((x) => [x.id, x.composite]))}`);
+    check('"はなし": among the whole-question rows, importance orders them (0.9, 0.3, 0.1)',
+      pos(hanashiHi) < pos(hanashi) && pos(hanashi) < pos(hanashiLo), `order=${order.join(',')}`);
+
+    for (const [q, want, decoy] of [['とまと', tomato, matome], ['かもめ', kamome, momeru], ['でんき', denki, honki]]) {
+      const o = ((await srv5.call('recall', { query: q, mark_accessed: false })).memories ?? []).map((x) => x.id);
+      check(`"${q}": the row with the word is rank 1 (not the hot row sharing a piece)`, o[0] === want,
+        `order=${o.join(',')} want=#${want} decoy=#${decoy}`);
+    }
+  } finally {
+    await srv5.stop();
+    rmSync(dir5, { recursive: true, force: true });
+  }
+}
+
+// 12. Codex review 3 of #32.
+{
+  const dir6 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja4-'));
+  const home6 = join(dir6, 'home');
+  mkdirSync(home6);
+  const srv6 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir6, HOME: home6, USERPROFILE: home6 });
+  const rem = async (content, importance) => {
+    const r = await srv6.call('remember', { content, entity_name: '台所メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  try {
+    await srv6.ready;
+    // (b) first, while the store is small. Space-separated question: W contains the whole
+    // question (low importance, cold); P has both pieces but not the whole (importance 1, hot).
+    // At 653fa1a P was rank 1 (the whole question only raised W's relevance); f7da25f put W first
+    // with the tier key. A space-separated question ranks like English: no tier, P first again.
+    const w = await rem('トマト ジュースの在庫を確認', 0.1);
+    const pRow = await rem('トマトとジュースを冷蔵庫に入れた', 1);
+    for (let i = 0; i < 30; i++) await srv6.call('recall', { query: '冷蔵庫', mark_accessed: true });
+    const sp = ((await srv6.call('recall', { query: 'トマト ジュース', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"トマト ジュース" (space-separated): no whole-question tier, ranked as at 653fa1a (hot importance-1 row first)',
+      sp[0] === pRow && sp[1] === w, `order=${sp.join(',')} P=#${pRow} W=#${w}`);
+
+    // (a) one long row containing the whole question + 160 short rows with its pieces only.
+    const long = await rem(`朝食のトマト・ジュースは前の晩から冷やしておく。${'台所の棚の整理と買い物の記録。'.repeat(20)}`, 0.3);
+    for (let i = 0; i < 160; i++) await rem(`トマト ジュース ${i}`, 0.5);
+    const res = await srv6.call('recall', { query: 'トマト・ジュース？', mark_accessed: false });
+    const order = (res.memories ?? []).map((x) => x.id);
+    check('"トマト・ジュース？": the one long row with the whole question is rank 1 despite 160 short partial rows',
+      order[0] === long, `rank 1 was #${order[0]}; long=#${long}; returned ${order.length}`);
+  } finally {
+    await srv6.stop();
+    rmSync(dir6, { recursive: true, force: true });
+  }
+}
+
 console.log(failures === 0 ? '\nPASS' : `\nFAIL (${failures})`);
 process.exit(failures === 0 ? 0 : 1);
