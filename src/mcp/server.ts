@@ -796,8 +796,11 @@ const HIRA_FUNCTION_WORDS = [...CJK_FUNCTION_WORDS].filter((w) => /^\p{Script=Hi
 // LIKE scan (coverage) plus two LIKE terms in the candidate SQL, and SQLite refuses an
 // expression deeper than 1000 ("Expression tree is too large": 499 pieces from a 500-kanji
 // question did, Codex review 1 of #32). Natural questions have well under 10 pieces; 16 leaves
-// room and keeps the cost bounded (measured on a 3,000-row store: ~45 ms at 10 pieces, ~65 ms at 16). Over the cap the LONGEST
-// pieces are kept (longer = rarer), ties in question order, then put back in question order.
+// room and keeps the cost bounded (measured on a 3,000-row store: ~45 ms at 10 pieces, ~65 ms at
+// 16). Over the cap, kanji pieces and whole-Hiragana-run pieces are dropped LAST; within each of
+// the two groups the LONGEST pieces are kept (longer = rarer), ties in question order; the kept
+// pieces go back in question order. Known limit: a short important piece (a name, 税) can still
+// fall off a very long question.
 const MAX_QUERY_PIECES = 16;
 
 // One Hiragana run → content fragments, function words dropped. Picks the split covering the most
@@ -832,7 +835,11 @@ function splitHiragana(run: string, afterHan: boolean): Array<{ text: string; st
   return segs;
 }
 
-function cjkPieces(word: string): string[] {
+// Pieces of one CJK space-word. keep: a kanji piece or a whole Hiragana run, dropped last at the cap.
+// Every Hiragana run of 2+ chars is also a piece AS IS, besides its split: the function-word split
+// can cut a content word made of particle characters (とまと → まと, かもめ → もめ, はなし → なし;
+// Codex review 2 of #32), the run itself cannot be wrong — same idea as 決 + 決める.
+function cjkPieces(word: string): Array<{ t: string; keep: boolean }> {
   const runs: Array<{ cls: string; text: string; joined: boolean }> = []; // joined: no separator before it
   let cur: { cls: string; text: string; joined: boolean } | null = null;
   let gap = true;
@@ -843,18 +850,18 @@ function cjkPieces(word: string): string[] {
     else { cur = { cls, text: ch, joined: !gap }; runs.push(cur); }
     gap = false;
   }
-  const out: string[] = [];
-  const push = (t: string) => {
+  const out: Array<{ t: string; keep: boolean }> = [];
+  const push = (t: string, keep = false) => {
     const s = t.replace(EDGE_PUNCT_RE, '');
-    if (s && !CJK_FUNCTION_WORDS.has(s)) out.push(s);
+    if (s && !CJK_FUNCTION_WORDS.has(s)) out.push({ t: s, keep });
   };
   for (let k = 0; k < runs.length; k++) {
     const r = runs[k];
-    if (r.cls !== 'hira') { push(r.text); continue; }
+    if (r.cls !== 'hira') { push(r.text, r.cls === 'han'); continue; }
     const prev = runs[k - 1];
     const afterHan = !!prev && prev.cls === 'han' && r.joined;
+    if (Array.from(r.text).length >= 2) push(r.text, true); // the run itself (unless a function word)
     const segs = splitHiragana(r.text, afterHan);
-    if (segs.length === 0 && runs.length === 1) { push(r.text); continue; } // all-Hiragana word: keep unless a function word
     for (const s of segs) {
       if (afterHan && s.starts) {
         if (!CJK_FUNCTION_WORDS.has(prev.text)) push(prev.text + s.text); // 決 + める → 決める
@@ -878,17 +885,17 @@ function queryPlan(raw: string): QueryPlan {
   if (!cleaned) return plan;
   const seen = new Set<string>();
   const shortWords: string[] = [];
-  const all: Array<{ t: string; short: boolean }> = [];
-  const add = (t: string, short: boolean) => {
+  const all: Array<{ t: string; short: boolean; keep: boolean }> = [];
+  const add = (t: string, short: boolean, keep = false) => {
     const key = t.toLowerCase();
-    if (seen.has(key)) return;
+    if (seen.has(key)) { if (keep) for (const p of all) if (p.t.toLowerCase() === key) p.keep = true; return; }
     seen.add(key);
-    all.push({ t, short });
+    all.push({ t, short, keep });
   };
   for (const word of cleaned.split(' ')) {
     if (CJK_RE.test(word)) {
       plan.cjk = true;
-      for (const p of cjkPieces(word)) add(p, Array.from(p).length < 3);
+      for (const p of cjkPieces(word)) add(p.t, Array.from(p.t).length < 3, p.keep);
       continue;
     }
     const t = word.replace(EDGE_PUNCT_RE, '');
@@ -898,8 +905,8 @@ function queryPlan(raw: string): QueryPlan {
   if (plan.cjk) {
     for (const t of shortWords) add(t, true); // "CI の設定は？": CI by LIKE
     if (all.length > MAX_QUERY_PIECES) {
-      const keep = new Set(all.map((p, i) => ({ i, len: Array.from(p.t).length }))
-        .sort((a, b) => b.len - a.len || a.i - b.i).slice(0, MAX_QUERY_PIECES).map((x) => x.i));
+      const keep = new Set(all.map((p, i) => ({ i, k: p.keep ? 1 : 0, len: Array.from(p.t).length }))
+        .sort((a, b) => b.k - a.k || b.len - a.len || a.i - b.i).slice(0, MAX_QUERY_PIECES).map((x) => x.i));
       const kept = all.filter((_, i) => keep.has(i));
       all.length = 0;
       all.push(...kept);
@@ -1233,9 +1240,11 @@ function handleRecall(args: any): string {
 
     // Individual weight contributions (for transparency)
     const isFtsRow = pieceMode || (useFts && r._via !== 'like');
-    // Whole-query floor (CJK): a row that contains the whole question (edge punctuation off) gets
-    // full relevance, so what the unsplit question found before is never ranked below rows that
-    // only share some pieces with it (みずほの口座 vs あおぞらの口座, Codex review 1 of #32).
+    // Whole-question tier (CJK): a row that contains the whole question (edge punctuation off)
+    // ranks above every row that does not — the first sort key, not a weight: a relevance of 1
+    // inside the weighted sum still lost to a hot, important row sharing one piece (はなし vs
+    // 在庫なし, Codex review 2 of #32). Inside each tier the composite decides, as before; such a
+    // row also gets relevance 1, so among whole-question rows heat / importance decide.
     const wholeHit = pieceMode && !!wholeNeedle &&
       (String(r.content ?? '').toLowerCase().includes(wholeNeedle) || String(r.entity_name ?? '').toLowerCase().includes(wholeNeedle));
     const coverage = isFtsRow ? coverageOf(r.id) : 0;
@@ -1264,6 +1273,7 @@ function handleRecall(args: any): string {
     if (r.importance >= 0.9) reasons.push('pinned');
     else if (r.importance >= 0.8) reasons.push('high_importance');
     if (r.protected === 1 && r.layer === 'caveat') reasons.push('caveat_protected');
+    if (wholeHit) reasons.push('whole_query_match');
 
     return {
       ...r,
@@ -1271,6 +1281,7 @@ function handleRecall(args: any): string {
       heat_band: heat.band,
       composite_score: composite,
       relevance_score: relevance,
+      _whole: wholeHit ? 1 : 0,
       _reasons: reasons,
       _breakdown: {
         relevance: Number(relevance.toFixed(3)),
@@ -1306,8 +1317,9 @@ function handleRecall(args: any): string {
   // Apply band filter AFTER scoring (needs heat.band)
   const filtered = band ? visible.filter((s) => s.heat_band === band) : visible;
 
-  // Sort by composite (best first)
-  filtered.sort((a, b) => b.composite_score - a.composite_score);
+  // Sort: rows containing the whole CJK question first (always 0 for English / space-separated
+  // queries, so their order is unchanged), then by composite (best first).
+  filtered.sort((a, b) => b._whole - a._whole || b.composite_score - a.composite_score);
 
   // Dedup near-identical memories (same entity + near-identical core text).
   // filtered is sorted desc, so the first occurrence kept is the highest-ranked.

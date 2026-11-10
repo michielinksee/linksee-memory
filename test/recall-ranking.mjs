@@ -23,6 +23,10 @@
 //      shares only some pieces (みずほの口座 / ひとり旅 / 決める, the other row has higher
 //      importance); a 500-kanji question (499 pieces before the cap) answers instead of failing
 //      with "Expression tree is too large"; "50%" and "snake_case" are literal in LIKE
+//  11. Codex review 2 of #32 — a row containing the whole Japanese question ranks above every row
+//      that does not, even a hot, important one sharing a piece (はなし vs 在庫なし); several such
+//      rows are ordered by importance among themselves; Hiragana words made of particle
+//      characters (とまと, かもめ, でんき) find their row first
 //
 // Drives the real MCP server over stdio against a throwaway DB and HOME. Never touches
 // ~/.linksee-memory or ~/.claude.
@@ -362,6 +366,63 @@ try {
   } finally {
     await srv4.stop();
     rmSync(dir4, { recursive: true, force: true });
+  }
+}
+
+// 11. Codex review 2 of #32. Decoys share one piece with the question, have importance 1 and are
+// made hot (30 accesses through a query only they match). The rows asked for contain the whole
+// question, have low importance and no accesses. 653fa1a ranked by the weighted sum alone (the
+// whole-question row got relevance 1, which heat + importance outweighed) and cut とまと → まと.
+{
+  const dir5 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja3-'));
+  const home5 = join(dir5, 'home');
+  mkdirSync(home5);
+  const srv5 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir5, HOME: home5, USERPROFILE: home5 });
+  const rem = async (content, importance) => {
+    const r = await srv5.call('remember', { content, entity_name: '作業メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  const heatUp = async (q, id) => {
+    for (let i = 0; i < 30; i++) {
+      const got = ((await srv5.call('recall', { query: q, mark_accessed: true })).memories ?? []).map((x) => x.id);
+      if (!got.includes(id)) throw new Error(`heat-up query "${q}" did not return #${id}`);
+    }
+  };
+  try {
+    await srv5.ready;
+    const hanashi = await rem('はなしを記録した', 0.3);
+    const hanashiHi = await rem('はなしの続きは来週の定例で', 0.9);
+    const hanashiLo = await rem('はなしが長くなった日の覚え書き', 0.1);
+    const zaiko = await rem('在庫なしを記録した', 1);
+    const tomato = await rem('とまとは冷蔵庫の下の段', 0.3);
+    const matome = await rem('まとめの締切は金曜', 1);
+    const kamome = await rem('かもめの写真を共有した', 0.3);
+    const momeru = await rem('もめた件は円満に解決', 1);
+    const denki = await rem('でんきの契約を見直す', 0.3);
+    const honki = await rem('ほんきで取り組む課題の一覧', 1);
+    await heatUp('在庫', zaiko);
+    await heatUp('締切', matome);
+    await heatUp('円満', momeru);
+    await heatUp('課題', honki);
+
+    const res = await srv5.call('recall', { query: 'はなし', mark_accessed: false, explain: true });
+    const order = (res.memories ?? []).map((x) => x.id);
+    const pos = (id) => { const i = order.indexOf(id); return i < 0 ? Infinity : i; };
+    check('"はなし": every row with the whole question ranks above the hot importance-1 "在庫なし" row',
+      [hanashi, hanashiHi, hanashiLo].every((id) => pos(id) < pos(zaiko)),
+      `order=${order.join(',')} whole=#${hanashi},#${hanashiHi},#${hanashiLo} zaiko=#${zaiko} ${JSON.stringify((res.memories ?? []).map((x) => [x.id, x.composite]))}`);
+    check('"はなし": among the whole-question rows, importance orders them (0.9, 0.3, 0.1)',
+      pos(hanashiHi) < pos(hanashi) && pos(hanashi) < pos(hanashiLo), `order=${order.join(',')}`);
+
+    for (const [q, want, decoy] of [['とまと', tomato, matome], ['かもめ', kamome, momeru], ['でんき', denki, honki]]) {
+      const o = ((await srv5.call('recall', { query: q, mark_accessed: false })).memories ?? []).map((x) => x.id);
+      check(`"${q}": the row with the word is rank 1 (not the hot row sharing a piece)`, o[0] === want,
+        `order=${o.join(',')} want=#${want} decoy=#${decoy}`);
+    }
+  } finally {
+    await srv5.stop();
+    rmSync(dir5, { recursive: true, force: true });
   }
 }
 
