@@ -28,7 +28,8 @@
     "consolidate-no-delete.mjs",
     "auto-consolidate.mjs",
     "sqlite-driver.mjs",
-    "recall-ranking.mjs"
+    "recall-ranking.mjs",
+    "four-gaps.mjs"
   ],
   "packed": [
     "consolidate-no-delete.mjs",

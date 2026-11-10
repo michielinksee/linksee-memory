@@ -46,7 +46,18 @@ async function readStdin(): Promise<string> {
   });
 }
 
+// LINKSEE_NO_CAPTURE=1 (0.20.0): set it for maintenance / headless sessions that should not be
+// captured. The hook then writes nothing — no rows, no hook.log line, no telemetry — and says so
+// in one stderr line. 30 headless maintenance runs on 2026-11-05 had added 98 raw rows.
+function noCaptureRequested(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.LINKSEE_NO_CAPTURE ?? '').trim() === '1';
+}
+
 async function main(): Promise<void> {
+  if (noCaptureRequested()) {
+    process.stderr.write('linksee-memory: LINKSEE_NO_CAPTURE=1 — this session is not captured (nothing written)\n');
+    process.exit(0);
+  }
   const startedAt = Date.now();
   let payload: any = {};
   try {

@@ -385,7 +385,7 @@ export function buildBootDigest(
   if (distill > 0) {
     parts.push(
       '',
-      `🧪 ${distill} auto-captured memories still need a rewrite (rules already settled the acknowledgements and stale ones). Do 3: recall({ dream: true }) → remember({ memory_id, content }) with "distilled": true.`
+      `🧪 ${distill} auto-captured memories still need a rewrite (rules already settled the acknowledgements and stale ones). Do 3: recall({ dream: true }) → remember({ memory_id, merge: true, content }) with "distilled": true.`
     );
   }
   if (anchors.length > 0)

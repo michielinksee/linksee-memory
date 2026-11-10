@@ -84,6 +84,8 @@ Add to `~/.claude/settings.json`:
 
 This `npx -y` form works anywhere, but every call starts npm and checks the registry: on the author's Windows machine one call took 7.4–8.6 s (3 runs, warm cache). `setup` writes a direct call instead — `"<path to node>" "<package>/dist/bin/sync-session.js" --linksee-managed` — which took 0.20–0.27 s on the same machine. Your numbers will differ; measure with your own hook log. Failures are silent. Logs at `~/.linksee-memory/hook.log`.
 
+**Sessions that should not be captured.** Set `LINKSEE_NO_CAPTURE=1` in the environment of a session you do not want in memory — scripted or headless maintenance runs, for example (`LINKSEE_NO_CAPTURE=1 claude -p "…"`). The Stop hook then exits without writing anything (no rows, no `hook.log` line, no telemetry) and prints one line on stderr; `import-sessions --via stop-hook` does the same. A manual `import-sessions` run is not affected. The guard hooks and the MCP tools are not affected either: `remember` called by the agent still saves.
+
 </details>
 
 ### Other editors / CLIs
