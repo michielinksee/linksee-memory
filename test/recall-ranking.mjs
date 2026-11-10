@@ -27,6 +27,10 @@
 //      that does not, even a hot, important one sharing a piece (はなし vs 在庫なし); several such
 //      rows are ordered by importance among themselves; Hiragana words made of particle
 //      characters (とまと, かもめ, でんき) find their row first
+//  12. Codex review 3 of #32 — one long row with the whole question and 160 short rows with only
+//      its pieces: the long row is still rank 1 (it was cut by the candidate LIMIT before the
+//      tier sort ran); a space-separated Japanese question gets no whole-question tier
+//      (「トマト ジュース」 ranks as at 653fa1a: the hot importance-1 row first)
 //
 // Drives the real MCP server over stdio against a throwaway DB and HOME. Never touches
 // ~/.linksee-memory or ~/.claude.
@@ -423,6 +427,43 @@ try {
   } finally {
     await srv5.stop();
     rmSync(dir5, { recursive: true, force: true });
+  }
+}
+
+// 12. Codex review 3 of #32.
+{
+  const dir6 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja4-'));
+  const home6 = join(dir6, 'home');
+  mkdirSync(home6);
+  const srv6 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir6, HOME: home6, USERPROFILE: home6 });
+  const rem = async (content, importance) => {
+    const r = await srv6.call('remember', { content, entity_name: '台所メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  try {
+    await srv6.ready;
+    // (b) first, while the store is small. Space-separated question: W contains the whole
+    // question (low importance, cold); P has both pieces but not the whole (importance 1, hot).
+    // At 653fa1a P was rank 1 (the whole question only raised W's relevance); f7da25f put W first
+    // with the tier key. A space-separated question ranks like English: no tier, P first again.
+    const w = await rem('トマト ジュースの在庫を確認', 0.1);
+    const pRow = await rem('トマトとジュースを冷蔵庫に入れた', 1);
+    for (let i = 0; i < 30; i++) await srv6.call('recall', { query: '冷蔵庫', mark_accessed: true });
+    const sp = ((await srv6.call('recall', { query: 'トマト ジュース', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"トマト ジュース" (space-separated): no whole-question tier, ranked as at 653fa1a (hot importance-1 row first)',
+      sp[0] === pRow && sp[1] === w, `order=${sp.join(',')} P=#${pRow} W=#${w}`);
+
+    // (a) one long row containing the whole question + 160 short rows with its pieces only.
+    const long = await rem(`朝食のトマト・ジュースは前の晩から冷やしておく。${'台所の棚の整理と買い物の記録。'.repeat(20)}`, 0.3);
+    for (let i = 0; i < 160; i++) await rem(`トマト ジュース ${i}`, 0.5);
+    const res = await srv6.call('recall', { query: 'トマト・ジュース？', mark_accessed: false });
+    const order = (res.memories ?? []).map((x) => x.id);
+    check('"トマト・ジュース？": the one long row with the whole question is rank 1 despite 160 short partial rows',
+      order[0] === long, `rank 1 was #${order[0]}; long=#${long}; returned ${order.length}`);
+  } finally {
+    await srv6.stop();
+    rmSync(dir6, { recursive: true, force: true });
   }
 }
 

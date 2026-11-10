@@ -1139,6 +1139,12 @@ function handleRecall(args: any): string {
   const likePieces = plan.cjk && !args.entity_name ? plan.like : [];
   const pieceMode = plan.cjk && !args.entity_name && plan.fts.length + plan.like.length > 0;
   const wholeNeedle = pieceMode ? wholeQuery(args.query ?? '').toLowerCase() : '';
+  // Whole-question tier only for a Japanese question WITHOUT spaces. A space-separated one
+  // (「トマト ジュース」) is ranked like English — one tier — as before (Codex review 3 of #32).
+  // tierMode also fetches the whole-question rows on their own before any LIMIT (below), and
+  // the LIKE search looks for the question without its edge punctuation (no trailing ？).
+  const tierMode = pieceMode && !/\s/.test(String(args.query ?? '').trim());
+  const likeQueryText = tierMode ? wholeQuery(args.query ?? '') : args.query;
 
   // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
   // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
@@ -1155,9 +1161,9 @@ function handleRecall(args: any): string {
     const hiddenIds = new Set<number>();
     if (canUseFts) {
       for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
-      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(likeQueryText, undefined, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     } else {
-      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(likeQueryText, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     }
     return hiddenIds.size;
   };
@@ -1167,7 +1173,7 @@ function handleRecall(args: any): string {
 
   if (canUseFts) {
     const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, hidden);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, hidden, likePieces);
+    const likeRows = runLikeQuery(likeQueryText, undefined, layer, fetchLimit, axis, hidden, likePieces);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -1182,8 +1188,18 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, hidden, likePieces).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(likeQueryText, args.entity_name, layer, fetchLimit, axis, hidden, likePieces).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
+  }
+  // The whole-question tier is the first sort key, so its rows must be candidates whatever the
+  // FTS / LIKE LIMITs kept: one long row with the whole question lost its FTS slot to 160 short
+  // rows with the pieces (Codex review 3 of #32). Fetched on their own (escaped LIKE, same
+  // hidden / layer / axis filters, at most fetchLimit rows by importance) and merged in.
+  if (tierMode) {
+    const have = new Set(rows.map((r) => r.id));
+    for (const r of runLikeQuery(likeQueryText, undefined, layer, fetchLimit, axis, hidden)) {
+      if (!have.has(r.id)) { rows.push({ ...r, _via: 'like' }); have.add(r.id); }
+    }
   }
 
   const useFts = searchMethod !== 'like';
@@ -1281,7 +1297,7 @@ function handleRecall(args: any): string {
       heat_band: heat.band,
       composite_score: composite,
       relevance_score: relevance,
-      _whole: wholeHit ? 1 : 0,
+      _whole: wholeHit && tierMode ? 1 : 0,
       _reasons: reasons,
       _breakdown: {
         relevance: Number(relevance.toFixed(3)),
