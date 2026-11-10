@@ -269,6 +269,51 @@ try {
   check('the row that would pass the budget is left for the next call', !byId(cId), JSON.stringify(q.map((r) => r.memory_id)));
   check('more: true and more_count say how many were left', d2.more === true && d2.more_count === 1, JSON.stringify({ more: d2.more, more_count: d2.more_count }));
   check('the reply stays near the budget (< 260 KiB)', replyBytes < 260 * 1024, String(replyBytes));
+
+  // Codex review 2 of #34: the budget counts each row's whole JSON (a 300 KiB `affects` went out
+  // whole), and more_count is the true number left (COUNT of the same WHERE, not of the LIMITed page).
+  console.log(' 1c. dream budget on the whole row + true more_count (Codex R2)');
+  // Each case starts from an empty queue: rows younger than the 30-minute settle window are not
+  // in it, so earlier cases' rows are moved inside the window (throwaway DB only).
+  const isolate = () => { const db = openDb(); try { db.prepare('UPDATE memories SET created_at = unixepoch()').run(); } finally { db.close(); } };
+  const seedMany = (n, mk) => {
+    const db = openDb();
+    try {
+      const eid = db.prepare("SELECT id FROM entities WHERE name = 'orbit-fiction'").get().id;
+      const ins = db.prepare("INSERT INTO memories (entity_id, layer, content, importance, created_at) VALUES (?, 'learning', ?, 0.5, unixepoch() - 7200)");
+      const ids = [];
+      for (let i = 0; i < n; i++) ids.push(Number(ins.run(eid, JSON.stringify(mk(i))).lastInsertRowid));
+      return ids;
+    } finally { db.close(); }
+  };
+  const base = (i, extra) => ({ altitude: 'detail', type: 'decision', state: 'decided', title: `R${i}`, what: `fictional row ${i} ` + 'w'.repeat(300 - i), needs_distill: 1, ...extra });
+
+  // (a) one row with a 300 KiB `affects`
+  isolate();
+  const [affId] = seedMany(1, (i) => base(i, { affects: Array.from({ length: 3000 }, (_, k) => `src/fiction/path-${String(k).padStart(4, '0')}-` + 'p'.repeat(80)) }));
+  const da = await server.call('recall', { dream: true, distill: 25 });
+  const ra = (da.distill_queue ?? []).find((r) => r.memory_id === affId);
+  const raBytes = Buffer.byteLength(JSON.stringify(ra ?? {}), 'utf8');
+  const daBytes = Buffer.byteLength(JSON.stringify(da), 'utf8');
+  check('(a) the 300 KiB-affects row is listed', !!ra);
+  check('(a) its top-level affects is cut and named in truncated', Array.isArray(ra?.truncated) && ra.truncated.includes('affects'), JSON.stringify(ra?.truncated));
+  check('(a) the row itself stays small (< 16 KiB)', raBytes < 16 * 1024, String(raBytes));
+  check('(a) the whole reply stays under the budget (< 210 KiB)', daBytes < 210 * 1024, String(daBytes));
+
+  // (b) 26 rows of ~90 KiB: 2 fit, 24 are left
+  isolate();
+  const bigIds = seedMany(26, (i) => base(i, { context_hint: 'h'.repeat(90 * 1024) }));
+  const db2 = await server.call('recall', { dream: true, distill: 25 });
+  const shownB = (db2.distill_queue ?? []).filter((r) => bigIds.includes(r.memory_id)).length;
+  check('(b) 26 × ~90 KiB: 2 rows fit the budget', shownB === 2 && (db2.distill_queue ?? []).length === 2, String(shownB));
+  check('(b) more: true, more_count 24 (all 26 matching − 2 shown)', db2.more === true && db2.more_count === 24, JSON.stringify({ more: db2.more, more_count: db2.more_count }));
+
+  // (c) 26 small rows, distill: 25 → 25 shown, 1 left
+  isolate();
+  seedMany(26, (i) => base(i, {}));
+  const dc = await server.call('recall', { dream: true, distill: 25 });
+  check('(c) 26 small rows: 25 shown', (dc.distill_queue ?? []).length === 25, String((dc.distill_queue ?? []).length));
+  check('(c) more: true, more_count 1', dc.more === true && dc.more_count === 1, JSON.stringify({ more: dc.more, more_count: dc.more_count }));
   await server.stop();
   server = undefined;
 

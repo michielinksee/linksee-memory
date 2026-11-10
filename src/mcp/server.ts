@@ -2457,6 +2457,19 @@ function handleFlagProposals(args: any): string {
 
 // content_full budget of one dream reply (bytes, UTF-8). Reasoning next to its use in handleDream.
 const DISTILL_CONTENT_BUDGET = 200 * 1024;
+// Cap on each top-level field of a dream row other than raw_what / context_hint (bytes, UTF-8).
+const DISTILL_FIELD_MAX = 2 * 1024;
+
+/** The longest prefix of text that is at most maxBytes in UTF-8 (never splits a character). */
+function cutToBytes(text: string, maxBytes: number): string {
+  let out = '', n = 0;
+  for (const ch of text) {
+    const b = Buffer.byteLength(ch, 'utf8');
+    if (n + b > maxBytes) break;
+    out += ch; n += b;
+  }
+  return out;
+}
 
 function handleDream(args: any): string {
   const domainFilter = args?.domain;
@@ -2488,8 +2501,8 @@ function handleDream(args: any): string {
   let distillQueue: any[] = [];
   let distillMoreCount = 0;
   try {
-    const rows = db.prepare(`
-      SELECT m.id, m.layer, m.content, datetime(m.created_at, 'unixepoch') AS created, e.name AS entity
+    // One WHERE for the page and for the total, so more_count is the true number left (Codex R2 of #34).
+    const DISTILL_FROM_WHERE = `
         FROM memories m JOIN entities e ON e.id = m.entity_id
        WHERE m.layer IN ('learning', 'caveat')
          AND json_valid(m.content)
@@ -2499,16 +2512,21 @@ function handleDream(args: any): string {
          AND json_extract(m.content, '$.distill_verdict') IS NULL
          AND (json_extract(m.content, '$.needs_distill') = 1
               OR json_extract(m.content, '$.why') = 'Decision detected by pattern match — may need agent enrichment'
-              OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')
+              OR json_extract(m.content, '$.why') = 'User-stated warning/prohibition — auto-extracted by caveat pattern match')`;
+    const rows = db.prepare(`
+      SELECT m.id, m.layer, m.content, datetime(m.created_at, 'unixepoch') AS created, e.name AS entity
+      ${DISTILL_FROM_WHERE}
        ORDER BY (m.layer = 'caveat') DESC,
                 (e.name <> 'Local') DESC,
                 length(json_extract(m.content, '$.what')) DESC,
                 m.created_at DESC
        LIMIT ${distillLimit}
     `).all() as any[];
+    const distillMatching = Number((db.prepare(`SELECT COUNT(*) AS n ${DISTILL_FROM_WHERE}`).get() as any)?.n ?? rows.length);
     // 0.20.0: each row also carries the axes, the title and `content_full` — every stored key,
-    // parsed, uncut. raw_what / context_hint stay short for reading, and `truncated` names each one
-    // that was cut: a rewriter that copied the cut text lost the tail of 21 memories (2026-11-10).
+    // parsed, uncut. raw_what / context_hint are cut at 220 characters for reading; every other
+    // top-level value is capped at DISTILL_FIELD_MAX bytes (Codex R2 of #34: a 300 KiB `affects`
+    // went out whole). `truncated` names each value that was cut — never copy one back.
     const CUT = 220;
     const all = rows.map((r) => {
       let c: any = {};
@@ -2520,43 +2538,52 @@ function handleDream(args: any): string {
         if (s.length > CUT) { truncated.push(key); return s.slice(0, CUT); }
         return s;
       };
+      const capped = (key: string, v: unknown): unknown => {
+        if (v === undefined || v === null) return v;
+        const text = typeof v === 'string' ? v : JSON.stringify(v);
+        if (Buffer.byteLength(text, 'utf8') <= DISTILL_FIELD_MAX) return v;
+        truncated.push(key);
+        return cutToBytes(text, DISTILL_FIELD_MAX); // a cut non-string becomes its cut JSON text
+      };
       return {
         memory_id: r.id,
         layer: r.layer,
-        entity: r.entity,
-        title: c.title,
-        altitude: c.altitude,
-        type: c.type,
-        state: c.state,
+        entity: capped('entity', r.entity),
+        title: capped('title', c.title),
+        altitude: capped('altitude', c.altitude),
+        type: capped('type', c.type),
+        state: capped('state', c.state),
         raw_what: short('raw_what', c.what ?? ''),
         context_hint: c.context_hint ? short('context_hint', c.context_hint) : undefined,
-        affects: c.affects,
+        affects: capped('affects', c.affects),
         created: r.created,
-        ...(truncated.length > 0 ? { truncated } : {}),
+        truncated,
         content_full: c as any,
       } as Record<string, any>;
     });
-    // Size budget for content_full (Codex review 1 of #34): without one, 25 rows of 1 MiB each made
-    // a 25 MiB reply. 200 KiB keeps the worst case ~125× smaller while a normal queue — captured
-    // rows are a few KiB each, 8 per call by default — never reaches it. Rows are kept in queue
-    // order until the next one would pass the budget; the rest are left for the next call
-    // (more: true, more_count). A single row larger than the budget is listed without content_full
-    // (content_full_omitted: <bytes>) — read that one directly by memory_id.
+    // Size budget of one reply (Codex reviews 1 and 2 of #34): without one, 25 rows of 1 MiB each
+    // made a 25 MiB reply. Counted on each row's WHOLE JSON (top-level fields + content_full), not
+    // on content_full alone. 200 KiB keeps the worst case ~125× smaller while a normal queue —
+    // captured rows are a few KiB each, 8 per call by default — never reaches it. Rows are kept in
+    // queue order until the next one would pass the budget. A row whose content_full alone would
+    // pass it is listed without content_full (content_full_omitted: <bytes>) — its other fields are
+    // capped, so the row itself stays small. more / more_count come from the COUNT above.
     let used = 0;
     for (const row of all) {
-      const bytes = Buffer.byteLength(JSON.stringify(row.content_full), 'utf8');
+      if (row.truncated.length === 0) delete row.truncated;
+      let bytes = Buffer.byteLength(JSON.stringify(row), 'utf8');
       if (bytes > DISTILL_CONTENT_BUDGET) {
+        const full = Buffer.byteLength(JSON.stringify(row.content_full), 'utf8');
         delete row.content_full;
-        row.content_full_omitted = bytes;
-        row.content_full_hint = `content is ${bytes} bytes, over the ${DISTILL_CONTENT_BUDGET}-byte budget of one dream reply: read it from the database file directly (memory.db in the linksee memory directory: SELECT content FROM memories WHERE id = ${row.memory_id}) before rewriting, and rewrite with merge: true.`;
-        distillQueue.push(row);
-        continue;
+        row.content_full_omitted = full;
+        row.content_full_hint = `content is ${full} bytes, over the ${DISTILL_CONTENT_BUDGET}-byte budget of one dream reply: read it from the database file directly (memory.db in the linksee memory directory: SELECT content FROM memories WHERE id = ${row.memory_id}) before rewriting, and rewrite with merge: true.`;
+        bytes = Buffer.byteLength(JSON.stringify(row), 'utf8');
       }
       if (used + bytes > DISTILL_CONTENT_BUDGET) break;
       used += bytes;
       distillQueue.push(row);
     }
-    distillMoreCount = all.length - distillQueue.length;
+    distillMoreCount = Math.max(0, distillMatching - distillQueue.length);
   } catch {
     /* additive — never break dream on a distill-query error */
   }
