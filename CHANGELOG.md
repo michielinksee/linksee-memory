@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`recall` ranks the memory that has the asked words first (0.19.1 candidate).** Two causes, both fixed: (1) sentence punctuation stayed glued to the last word, so in "…editor?" the word `editor?` could never match under the trigram index and only the person's name matched — every memory about that person tied, and bm25's short-row bonus picked the order; edge punctuation is now trimmed from each query word (inner punctuation such as `server.ts`, `eu-north` is kept). (2) Relevance was bm25 alone, normalised against a range forced to include 0 and 1. Relevance is now 0.8 × term coverage (which asked words the memory contains, each weighted by its bm25 IDF, so a word on every memory — a name, the `what` key — counts for almost nothing) + 0.2 × bm25 within the FTS hits' real range. The heat / momentum / importance weights, the LIKE fallback (0.5), and the default hiding of superseded and consolidated memories are unchanged. On the borrowed Day 028 benchmark the asked person + item is now rank 1 on 12/12 current questions (was 6/12); current / historical answers stay 8/12 / 12/12 (the 4 current misses are the original extraction). New required test `test/recall-ranking.mjs`. Cost: one FTS lookup per query word; median recall on a 3,000-memory DB went from ~51 ms to ~59 ms.
+
 - **Release CI:** a version tag now also publishes `server.json` to the official MCP registry after the npm publish succeeds (pinned, Sigstore-verified `mcp-publisher`, `login github-oidc`, no secret; server.json is re-checked against the published tarball first). A dry run stops at `validate`. If the registry step fails, the job goes red with a "publish by hand" notice.
 
 ## v0.19.0 — unreleased (SQLite from Node itself: npm 12's `npx` starts again)
