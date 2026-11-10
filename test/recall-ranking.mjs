@@ -19,6 +19,10 @@
 //   9. Japanese sentences (0.19.2): one fictional person, several items, asked in natural Japanese
 //      → the asked item is rank 1; katakana / kanji / alphanumeric mixes (v0.19.1 の公開日は？),
 //      full-width punctuation, 1–2 character pieces, another person's same item does not win
+//  10. Codex review 1 of #32 — what 0.19.1 found by the whole question is not lost to a row that
+//      shares only some pieces (みずほの口座 / ひとり旅 / 決める, the other row has higher
+//      importance); a 500-kanji question (499 pieces before the cap) answers instead of failing
+//      with "Expression tree is too large"; "50%" and "snake_case" are literal in LIKE
 //
 // Drives the real MCP server over stdio against a throwaway DB and HOME. Never touches
 // ~/.linksee-memory or ~/.claude.
@@ -307,6 +311,57 @@ try {
   } finally {
     await srv3.stop();
     rmSync(dir3, { recursive: true, force: true });
+  }
+}
+
+// 10. Codex review 1 of #32. Each pair: the row asked for (low importance) contains the whole
+// question; the other row (importance 1) shares only a piece with it. 0.19.1 (whole question as
+// one word) returns the asked row first; the first CJK version dropped all Hiragana (みずほ, ひとり,
+// める), kept only 口座 / 旅 / 決, and put the importance-1 row first.
+{
+  const dir4 = mkdtempSync(join(tmpdir(), 'linksee-recall-ranking-ja2-'));
+  const home4 = join(dir4, 'home');
+  mkdirSync(home4);
+  const srv4 = startServer({ ...env, LINKSEE_MEMORY_DIR: dir4, HOME: home4, USERPROFILE: home4 });
+  const rem = async (content, importance) => {
+    const r = await srv4.call('remember', { content, entity_name: '家計メモ', entity_kind: 'concept', layer: 'context', importance });
+    if (r.ok === false || r.memory_id === undefined) throw new Error(`remember failed: ${JSON.stringify(r).slice(0, 300)}`);
+    return r.memory_id;
+  };
+  try {
+    await srv4.ready;
+    const pairs = [
+      ['みずほの口座', await rem('みずほの口座は給与の受け取り用', 0.3), await rem('あおぞらの口座は貯蓄用', 1)],
+      ['ひとり旅', await rem('ひとり旅の持ち物は小さな鞄だけ', 0.3), await rem('家族旅の予定は夏休み', 1)],
+      ['決める', await rem('期限を決める会議は金曜の午後', 0.3), await rem('決算の締めは月末', 1)],
+    ];
+    for (const [q, want, other] of pairs) {
+      const res = await srv4.call('recall', { query: q, mark_accessed: false });
+      const order = (res.memories ?? []).map((x) => x.id);
+      check(`"${q}": the row with the whole question is rank 1 (not the importance-1 row sharing a piece)`, order[0] === want,
+        `order=${order.join(',')} want=#${want} other=#${other}`);
+    }
+
+    // 500 kanji separated by 、 → 499+ distinct pieces before the cap. Must answer, not throw.
+    const kanji = Array.from({ length: 500 }, (_, i) => String.fromCodePoint(0x4e00 + i * 3)).join('、');
+    const target = await rem(`長い問いの確認用: ${kanji.slice(0, 40)}`, 0.5);
+    const big = await srv4.call('recall', { query: kanji, mark_accessed: false });
+    check('500-kanji question answers (no "Expression tree is too large")', Array.isArray(big.memories) && !big._error && !/too large/i.test(big._raw ?? ''),
+      `got ${JSON.stringify(big).slice(0, 200)}`);
+    check('500-kanji question still finds a row containing some of its pieces', (big.memories ?? []).length > 0, `target=#${target}`);
+
+    // % and _ are literal in LIKE (were wildcards before, also in 0.19.1).
+    const pct = await rem('割引の上限は50%まで', 0.5);
+    const p500 = await rem('割引の上限は500円まで', 0.5);
+    const snake = await rem('settings use snake_case keys', 0.5);
+    const kebab = await rem('settings use snake-case keys', 0.5);
+    const r50 = ((await srv4.call('recall', { query: '50%', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"50%" finds the 50% row and not the 500 row', r50.includes(pct) && !r50.includes(p500), `got=${r50.join(',')}`);
+    const rsn = ((await srv4.call('recall', { query: 'snake_case', mark_accessed: false })).memories ?? []).map((x) => x.id);
+    check('"snake_case" finds snake_case and not snake-case', rsn.includes(snake) && !rsn.includes(kebab), `got=${rsn.join(',')}`);
+  } finally {
+    await srv4.stop();
+    rmSync(dir4, { recursive: true, force: true });
   }
 }
 

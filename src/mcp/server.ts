@@ -758,14 +758,19 @@ const EDGE_PUNCT_RE = /^[\s"'`([{<「『（【〈《]+|[\s"'`)\]}>」』）】�
 // Japanese / CJK queries (0.19.2). A Japanese sentence has no spaces, so the space split above
 // made "山田のエディタは何？" ONE word that matched only rows containing that whole string. No
 // dictionary (no new dependency): a space-word that contains Han / Hiragana / Katakana is cut
-// into pieces at punctuation and at script boundaries (Han | Katakana | letters+digits);
-// Hiragana runs are particles, okurigana and question endings (の, は, ですか) and are dropped
-// as separators, unless the whole word is Hiragana. Question-word pieces (何, 誰) are dropped.
+// into pieces at punctuation and at script boundaries (Han | Hiragana | Katakana | letters+digits).
+// Only FUNCTION words are dropped: the one list below (particles, auxiliaries, question endings
+// and question words). Every other Hiragana run of 2+ chars is kept as a piece (みずほの口座 →
+// みずほ + 口座; ひとり旅 → ひとり + 旅): dropping all Hiragana lost the word that told two
+// rows apart (Codex review 1 of #32). Kanji + okurigana gives both the kanji piece and the
+// kanji + okurigana piece (決める → 決 + 決める; 使う → 使 + 使う).
 // Pieces of 3+ chars go to the trigram index; 1–2 char pieces (山田, 東京) cannot, and are
 // matched with LIKE. A space-word with no CJK char is handled exactly as before, so English
-// and other space-separated queries get the same words, FTS query, LIKE and ranking.
+// and other space-separated queries get the same words, FTS query and ranking.
 // Known limits: a long Han-only run (a Chinese sentence) stays one piece; "公開日" does not
-// match "公開した日"; a Hiragana content word in a mixed sentence is dropped.
+// match "公開した日"; a content word made only of function-word characters inside a longer
+// Hiragana run can be split (はなし → は + なし) — the whole-query floor in handleRecall keeps
+// what the whole question matched before.
 const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const HAN_RE = /[\p{Script=Han}々〆ヶ]/u;
 const HIRA_RE = /\p{Script=Hiragana}/u;
@@ -773,24 +778,90 @@ const KATA_RE = /[\p{Script=Katakana}ーｰ]/u;
 // Letters / digits of any other script, plus the inner symbols of names like v0.19.1, eu-north,
 // .env, #21, C++, a/b. Everything else (、。？！「」・ spaces …) separates pieces.
 const WORDISH_RE = /[\p{L}\p{N}.\-_#+/@&']/u;
-const CJK_QUESTION_PIECES = new Set(['何', '誰', '何処', '何時', '何故']);
-const HIRA_ONLY_STOP = new Set(['の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'か', 'って', 'です', 'ですか', 'ますか', 'でしょうか', 'なに', 'なん', 'だれ', 'どこ', 'いつ']);
+// THE list of function words (the only place): dropped as separators, never searched.
+const CJK_FUNCTION_WORDS = new Set([
+  // particles
+  'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'へ', 'や', 'か', 'ね', 'よ',
+  'から', 'まで', 'より', 'など', 'って', 'とは', 'には', 'では', 'でも', 'とも', 'のは', 'のが', 'のを', 'だけ',
+  // auxiliaries / endings
+  'て', 'た', 'だ', 'です', 'ます', 'ですか', 'ますか', 'でしょうか', 'でしょう', 'でした', 'ました', 'だっけ',
+  'いる', 'ている', 'ある', 'する', 'した', 'して', 'ない', 'たい', 'れる', 'られる',
+  // honorific suffixes
+  'さん', 'くん', 'ちゃん',
+  // question words
+  'なに', 'なん', 'だれ', 'どこ', 'いつ', 'どう', 'どれ', 'どの', '何', '誰', '何処', '何時', '何故',
+]);
+const HIRA_FUNCTION_WORDS = [...CJK_FUNCTION_WORDS].filter((w) => /^\p{Script=Hiragana}+$/u.test(w));
+// Upper bound on pieces per query (after de-duplication). Each piece is one FTS lookup or one
+// LIKE scan (coverage) plus two LIKE terms in the candidate SQL, and SQLite refuses an
+// expression deeper than 1000 ("Expression tree is too large": 499 pieces from a 500-kanji
+// question did, Codex review 1 of #32). Natural questions have well under 10 pieces; 16 leaves
+// room and keeps the cost bounded (measured on a 3,000-row store: ~45 ms at 10 pieces, ~65 ms at 16). Over the cap the LONGEST
+// pieces are kept (longer = rarer), ties in question order, then put back in question order.
+const MAX_QUERY_PIECES = 16;
+
+// One Hiragana run → content fragments, function words dropped. Picks the split covering the most
+// characters with function words, every content fragment 2+ chars long — except a 1-char fragment
+// at the very start right after kanji (okurigana: 使う) or a run that is 1 char in total. Ties go
+// to fewer segments, so a word is not cut without a function word. starts: begins the run.
+function splitHiragana(run: string, afterHan: boolean): Array<{ text: string; starts: boolean }> {
+  const c = Array.from(run);
+  const n = c.length;
+  const best: Array<{ score: number; prev: number; content: boolean } | null> = new Array(n + 1).fill(null);
+  best[0] = { score: 0, prev: -1, content: false };
+  for (let i = 0; i < n; i++) {
+    const at = best[i];
+    if (!at) continue;
+    const offer = (j: number, score: number, content: boolean) => {
+      const cur = best[j];
+      if (!cur || score > cur.score) best[j] = { score, prev: i, content };
+    };
+    for (const f of HIRA_FUNCTION_WORDS) {
+      const len = Array.from(f).length;
+      if (i + len <= n && c.slice(i, i + len).join('') === f) offer(i + len, at.score + len * 1000 - 1, false);
+    }
+    const minLen = (i === 0 && afterHan) || n === 1 ? 1 : 2;
+    for (let j = i + minLen; j <= n; j++) offer(j, at.score - 1, true);
+  }
+  const segs: Array<{ text: string; starts: boolean }> = [];
+  for (let j = n; j > 0;) {
+    const b = best[j]!;
+    if (b.content) segs.unshift({ text: c.slice(b.prev, j).join(''), starts: b.prev === 0 });
+    j = b.prev;
+  }
+  return segs;
+}
+
 function cjkPieces(word: string): string[] {
-  const runs: Array<{ cls: string; text: string }> = [];
-  let cur: { cls: string; text: string } | null = null;
+  const runs: Array<{ cls: string; text: string; joined: boolean }> = []; // joined: no separator before it
+  let cur: { cls: string; text: string; joined: boolean } | null = null;
+  let gap = true;
   for (const ch of word) {
     const cls = HAN_RE.test(ch) ? 'han' : HIRA_RE.test(ch) ? 'hira' : KATA_RE.test(ch) ? 'kata' : WORDISH_RE.test(ch) ? 'word' : 'sep';
-    if (cls === 'sep') { cur = null; continue; }
+    if (cls === 'sep') { cur = null; gap = true; continue; }
     if (cur && cur.cls === cls) cur.text += ch;
-    else { cur = { cls, text: ch }; runs.push(cur); }
+    else { cur = { cls, text: ch, joined: !gap }; runs.push(cur); }
+    gap = false;
   }
-  const content = runs.filter((r) => r.cls !== 'hira');
-  const keep = content.length > 0 ? content : runs; // an all-Hiragana word stays whole
   const out: string[] = [];
-  for (const r of keep) {
-    const t = r.text.replace(EDGE_PUNCT_RE, '');
-    if (!t || CJK_QUESTION_PIECES.has(t) || (r.cls === 'hira' && HIRA_ONLY_STOP.has(t))) continue;
-    out.push(t);
+  const push = (t: string) => {
+    const s = t.replace(EDGE_PUNCT_RE, '');
+    if (s && !CJK_FUNCTION_WORDS.has(s)) out.push(s);
+  };
+  for (let k = 0; k < runs.length; k++) {
+    const r = runs[k];
+    if (r.cls !== 'hira') { push(r.text); continue; }
+    const prev = runs[k - 1];
+    const afterHan = !!prev && prev.cls === 'han' && r.joined;
+    const segs = splitHiragana(r.text, afterHan);
+    if (segs.length === 0 && runs.length === 1) { push(r.text); continue; } // all-Hiragana word: keep unless a function word
+    for (const s of segs) {
+      if (afterHan && s.starts) {
+        if (!CJK_FUNCTION_WORDS.has(prev.text)) push(prev.text + s.text); // 決 + める → 決める
+        continue;
+      }
+      if (Array.from(s.text).length >= 2 || runs.length === 1) push(s.text);
+    }
   }
   return out;
 }
@@ -807,11 +878,12 @@ function queryPlan(raw: string): QueryPlan {
   if (!cleaned) return plan;
   const seen = new Set<string>();
   const shortWords: string[] = [];
+  const all: Array<{ t: string; short: boolean }> = [];
   const add = (t: string, short: boolean) => {
     const key = t.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    (short ? plan.like : plan.fts).push(t);
+    all.push({ t, short });
   };
   for (const word of cleaned.split(' ')) {
     if (CJK_RE.test(word)) {
@@ -823,10 +895,23 @@ function queryPlan(raw: string): QueryPlan {
     if (t.length < 3) { if (t) shortWords.push(t); continue; }
     add(t, false);
   }
-  if (plan.cjk) for (const t of shortWords) add(t, true); // "CI の設定は？": CI by LIKE
+  if (plan.cjk) {
+    for (const t of shortWords) add(t, true); // "CI の設定は？": CI by LIKE
+    if (all.length > MAX_QUERY_PIECES) {
+      const keep = new Set(all.map((p, i) => ({ i, len: Array.from(p.t).length }))
+        .sort((a, b) => b.len - a.len || a.i - b.i).slice(0, MAX_QUERY_PIECES).map((x) => x.i));
+      const kept = all.filter((_, i) => keep.has(i));
+      all.length = 0;
+      all.push(...kept);
+    }
+  }
+  for (const p of all) (p.short ? plan.like : plan.fts).push(p.t);
   return plan;
 }
 const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => '\\' + c);
+// The whole question without its edge punctuation: a memory containing it is never ranked below
+// what the pieces give it (whole-query floor, CJK only; Codex review 1 of #32).
+const wholeQuery = (q: string): string => String(q ?? '').trim().replace(EDGE_PUNCT_RE, '');
 
 // Which query words each memory contains, weighted by how rare the word is in the store
 // (0.19.1). One FTS5 lookup per word gives both its document frequency and the rows that have
@@ -930,8 +1015,10 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
 
 // pieces (0.19.2): the 1–2 char pieces of a CJK query. A row matching any of them is a candidate
 // too, and candidates are ordered by how many of (whole query, each piece) they match before
-// importance, so a 1-char piece cannot fill the pool with rows that have nothing else asked.
-// Without pieces the SQL is exactly as before.
+// importance, so a 1-char piece cannot fill the pool with rows that have nothing else asked; the
+// whole query is then taken without its edge punctuation (wholeQuery). Without pieces the SQL is
+// as before, except that % _ \ in the query / entity name are now literal (ESCAPE; before 0.19.2
+// "50%" also matched "500", "snake_case" also matched "snake-case" — Codex review 1 of #32).
 function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL, pieces: string[] = []): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
@@ -943,27 +1030,20 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
     WHERE 1=1
   `;
   const params: any[] = [];
-  if (entityName) { sql += ' AND e.name LIKE ?'; params.push(`%${entityName}%`); }
+  if (entityName) { sql += " AND e.name LIKE ? ESCAPE '\\'"; params.push(`%${likeEscape(entityName)}%`); }
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
   sql = appendHiddenFilters(sql, hidden);
   const usePieces = !!query && !entityName && pieces.length > 0;
+  const one = "(e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')";
+  const pats = query ? [usePieces ? wholeQuery(query) : query, ...(usePieces ? pieces : [])].map((t) => `%${likeEscape(t)}%`) : [];
   if (query && !entityName) {
-    if (usePieces) {
-      const ors = pieces.map(() => "e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\'").join(' OR ');
-      sql += ` AND (e.name LIKE ? OR m.content LIKE ? OR ${ors})`;
-      params.push(`%${query}%`, `%${query}%`);
-      for (const p of pieces) { const pat = `%${likeEscape(p)}%`; params.push(pat, pat); }
-    } else {
-      sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
-      params.push(`%${query}%`, `%${query}%`);
-    }
+    sql += ` AND (${pats.map(() => one).join(' OR ')})`;
+    for (const pat of pats) params.push(pat, pat);
   }
   if (usePieces) {
-    const hits = ['(e.name LIKE ? OR m.content LIKE ?)', ...pieces.map(() => "(e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')")].join(' + ');
-    sql += ` ORDER BY (${hits}) DESC, m.importance DESC, m.last_accessed_at DESC LIMIT ?`;
-    params.push(`%${query}%`, `%${query}%`);
-    for (const p of pieces) { const pat = `%${likeEscape(p)}%`; params.push(pat, pat); }
+    sql += ` ORDER BY (${pats.map(() => one).join(' + ')}) DESC, m.importance DESC, m.last_accessed_at DESC LIMIT ?`;
+    for (const pat of pats) params.push(pat, pat);
   } else sql += ' ORDER BY m.importance DESC, m.last_accessed_at DESC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
@@ -1051,6 +1131,7 @@ function handleRecall(args: any): string {
   // coverage for every candidate (FTS- or LIKE-found). An English query has no pieces.
   const likePieces = plan.cjk && !args.entity_name ? plan.like : [];
   const pieceMode = plan.cjk && !args.entity_name && plan.fts.length + plan.like.length > 0;
+  const wholeNeedle = pieceMode ? wholeQuery(args.query ?? '').toLowerCase() : '';
 
   // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
   // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
@@ -1152,9 +1233,14 @@ function handleRecall(args: any): string {
 
     // Individual weight contributions (for transparency)
     const isFtsRow = pieceMode || (useFts && r._via !== 'like');
+    // Whole-query floor (CJK): a row that contains the whole question (edge punctuation off) gets
+    // full relevance, so what the unsplit question found before is never ranked below rows that
+    // only share some pieces with it (みずほの口座 vs あおぞらの口座, Codex review 1 of #32).
+    const wholeHit = pieceMode && !!wholeNeedle &&
+      (String(r.content ?? '').toLowerCase().includes(wholeNeedle) || String(r.entity_name ?? '').toLowerCase().includes(wholeNeedle));
     const coverage = isFtsRow ? coverageOf(r.id) : 0;
     const bmNorm = bmNormOf(r.bm25_score);
-    const relevance = isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
+    const relevance = wholeHit ? 1 : isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
     const heatNorm = heat.score / 100;
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
     const importanceBoost = r.importance; // 0-1
