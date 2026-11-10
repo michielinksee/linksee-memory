@@ -14,6 +14,7 @@
 //   5. Japanese one-word queries, with and without a full-width "？"; the sentence limit
 //   6. superseded_hidden / consolidated_hidden with both kinds of hidden rows present
 //   7. one-word query with near-equal bm25: importance decides (Codex review 1 of #30)
+//   8. 1–2 character words go through the LIKE fallback; with a trailing ? they find nothing (known limit)
 //
 // Drives the real MCP server over stdio against a throwaway DB and HOME. Never touches
 // ~/.linksee-memory or ~/.claude.
@@ -181,26 +182,42 @@ try {
   check('Japanese sentence that is not a substring returns nothing (known limit, as before)', (sentenceMiss.memories ?? []).length === 0,
     `got ${(sentenceMiss.memories ?? []).map((m) => m.id).join(',')}`);
 
-  // 6. Hidden counts with both kinds of hidden rows. "timezone?" now matches (before this PR the
-  // "?" made it unmatchable, so only the name counted). The hidden rows that contain an asked word
-  // are exactly: the superseded timezone row (#ids.timezone) and the consolidated row below.
+  // 6. Hidden counts with both kinds of hidden rows, found by ONE word only. None of these rows
+  // contains the person's name or any other word shared with other rows, so the only way the
+  // query "dotfiles?" can reach them is the word "dotfiles" itself. Before this PR the trailing
+  // "?" made that word unmatchable (FTS needs the trigram "es?", the LIKE fallback needs the
+  // literal "dotfiles?"), so both hidden counts were 0; now they are 1 each. origin/main fails
+  // the two count checks below.
+  const oldDot = await remember(srv, 'dotfiles repository lives on the home NAS');
+  const newDot = await remember(srv, 'dotfiles repository moved to a private git remote', { supersedes: oldDot });
   const { openDb } = await import('../dist/db/migrate.js');
   const db = openDb();
-  const entityId = db.prepare('SELECT entity_id AS e FROM memories WHERE id = ?').get(ids.timezone).e;
+  const entityId = db.prepare('SELECT entity_id AS e FROM memories WHERE id = ?').get(newDot).e;
   const folded = Number(db.prepare("INSERT INTO memories (entity_id, layer, content) VALUES (?, 'context', ?)").run(entityId,
-    JSON.stringify({ altitude: 'implementation', type: 'note', state: 'open', what: 'Ottoline Varga timezone note, folded into a summary', consolidated_into: newer })).lastInsertRowid);
-  const expectSup = db.prepare(`SELECT COUNT(*) AS n FROM memories m WHERE (m.content LIKE '%timezone%' OR m.content LIKE '%Ottoline%')
-    AND (COALESCE(m.mem_state,'') = 'superseded' OR EXISTS (SELECT 1 FROM memory_edges me WHERE me.to_memory_id = m.id AND me.relation = 'supersedes'))`).get().n;
+    JSON.stringify({ altitude: 'implementation', type: 'note', state: 'open', what: 'dotfiles sync runs at login', consolidated_into: newDot })).lastInsertRowid);
+  const withWord = db.prepare("SELECT COUNT(*) AS n FROM memories WHERE content LIKE '%dotfiles%'").get().n;
   db.close();
-  const res5 = await recall(srv, 'Ottoline Varga timezone?');
+  check('only the three rows written here contain the word', withWord === 3, `rows with the word: ${withWord}`);
+  const res5 = await recall(srv, 'dotfiles?');
   const got5 = (res5.memories ?? []).map((m) => m.id);
-  check('default recall hides the superseded and the consolidated row', !got5.includes(ids.timezone) && !got5.includes(folded), `got=${got5.join(',')}`);
-  check('superseded_hidden = the superseded rows that contain an asked word', Number(res5.superseded_hidden) === expectSup && expectSup === 1,
-    `superseded_hidden=${res5.superseded_hidden} expected=${expectSup}`);
-  check('consolidated_hidden = 1 (the folded row)', Number(res5.consolidated_hidden) === 1, `consolidated_hidden=${res5.consolidated_hidden}`);
-  const res6 = await recall(srv, 'Ottoline Varga timezone?', { include_superseded: true, include_consolidated: true });
+  check('"dotfiles?" returns the current row and hides the superseded and the consolidated row',
+    got5[0] === newDot && !got5.includes(oldDot) && !got5.includes(folded), `got=${got5.join(',')}`);
+  check('superseded_hidden = 1 (found through the word alone, "?" trimmed)', Number(res5.superseded_hidden) === 1, `superseded_hidden=${res5.superseded_hidden}`);
+  check('consolidated_hidden = 1 (found through the word alone, "?" trimmed)', Number(res5.consolidated_hidden) === 1, `consolidated_hidden=${res5.consolidated_hidden}`);
+  const res6 = await recall(srv, 'dotfiles?', { include_superseded: true, include_consolidated: true });
   const got6 = (res6.memories ?? []).map((m) => m.id);
-  check('include_superseded + include_consolidated show both', got6.includes(ids.timezone) && got6.includes(folded), `got=${got6.join(',')}`);
+  check('include_superseded + include_consolidated show both', got6.includes(oldDot) && got6.includes(folded), `got=${got6.join(',')}`);
+
+  // 8. Words of 1–2 characters cannot use the trigram index; they go through the LIKE fallback,
+  // which matches the whole query as one substring (unchanged by this PR). With a trailing
+  // question mark the substring includes the mark and nothing matches — known limit, pinned here.
+  const tokyo = await remember(srv, '出張の集合場所は東京駅の丸の内北口');
+  const ci = await remember(srv, 'CI runs the packed-tarball tests before publish');
+  const has = async (q, id) => ((await recall(srv, q)).memories ?? []).some((m) => m.id === id);
+  check('2-char Japanese "東京" finds its row (LIKE fallback)', await has('東京', tokyo));
+  check('2-char English "CI" finds its row (LIKE fallback)', await has('CI', ci));
+  check('known limit: "東京？" finds nothing (the LIKE substring includes the ？)', ((await recall(srv, '東京？')).memories ?? []).length === 0);
+  check('known limit: "CI?" does not find the CI row (the LIKE substring includes the ?)', !(await has('CI?', ci)));
 } finally {
   await srv.stop();
   rmSync(dir, { recursive: true, force: true });
