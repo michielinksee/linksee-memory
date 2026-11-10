@@ -205,6 +205,70 @@ try {
   check('recall still reads with an old broken row present', rec.ok !== false, JSON.stringify(rec).slice(0, 200));
   check('the old broken row is untouched', readRow(brokenId).content === BROKEN_STORED);
 
+  // Codex review 1 of #34 (P1): only content meant as JSON is checked; text and code that merely
+  // start with { or [ are saved as before; force: true stores even broken JSON as text.
+  console.log(' 4b. text that starts with { or [ (Codex R1 P1)');
+  for (const text of ['{tenant} is the placeholder for the fictional customer name', '{ retry(); }', '{x}',
+    '[TODO] check the fictional lantern fetcher', '[2026-11-10] fictional lantern cache warmed']) {
+    const before = countRows();
+    const r = await call('remember', { content: text });
+    check(`saved as text: ${text.slice(0, 32)}`, r.ok === true && countRows() === before + 1, JSON.stringify(r).slice(0, 200));
+  }
+  for (const text of ['{"a": 1', '[{"a":', '[1, 2']) {
+    const before = countRows();
+    const r = await call('remember', { content: text });
+    check(`refused as broken JSON: ${text}`, r.ok === false && r.rejected === 'broken_json' && countRows() === before, JSON.stringify(r).slice(0, 200));
+  }
+  {
+    const before = countRows();
+    const r = await call('remember', { content: '{"a": 1', force: true });
+    check('force: true stores broken JSON as text', r.ok === true && countRows() === before + 1, JSON.stringify(r).slice(0, 200));
+    const stored = r.ok ? JSON.parse(readRow(r.memory_id).content) : {};
+    check('…kept verbatim as the text of the memory', stored.what === '{"a": 1', JSON.stringify(stored).slice(0, 200));
+  }
+
+  // Codex review 1 of #34 (P2): provenance keys cannot be removed with null.
+  console.log(' 2b. merge cannot null provenance keys (Codex R1 P2)');
+  const prov = await call('remember', { content: JSON.stringify({ altitude: 'detail', type: 'note', state: 'open', what: 'provenance row', title: 'Fictional provenance', evidence_refs: [{ session: 'fictional-02' }], session_id: 'fictional-02', distilled: true }) });
+  for (const key of ['title', 'evidence_refs', 'session_id', 'distilled', 'altitude', 'type', 'state', 'supersedes', 'consolidated_into', 'original_id']) {
+    const before = readRow(prov.memory_id).content;
+    const r = await call('remember', { memory_id: prov.memory_id, merge: true, content: JSON.stringify({ what: 'changed', [key]: null }) });
+    check(`null ${key} is refused and named`, r.ok === false && r.saved === false && Array.isArray(r.keys) && r.keys.includes(key), JSON.stringify(r).slice(0, 200));
+    check(`…row unchanged after null ${key}`, readRow(prov.memory_id).content === before);
+  }
+  const okNull = await call('remember', { memory_id: prov.memory_id, merge: true, content: JSON.stringify({ title: 'Renamed fictional provenance', scratch_note: null }) });
+  check('other keys can still be nulled, provenance keys can still be changed', okNull.ok === true && JSON.parse(readRow(prov.memory_id).content).title === 'Renamed fictional provenance', JSON.stringify(okNull).slice(0, 200));
+
+  await server.stop();
+  server = undefined;
+
+  // Codex review 1 of #34 (P2): the dream reply has a content_full budget (200 KiB).
+  console.log(' 1b. dream content_full budget (Codex R1 P2)');
+  {
+    const db = openDb();
+    const eid = db.prepare("SELECT id FROM entities WHERE name = 'orbit-fiction'").get().id;
+    const ins = db.prepare("INSERT INTO memories (entity_id, layer, content, importance, created_at) VALUES (?, 'learning', ?, 0.5, unixepoch() - 7200)");
+    const row = (whatLen, hintBytes, tag) => JSON.stringify({ altitude: 'detail', type: 'decision', state: 'decided', title: tag,
+      what: tag + ' ' + 'w'.repeat(whatLen), needs_distill: 1, context_hint: 'h'.repeat(hintBytes) });
+    var hugeId = Number(ins.run(eid, row(400, 300 * 1024, 'HUGE')).lastInsertRowid);
+    var aId = Number(ins.run(eid, row(390, 90 * 1024, 'BIG-A')).lastInsertRowid);
+    var bId = Number(ins.run(eid, row(380, 90 * 1024, 'BIG-B')).lastInsertRowid);
+    var cId = Number(ins.run(eid, row(370, 90 * 1024, 'BIG-C')).lastInsertRowid);
+    db.close();
+  }
+  server = startServer();
+  await server.ready;
+  const d2 = await server.call('recall', { dream: true, distill: 25 });
+  const q = d2.distill_queue ?? [];
+  const byId = (id) => q.find((r) => r.memory_id === id);
+  const replyBytes = Buffer.byteLength(JSON.stringify(d2), 'utf8');
+  check('a row over the budget is listed without content_full', !!byId(hugeId) && byId(hugeId).content_full === undefined
+    && byId(hugeId).content_full_omitted > 300 * 1024, JSON.stringify(byId(hugeId) ?? {}).slice(0, 200));
+  check('…with a hint to read it directly', /directly/.test(String(byId(hugeId)?.content_full_hint ?? '')));
+  check('rows inside the budget keep content_full', !!byId(aId)?.content_full && !!byId(bId)?.content_full);
+  check('the row that would pass the budget is left for the next call', !byId(cId), JSON.stringify(q.map((r) => r.memory_id)));
+  check('more: true and more_count say how many were left', d2.more === true && d2.more_count === 1, JSON.stringify({ more: d2.more, more_count: d2.more_count }));
+  check('the reply stays near the budget (< 260 KiB)', replyBytes < 260 * 1024, String(replyBytes));
   await server.stop();
   server = undefined;
 

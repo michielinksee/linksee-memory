@@ -607,6 +607,8 @@ When the Stop hook is installed, it captures decisions/caveats as **RAW user utt
                                                truncated?, content_full}]
    raw_what / context_hint are cut at 220 characters; `truncated` lists the ones that were.
    Read content_full (every stored key, uncut). Never copy a cut value back.
+   One reply carries at most 200 KiB of content_full: `more: true` means call again;
+   a row with content_full_omitted is too large — read it from the database first.
 
 2. For each item, rewrite into ONE clean record:
    - what = the actual decision/warning in one line — RESOLVE references

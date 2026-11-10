@@ -236,9 +236,9 @@ const TOOLS = [
         content: { type: 'string', description: 'The memory content (plain text or structured JSON with altitude/type/state/what/why). The only required field for create.' },
         importance: { type: 'number', minimum: 0, maximum: 1, description: '0.0-1.0. Set ≥0.9 to pin (protects from forgetting).' },
         thread_id: { type: 'string', description: 'Optional thread ID to group related memories (decision chains, session groups).' },
-        force: { type: 'boolean', default: false, description: 'Bypass paste-back quality check.' },
+        force: { type: 'boolean', default: false, description: 'Bypass the paste-back quality check and the broken-JSON check: content that starts like JSON but does not parse is then stored as text.' },
         memory_id: { type: 'number', description: 'Set to update an existing memory instead of creating. Only content/layer/importance are changed.' },
-        merge: { type: 'boolean', default: false, description: 'Update mode only (with memory_id): merge the keys of content (a JSON object) into the stored JSON object instead of replacing it. Keys you send win; a key sent as null is removed; every other stored key (title, affects, evidence_refs, session_id, …) is kept. Refused, and nothing is written, when the stored content or the new content is not a JSON object. Without merge, content replaces the whole stored content.' },
+        merge: { type: 'boolean', default: false, description: 'Update mode only (with memory_id): merge the keys of content (a JSON object) into the stored JSON object instead of replacing it. Keys you send win; a key sent as null is removed — except the provenance keys (title, evidence_refs, session_id, restored_from, original_id, original_created_at, restored_verdict, supersedes, superseded_by, consolidated_into, distilled, altitude, type, state), where null refuses the merge; every other stored key (title, affects, evidence_refs, session_id, …) is kept. Refused, and nothing is written, when the stored content or the new content is not a JSON object. Without merge, content replaces the whole stored content.' },
         forget: { type: 'boolean', default: false, description: 'Set true + memory_id to delete a memory. Caveat-layer and pinned memories cannot be deleted.' },
         supersedes: {
           description: 'Create mode only: the memory id(s) this new memory replaces (a reversed or updated decision). Writes a supersedes link and marks the old memory superseded; recall then hides it unless include_superseded is true. Refused — and nothing is saved — if an id does not exist, belongs to another entity, or is a raw session capture — and when content is JSON missing any of altitude/type/state (send plain text or all three).',
@@ -1495,9 +1495,19 @@ function handleConsolidate(args: any): string {
  * a key sent wins, a key sent as null is removed, every other stored key is kept.
  * Both sides must be JSON objects (not arrays, not null, not plain text); otherwise refused.
  */
+// Keys a merge may overwrite but never remove with null (Codex review 1 of #34): they carry where a
+// memory came from and how it relates to others. The one list; sending null for any of them refuses
+// the whole merge.
+const MERGE_UNREMOVABLE_KEYS: readonly string[] = [
+  'title', 'evidence_refs', 'session_id',
+  'restored_from', 'original_id', 'original_created_at', 'restored_verdict',
+  'supersedes', 'superseded_by', 'consolidated_into',
+  'distilled', 'altitude', 'type', 'state',
+];
+
 function mergeJsonObject(stored: string, incoming: string):
   | { ok: true; content: string; kept: number; set: string[]; removed: string[] }
-  | { ok: false; reason: string } {
+  | { ok: false; reason: string; keys?: string[] } {
   const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
   let next: unknown;
   try { next = JSON.parse(incoming); } catch {
@@ -1510,6 +1520,14 @@ function mergeJsonObject(stored: string, incoming: string):
   try { base = JSON.parse(stored); } catch { base = undefined; }
   if (!isObj(base)) {
     return { ok: false, reason: 'merge: true needs the stored content to be a JSON object; this memory is stored as plain text (or as JSON that is not an object). Nothing was written. Send the full content without merge to replace it.' };
+  }
+  const blocked = Object.entries(next).filter(([k, v]) => v === null && MERGE_UNREMOVABLE_KEYS.includes(k)).map(([k]) => k);
+  if (blocked.length > 0) {
+    return {
+      ok: false,
+      keys: blocked,
+      reason: `merge cannot remove ${blocked.join(', ')} (null): these keys record where the memory came from and how it relates to others. Nothing was written. Send a value to change them, or leave them out to keep them.`,
+    };
   }
   const out: Record<string, unknown> = { ...base };
   const set: string[] = [], removed: string[] = [];
@@ -1547,7 +1565,7 @@ function updateMemoryInTx(args: any): string {
     }
     const merged = mergeJsonObject(existing.content, args.content);
     if (!merged.ok) {
-      return JSON.stringify({ ok: false, rejected: 'merge', saved: false, memory_id: memoryId, reason: merged.reason });
+      return JSON.stringify({ ok: false, rejected: 'merge', saved: false, memory_id: memoryId, reason: merged.reason, ...(merged.keys ? { keys: merged.keys } : {}) });
     }
     patch.content = merged.content;
     mergeNote = { kept: merged.kept, set: merged.set, removed: merged.removed };
@@ -1858,13 +1876,20 @@ async function handleForgetInteractive(args: any): Promise<string> {
 
 /**
  * Refusal for content that is meant as JSON but is broken (0.20.0), else null.
- * "Meant as JSON": starts with `{`, or with `[` followed by `{`, `[`, `"` or `]` — so plain
- * text such as "[WIP] …" or "[2026-11-10] …" is still saved as text.
+ * "Meant as JSON" (narrowed after Codex review 1 of #34) — after spaces:
+ *   • `{` followed by `"` or `}`                       ({"what": … / {} )
+ *   • `[` followed by `{` `[` `"` or `]`               ([{"what": … / [] )
+ *   • `[` followed by a number, then `,` or the end, or `]` that ends the content  ([1, 2 / [3] )
+ * Anything else starting with `{` / `[` is text and saved as before: "{tenant} is the placeholder",
+ * "{ retry(); }", "{x}", "[TODO] …", "[2026-11-10] …" (2026 is followed by "-"), "[3] steps left".
+ * force: true skips this check — the explicit way to store such content as text.
  */
 function brokenJsonRefusal(content: unknown): string | null {
   if (typeof content !== 'string') return null;
-  const t = content.trimStart();
-  const meantAsJson = t.startsWith('{') || /^\[\s*([{["\]]|$)/.test(t);
+  const t = content.trim();
+  const meantAsJson = /^\{\s*["}]/.test(t)
+    || /^\[\s*[{["\]]/.test(t)
+    || /^\[\s*-?\d+(\.\d+)?([eE][+-]?\d+)?\s*(,|$|\]$)/.test(t);
   if (!meantAsJson) return null;
   try { JSON.parse(content); return null; } catch (e: any) {
     const msg = String(e?.message ?? e);
@@ -1877,7 +1902,7 @@ function brokenJsonRefusal(content: unknown): string | null {
       saved: false,
       position,
       length: content.length,
-      error: `content starts like JSON but is broken at character ${position} of ${content.length} (${msg.split('\n')[0].slice(0, 160)}). Nothing was saved. Send the complete JSON, or plain text that does not start with "{".`,
+      error: `content starts like JSON but is broken at character ${position} of ${content.length} (${msg.split('\n')[0].slice(0, 160)}). Nothing was saved. Send the complete JSON, or pass force: true to store it as text.`,
       near: content.slice(Math.max(0, at - 30), at + 10),
     });
   }
@@ -1893,7 +1918,7 @@ async function handleRememberUnified(args: any): Promise<string> {
   }
   // Content that starts like JSON but does not parse is refused, on create and update alike
   // (0.20.0). It used to be wrapped as a string and stored — 136 cut-off rows on one DB.
-  const broken = brokenJsonRefusal(args.content);
+  const broken = args.force === true ? null : brokenJsonRefusal(args.content);
   if (broken) return broken;
   if (args.merge === true && !args.memory_id) {
     return JSON.stringify({ ok: false, rejected: 'merge', saved: false, reason: 'merge: true applies to an update (memory_id). To create a memory, send content without merge.' });
@@ -2430,6 +2455,9 @@ function handleFlagProposals(args: any): string {
 // The agent IS the Doctor. MCP just provides data + update path.
 // ============================================================
 
+// content_full budget of one dream reply (bytes, UTF-8). Reasoning next to its use in handleDream.
+const DISTILL_CONTENT_BUDGET = 200 * 1024;
+
 function handleDream(args: any): string {
   const domainFilter = args?.domain;
 
@@ -2458,6 +2486,7 @@ function handleDream(args: any): string {
   // why-strings so the existing backlog is drainable without a backfill write.
   const distillLimit = Math.max(1, Math.min(25, Number(args?.distill ?? 8) || 8));
   let distillQueue: any[] = [];
+  let distillMoreCount = 0;
   try {
     const rows = db.prepare(`
       SELECT m.id, m.layer, m.content, datetime(m.created_at, 'unixepoch') AS created, e.name AS entity
@@ -2481,7 +2510,7 @@ function handleDream(args: any): string {
     // parsed, uncut. raw_what / context_hint stay short for reading, and `truncated` names each one
     // that was cut: a rewriter that copied the cut text lost the tail of 21 memories (2026-11-10).
     const CUT = 220;
-    distillQueue = rows.map((r) => {
+    const all = rows.map((r) => {
       let c: any = {};
       try { c = JSON.parse(r.content); } catch { /* keep empty */ }
       if (c === null || typeof c !== 'object' || Array.isArray(c)) c = {};
@@ -2504,12 +2533,34 @@ function handleDream(args: any): string {
         affects: c.affects,
         created: r.created,
         ...(truncated.length > 0 ? { truncated } : {}),
-        content_full: c,
-      };
+        content_full: c as any,
+      } as Record<string, any>;
     });
+    // Size budget for content_full (Codex review 1 of #34): without one, 25 rows of 1 MiB each made
+    // a 25 MiB reply. 200 KiB keeps the worst case ~125× smaller while a normal queue — captured
+    // rows are a few KiB each, 8 per call by default — never reaches it. Rows are kept in queue
+    // order until the next one would pass the budget; the rest are left for the next call
+    // (more: true, more_count). A single row larger than the budget is listed without content_full
+    // (content_full_omitted: <bytes>) — read that one directly by memory_id.
+    let used = 0;
+    for (const row of all) {
+      const bytes = Buffer.byteLength(JSON.stringify(row.content_full), 'utf8');
+      if (bytes > DISTILL_CONTENT_BUDGET) {
+        delete row.content_full;
+        row.content_full_omitted = bytes;
+        row.content_full_hint = `content is ${bytes} bytes, over the ${DISTILL_CONTENT_BUDGET}-byte budget of one dream reply: read it from the database file directly (memory.db in the linksee memory directory: SELECT content FROM memories WHERE id = ${row.memory_id}) before rewriting, and rewrite with merge: true.`;
+        distillQueue.push(row);
+        continue;
+      }
+      if (used + bytes > DISTILL_CONTENT_BUDGET) break;
+      used += bytes;
+      distillQueue.push(row);
+    }
+    distillMoreCount = all.length - distillQueue.length;
   } catch {
     /* additive — never break dream on a distill-query error */
   }
+  const moreFields = distillMoreCount > 0 ? { more: true, more_count: distillMoreCount } : {};
 
   if (northStars.length === 0) {
     return JSON.stringify({
@@ -2520,7 +2571,7 @@ function handleDream(args: any): string {
       friction_total: friction.length,
       distill_queue: distillQueue,
       distill_total: distillPending(db),
-      distill_shown: distillQueue.length,
+      distill_shown: distillQueue.length, ...moreFields,
       distill_hint: 'Ordered by value (caveats first, named entities, longer text). Pass distill: N (max 25) for a longer drain. Rules already set a distill_verdict on acknowledgements, bare paths and 90-day-old never-recalled items — you only see what needs judgement. Rewrite with remember({ memory_id, merge: true, content: { only the keys you change } }) — the other keys stay; read content_full, never copy a value listed in truncated.',
       message:
         friction.length > 0
@@ -2624,7 +2675,7 @@ function handleDream(args: any): string {
     friction_total: friction.length,
     distill_queue: distillQueue,
     distill_total: distillPending(db),
-    distill_shown: distillQueue.length,
+    distill_shown: distillQueue.length, ...moreFields,
     distill_hint: 'Ordered by value (caveats first, named entities, longer text). Pass distill: N (max 25) for a longer drain. Rules already set a distill_verdict on acknowledgements, bare paths and 90-day-old never-recalled items — you only see what needs judgement. Rewrite with remember({ memory_id, merge: true, content: { only the keys you change } }) — the other keys stay; read content_full, never copy a value listed in truncated.',
     guide: guideParts.join(' '),
   });
