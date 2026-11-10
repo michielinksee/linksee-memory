@@ -754,28 +754,79 @@ function handleRemember(args: any): string {
 // Note: with trigram tokenizer, words shorter than 3 chars cannot match anything.
 // Such words are dropped here and the caller falls back to LIKE if FTS yields no hits.
 const EDGE_PUNCT_RE = /^[\s"'`([{<「『（【〈《]+|[\s"'`)\]}>」』）】〉》?!.,;:、。？！，；：…]+$/gu;
-function queryTerms(raw: string): string[] {
-  const cleaned = String(raw ?? '')
-    .replace(/["*:()]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!cleaned) return [];
+
+// Japanese / CJK queries (0.19.2). A Japanese sentence has no spaces, so the space split above
+// made "山田のエディタは何？" ONE word that matched only rows containing that whole string. No
+// dictionary (no new dependency): a space-word that contains Han / Hiragana / Katakana is cut
+// into pieces at punctuation and at script boundaries (Han | Katakana | letters+digits);
+// Hiragana runs are particles, okurigana and question endings (の, は, ですか) and are dropped
+// as separators, unless the whole word is Hiragana. Question-word pieces (何, 誰) are dropped.
+// Pieces of 3+ chars go to the trigram index; 1–2 char pieces (山田, 東京) cannot, and are
+// matched with LIKE. A space-word with no CJK char is handled exactly as before, so English
+// and other space-separated queries get the same words, FTS query, LIKE and ranking.
+// Known limits: a long Han-only run (a Chinese sentence) stays one piece; "公開日" does not
+// match "公開した日"; a Hiragana content word in a mixed sentence is dropped.
+const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const HAN_RE = /[\p{Script=Han}々〆ヶ]/u;
+const HIRA_RE = /\p{Script=Hiragana}/u;
+const KATA_RE = /[\p{Script=Katakana}ーｰ]/u;
+// Letters / digits of any other script, plus the inner symbols of names like v0.19.1, eu-north,
+// .env, #21, C++, a/b. Everything else (、。？！「」・ spaces …) separates pieces.
+const WORDISH_RE = /[\p{L}\p{N}.\-_#+/@&']/u;
+const CJK_QUESTION_PIECES = new Set(['何', '誰', '何処', '何時', '何故']);
+const HIRA_ONLY_STOP = new Set(['の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'か', 'って', 'です', 'ですか', 'ますか', 'でしょうか', 'なに', 'なん', 'だれ', 'どこ', 'いつ']);
+function cjkPieces(word: string): string[] {
+  const runs: Array<{ cls: string; text: string }> = [];
+  let cur: { cls: string; text: string } | null = null;
+  for (const ch of word) {
+    const cls = HAN_RE.test(ch) ? 'han' : HIRA_RE.test(ch) ? 'hira' : KATA_RE.test(ch) ? 'kata' : WORDISH_RE.test(ch) ? 'word' : 'sep';
+    if (cls === 'sep') { cur = null; continue; }
+    if (cur && cur.cls === cls) cur.text += ch;
+    else { cur = { cls, text: ch }; runs.push(cur); }
+  }
+  const content = runs.filter((r) => r.cls !== 'hira');
+  const keep = content.length > 0 ? content : runs; // an all-Hiragana word stays whole
   const out: string[] = [];
-  const seen = new Set<string>();
-  for (const word of cleaned.split(' ')) {
-    const t = word.replace(EDGE_PUNCT_RE, '');
-    if (t.length < 3) continue;
-    const key = t.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
+  for (const r of keep) {
+    const t = r.text.replace(EDGE_PUNCT_RE, '');
+    if (!t || CJK_QUESTION_PIECES.has(t) || (r.cls === 'hira' && HIRA_ONLY_STOP.has(t))) continue;
     out.push(t);
   }
   return out;
 }
-function toFtsQuery(raw: string): string {
-  const terms = queryTerms(raw);
-  return terms.length ? terms.map((t) => `"${t}"`).join(' OR ') : '';
+
+// fts: words / pieces for the trigram index (3+ chars). like: 1–2 char pieces, only for a query
+// that contains CJK (an English query's short words stay out, as before). cjk: the query had CJK.
+interface QueryPlan { fts: string[]; like: string[]; cjk: boolean }
+function queryPlan(raw: string): QueryPlan {
+  const cleaned = String(raw ?? '')
+    .replace(/["*:()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const plan: QueryPlan = { fts: [], like: [], cjk: false };
+  if (!cleaned) return plan;
+  const seen = new Set<string>();
+  const shortWords: string[] = [];
+  const add = (t: string, short: boolean) => {
+    const key = t.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    (short ? plan.like : plan.fts).push(t);
+  };
+  for (const word of cleaned.split(' ')) {
+    if (CJK_RE.test(word)) {
+      plan.cjk = true;
+      for (const p of cjkPieces(word)) add(p, Array.from(p).length < 3);
+      continue;
+    }
+    const t = word.replace(EDGE_PUNCT_RE, '');
+    if (t.length < 3) { if (t) shortWords.push(t); continue; }
+    add(t, false);
+  }
+  if (plan.cjk) for (const t of shortWords) add(t, true); // "CI の設定は？": CI by LIKE
+  return plan;
 }
+const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => '\\' + c);
 
 // Which query words each memory contains, weighted by how rare the word is in the store
 // (0.19.1). One FTS5 lookup per word gives both its document frequency and the rows that have
@@ -784,14 +835,25 @@ function toFtsQuery(raw: string): string {
 // memories, the "what" key of every JSON memory) weighs almost nothing; a word in few rows
 // weighs a lot. Words found in no row are left out (they cannot tell rows apart).
 // coverage(row) = sum of weights of the words the row has / sum of weights of all words.
-function termCoverage(terms: string[]): (id: number) => number {
+// For a CJK query (0.19.2) the words are the pieces: 3+ char pieces through FTS as above, 1–2
+// char pieces through LIKE on the content or the entity name (the same rows the LIKE search finds).
+function termCoverage(plan: QueryPlan): (id: number) => number {
+  const terms: Array<{ t: string; like: boolean }> = [
+    ...plan.fts.map((t) => ({ t, like: false })),
+    ...plan.like.map((t) => ({ t, like: true })),
+  ];
   if (terms.length === 0) return () => 0;
   const n = (db.prepare('SELECT COUNT(*) AS c FROM memories').get() as any).c as number;
   const stmt = db.prepare('SELECT rowid AS id FROM memories_fts WHERE memories_fts MATCH ?');
+  const likeStmt = plan.like.length
+    ? db.prepare("SELECT m.id AS id FROM memories m JOIN entities e ON e.id = m.entity_id WHERE m.content LIKE ? ESCAPE '\\' OR e.name LIKE ? ESCAPE '\\'")
+    : null;
   const sets: Array<{ ids: Set<number>; w: number }> = [];
   let total = 0;
-  for (const t of terms) {
-    const ids = new Set<number>((stmt.all(`"${t}"`) as any[]).map((r) => Number(r.id)));
+  for (const { t, like } of terms) {
+    const pat = `%${likeEscape(t)}%`;
+    const found = like ? (likeStmt!.all(pat, pat) as any[]) : (stmt.all(`"${t}"`) as any[]);
+    const ids = new Set<number>(found.map((r) => Number(r.id)));
     if (ids.size === 0) continue;
     const w = Math.log(1 + (n - ids.size + 0.5) / (ids.size + 0.5));
     sets.push({ ids, w });
@@ -866,7 +928,11 @@ function runFtsQuery(query: string, layer: string | undefined, limit: number, ax
   return db.prepare(sql).all(...params) as any[];
 }
 
-function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL): any[] {
+// pieces (0.19.2): the 1–2 char pieces of a CJK query. A row matching any of them is a candidate
+// too, and candidates are ordered by how many of (whole query, each piece) they match before
+// importance, so a 1-char piece cannot fill the pool with rows that have nothing else asked.
+// Without pieces the SQL is exactly as before.
+function runLikeQuery(query: string | undefined, entityName: string | undefined, layer: string | undefined, limit: number, axis?: AxisFilters, hidden: HiddenModes = SHOW_ALL, pieces: string[] = []): any[] {
   let sql = `
     SELECT m.id, m.entity_id, e.name as entity_name, e.kind as entity_kind, e.momentum_score,
            m.layer, m.content, m.importance, m.created_at, m.last_accessed_at, m.access_count,
@@ -881,11 +947,24 @@ function runLikeQuery(query: string | undefined, entityName: string | undefined,
   if (layer) { sql += ' AND m.layer = ?'; params.push(layer); }
   if (axis) sql = appendAxisFilters(sql, params, axis);
   sql = appendHiddenFilters(sql, hidden);
+  const usePieces = !!query && !entityName && pieces.length > 0;
   if (query && !entityName) {
-    sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
-    params.push(`%${query}%`, `%${query}%`);
+    if (usePieces) {
+      const ors = pieces.map(() => "e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\'").join(' OR ');
+      sql += ` AND (e.name LIKE ? OR m.content LIKE ? OR ${ors})`;
+      params.push(`%${query}%`, `%${query}%`);
+      for (const p of pieces) { const pat = `%${likeEscape(p)}%`; params.push(pat, pat); }
+    } else {
+      sql += ' AND (e.name LIKE ? OR m.content LIKE ?)';
+      params.push(`%${query}%`, `%${query}%`);
+    }
   }
-  sql += ' ORDER BY m.importance DESC, m.last_accessed_at DESC LIMIT ?';
+  if (usePieces) {
+    const hits = ['(e.name LIKE ? OR m.content LIKE ?)', ...pieces.map(() => "(e.name LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\')")].join(' + ');
+    sql += ` ORDER BY (${hits}) DESC, m.importance DESC, m.last_accessed_at DESC LIMIT ?`;
+    params.push(`%${query}%`, `%${query}%`);
+    for (const p of pieces) { const pat = `%${likeEscape(p)}%`; params.push(pat, pat); }
+  } else sql += ' ORDER BY m.importance DESC, m.last_accessed_at DESC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as any[];
 }
@@ -965,8 +1044,13 @@ function handleRecall(args: any): string {
   let rows: any[] = [];
   let searchMethod: 'fts5' | 'like' | 'fts5+like' = 'like';
 
-  const ftsQuery = toFtsQuery(args.query ?? '');
+  const plan = queryPlan(args.query ?? '');
+  const ftsQuery = plan.fts.length ? plan.fts.map((t) => `"${t}"`).join(' OR ') : '';
   const canUseFts = !!ftsQuery && !args.entity_name;
+  // CJK query (0.19.2): its 1–2 char pieces also go to LIKE, and relevance is the piece
+  // coverage for every candidate (FTS- or LIKE-found). An English query has no pieces.
+  const likePieces = plan.cjk && !args.entity_name ? plan.like : [];
+  const pieceMode = plan.cjk && !args.entity_name && plan.fts.length + plan.like.length > 0;
 
   // Superseded rows are left out in SQL by default; asking for them (include_superseded, or
   // mem_state:'superseded') keeps them. The hidden ones are counted with the same filters.
@@ -983,9 +1067,9 @@ function handleRecall(args: any): string {
     const hiddenIds = new Set<number>();
     if (canUseFts) {
       for (const r of runFtsQuery(ftsQuery, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
-      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(args.query, undefined, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     } else {
-      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h)) hiddenIds.add(r.id);
+      for (const r of runLikeQuery(args.query, args.entity_name, layer, HIDDEN_COUNT_CAP, axis, h, likePieces)) hiddenIds.add(r.id);
     }
     return hiddenIds.size;
   };
@@ -995,7 +1079,7 @@ function handleRecall(args: any): string {
 
   if (canUseFts) {
     const ftsRows = runFtsQuery(ftsQuery, layer, fetchLimit, axis, hidden);
-    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, hidden);
+    const likeRows = runLikeQuery(args.query, undefined, layer, fetchLimit, axis, hidden, likePieces);
     const seen = new Map<number, any>();
     for (const r of ftsRows) seen.set(r.id, { ...r, _via: 'fts' });
     for (const r of likeRows) {
@@ -1010,7 +1094,7 @@ function handleRecall(args: any): string {
     else if (ftsRows.length > 0) searchMethod = 'fts5';
     else searchMethod = 'like';
   } else {
-    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, hidden).map((r) => ({ ...r, _via: 'like' }));
+    rows = runLikeQuery(args.query, args.entity_name, layer, fetchLimit, axis, hidden, likePieces).map((r) => ({ ...r, _via: 'like' }));
     searchMethod = 'like';
   }
 
@@ -1041,15 +1125,17 @@ function handleRecall(args: any): string {
   // normalised against a range forced to include 0 and 1. Rows only the LIKE fallback found
   // keep 0.5, as before.
   const bmNormOf = (bm: number): number => { const x = Math.max(0, -Number(bm) || 0); return x / (1 + x); };
-  const coverageOf = useFts ? termCoverage(queryTerms(args.query ?? '')) : () => 0;
+  const coverageOf = useFts || pieceMode ? termCoverage(plan) : () => 0;
 
   // Composite weights adapt to query specificity:
   //  - broad / no query → importance & heat carry more (relevance is a flat 0.5 anyway)
   //  - focused (1-2 terms) → relevance leads
   //  - narrow (3+ terms) → relevance dominates, so off-topic-but-pinned memories don't crowd in
-  const queryTermCount = String(args.query ?? '').trim().split(/\s+/).filter(Boolean).length;
+  const queryTermCount = pieceMode
+    ? plan.fts.length + plan.like.length // CJK: count pieces, not space-words
+    : String(args.query ?? '').trim().split(/\s+/).filter(Boolean).length;
   let w_rel = 0.45, w_heat = 0.25, w_mom = 0.15, w_imp = 0.15;
-  if (useFts) {
+  if (useFts || pieceMode) {
     if (queryTermCount >= 3) { w_rel = 0.72; w_heat = 0.12; w_mom = 0.08; w_imp = 0.08; }
     else { w_rel = 0.60; w_heat = 0.18; w_mom = 0.12; w_imp = 0.10; }
   }
@@ -1065,7 +1151,7 @@ function handleRecall(args: any): string {
     });
 
     // Individual weight contributions (for transparency)
-    const isFtsRow = useFts && r._via !== 'like';
+    const isFtsRow = pieceMode || (useFts && r._via !== 'like');
     const coverage = isFtsRow ? coverageOf(r.id) : 0;
     const bmNorm = bmNormOf(r.bm25_score);
     const relevance = isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
