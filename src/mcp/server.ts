@@ -746,18 +746,63 @@ function handleRemember(args: any): string {
   return JSON.stringify(out);
 }
 
-// Sanitize query for FTS5 MATCH (strip chars that break the grammar, quote it).
-// Note: with trigram tokenizer, tokens shorter than 3 chars cannot match anything.
-// Such tokens are dropped here and the caller falls back to LIKE if FTS yields no hits.
-function toFtsQuery(raw: string): string {
-  const cleaned = raw
+// Query words for FTS5 MATCH. Strips chars that break the FTS5 grammar, then trims sentence
+// punctuation from both ends of each word: "editor?" must search for "editor" — with the "?"
+// kept, the trigram "or?" is required and the key word of the question can never match
+// (0.19.1; before that only the name in a question matched, see PR #29's bench).
+// Inner punctuation is kept (server.ts, eu-north, Varga's). A leading "." is kept (.env).
+// Note: with trigram tokenizer, words shorter than 3 chars cannot match anything.
+// Such words are dropped here and the caller falls back to LIKE if FTS yields no hits.
+const EDGE_PUNCT_RE = /^[\s"'`([{<「『（【〈《]+|[\s"'`)\]}>」』）】〉》?!.,;:、。？！，；：…]+$/gu;
+function queryTerms(raw: string): string[] {
+  const cleaned = String(raw ?? '')
     .replace(/["*:()]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!cleaned) return '';
-  const tokens = cleaned.split(' ').filter((t) => t.length >= 3);
-  if (tokens.length === 0) return '';
-  return tokens.map((t) => `"${t}"`).join(' OR ');
+  if (!cleaned) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const word of cleaned.split(' ')) {
+    const t = word.replace(EDGE_PUNCT_RE, '');
+    if (t.length < 3) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+function toFtsQuery(raw: string): string {
+  const terms = queryTerms(raw);
+  return terms.length ? terms.map((t) => `"${t}"`).join(' OR ') : '';
+}
+
+// Which query words each memory contains, weighted by how rare the word is in the store
+// (0.19.1). One FTS5 lookup per word gives both its document frequency and the rows that have
+// it — the same trigram semantics as the search itself. Weight = the bm25 IDF,
+// ln(1 + (N - df + 0.5) / (df + 0.5)): a word in every row (a person's name on all of their
+// memories, the "what" key of every JSON memory) weighs almost nothing; a word in few rows
+// weighs a lot. Words found in no row are left out (they cannot tell rows apart).
+// coverage(row) = sum of weights of the words the row has / sum of weights of all words.
+function termCoverage(terms: string[]): (id: number) => number {
+  if (terms.length === 0) return () => 0;
+  const n = (db.prepare('SELECT COUNT(*) AS c FROM memories').get() as any).c as number;
+  const stmt = db.prepare('SELECT rowid AS id FROM memories_fts WHERE memories_fts MATCH ?');
+  const sets: Array<{ ids: Set<number>; w: number }> = [];
+  let total = 0;
+  for (const t of terms) {
+    const ids = new Set<number>((stmt.all(`"${t}"`) as any[]).map((r) => Number(r.id)));
+    if (ids.size === 0) continue;
+    const w = Math.log(1 + (n - ids.size + 0.5) / (ids.size + 0.5));
+    sets.push({ ids, w });
+    total += w;
+  }
+  if (total <= 0) return () => 0;
+  return (id: number) => {
+    let got = 0;
+    for (const s of sets) if (s.ids.has(id)) got += s.w;
+    return got / total;
+  };
 }
 
 interface AxisFilters {
@@ -983,10 +1028,20 @@ function handleRecall(args: any): string {
     for (const r of rows) r.momentum_score = byId.get(r.entity_id) ?? r.momentum_score;
   }
 
-  const bm25Values = rows.map((r) => r.bm25_score);
-  const minBm = Math.min(...bm25Values, 0);
-  const maxBm = Math.max(...bm25Values, 1);
-  const bmSpan = Math.max(0.001, maxBm - minBm);
+  // Relevance of an FTS-matched row (0.19.1): mostly WHICH asked words it contains, weighted
+  // by rarity (termCoverage above), so a row with every asked word ranks above one with some of
+  // them, and a name that is on every memory of a person no longer decides the order. bm25
+  // orders rows within the same coverage (0.2 share) through a fixed, bounded transform of its
+  // own value, x / (1 + x) with x = -bm25 (FTS5's bm25 is <= 0, lower = better), NOT min-max over
+  // the candidates: min-max stretched any spread to the full 0..1, so two rows a few 1e-7 apart
+  // (a word present in every row → FTS5 clamps its IDF to 1e-6) got 0.2 of relevance between
+  // them and a long pinned caveat lost to a short low-importance note on a one-word query
+  // (Codex review 1 of #30). With the fixed transform a tiny bm25 difference stays tiny and
+  // heat / importance decide, as they did before. Before 0.19.1 relevance was bm25 alone,
+  // normalised against a range forced to include 0 and 1. Rows only the LIKE fallback found
+  // keep 0.5, as before.
+  const bmNormOf = (bm: number): number => { const x = Math.max(0, -Number(bm) || 0); return x / (1 + x); };
+  const coverageOf = useFts ? termCoverage(queryTerms(args.query ?? '')) : () => 0;
 
   // Composite weights adapt to query specificity:
   //  - broad / no query → importance & heat carry more (relevance is a flat 0.5 anyway)
@@ -1010,7 +1065,10 @@ function handleRecall(args: any): string {
     });
 
     // Individual weight contributions (for transparency)
-    const relevance = useFts && r._via !== 'like' ? 1 - (r.bm25_score - minBm) / bmSpan : 0.5;
+    const isFtsRow = useFts && r._via !== 'like';
+    const coverage = isFtsRow ? coverageOf(r.id) : 0;
+    const bmNorm = bmNormOf(r.bm25_score);
+    const relevance = isFtsRow ? 0.8 * coverage + 0.2 * bmNorm : 0.5;
     const heatNorm = heat.score / 100;
     const momNorm = Math.min(1, (r.momentum_score ?? 0) / 10);
     const importanceBoost = r.importance; // 0-1
@@ -1044,6 +1102,7 @@ function handleRecall(args: any): string {
       _reasons: reasons,
       _breakdown: {
         relevance: Number(relevance.toFixed(3)),
+        ...(isFtsRow ? { term_coverage: Number(coverage.toFixed(3)) } : {}),
         heat: Number(heatNorm.toFixed(3)),
         momentum: Number(momNorm.toFixed(3)),
         importance: Number(importanceBoost.toFixed(3)),

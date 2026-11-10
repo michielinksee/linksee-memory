@@ -25,7 +25,8 @@
     { "file": "distill-triage.mjs", "timeout": 60 },
     { "file": "consolidate-no-delete.mjs", "timeout": 180 },
     { "file": "auto-consolidate.mjs", "timeout": 90 },
-    { "file": "sqlite-driver.mjs", "timeout": 180 }
+    { "file": "sqlite-driver.mjs", "timeout": 180 },
+    { "file": "recall-ranking.mjs", "timeout": 60 }
   ],
   "excluded": {
     "smoke.mjs": "writes to ~/.linksee-memory-test under the real home directory",

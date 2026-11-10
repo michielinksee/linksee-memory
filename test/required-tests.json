@@ -27,7 +27,8 @@
     "distill-triage.mjs",
     "consolidate-no-delete.mjs",
     "auto-consolidate.mjs",
-    "sqlite-driver.mjs"
+    "sqlite-driver.mjs",
+    "recall-ranking.mjs"
   ],
   "packed": [
     "consolidate-no-delete.mjs",

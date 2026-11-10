@@ -29,26 +29,26 @@ Ids follow the order of the original question list. Rank = position, in what rec
 |---|---|---|---|---|---|---|---|---|---|
 | q01 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q02 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
-| q03 | current | OK | OK | OK | 3 |  | OK | 3 |  |
+| q03 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q04 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
 | q05 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
-| q06 | current | MISS | MISS | MISS | 4 | extraction | MISS | 4 | extraction |
+| q06 | current | MISS | MISS | MISS | 1 | extraction | MISS | 1 | extraction |
 | q07 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
 | q08 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q09 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
 | q10 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q11 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
-| q12 | current | MISS | MISS | MISS | 2 | extraction | MISS | 2 | extraction |
+| q12 | current | MISS | MISS | MISS | 1 | extraction | MISS | 1 | extraction |
 | q13 | historical | OK | OK | OK | 1 |  | MISS | 1 | spec |
 | q14 | historical | OK | OK | OK | 1 |  | MISS | 1 | spec |
-| q15 | current | OK | OK | OK | 3 |  | OK | 4 |  |
+| q15 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q16 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q17 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
 | q18 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 | q19 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
-| q20 | current | MISS | MISS | MISS | 3 | extraction | MISS | 3 | extraction |
+| q20 | current | MISS | MISS | MISS | 1 | extraction | MISS | 1 | extraction |
 | q21 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
-| q22 | current | MISS | MISS | MISS | 4 | extraction | MISS | 4 | extraction |
+| q22 | current | MISS | MISS | MISS | 1 | extraction | MISS | 1 | extraction |
 | q23 | historical | MISS | OK | OK | 1 |  | MISS | 1 | spec |
 | q24 | current | OK | OK | OK | 1 |  | OK | 1 |  |
 

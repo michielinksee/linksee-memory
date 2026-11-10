@@ -145,6 +145,10 @@ Why each miss happened:
   nearly flat. A reader that took only the top hit would score 6/12 on current in (a), not 8/12.
   The mapping picks the first hit with the asked category (the original is handed the category),
   so this does not change the score above, but it is the weak spot this benchmark shows.
+  **2026-11-10 (feat/recall-ranking, 0.19.1 candidate):** recall now trims sentence punctuation
+  from query words and ranks by IDF-weighted term coverage (CHANGELOG). Re-run: the asked item is
+  rank 1 for 12/12 current questions in both (a) and (b) (was 6/12); scores unchanged ((a) 8/12,
+  12/12; (b) 8/12, 0/12). `results.md` now shows the new ranks.
 
 Side observation: create mode stores plain text as structured JSON while an update via
 `memory_id` stores the new text as plain text, so the same kind of fact comes back in two shapes
