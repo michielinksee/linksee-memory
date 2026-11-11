@@ -242,7 +242,17 @@ jobs:
             echo "waiting for npm to serve linksee-memory@$VERSION ($i/12)"; sleep 10
           done
           "$RUNNER_TEMP/mcp-publisher" login github-oidc
-          "$RUNNER_TEMP/mcp-publisher" publish server.json
+          # The registry checks npm from its own side, which can lag behind what this runner sees
+          # (v0.20.0: npm view saw the version, the registry still got 404 "version ... was not found").
+          # Retry only that error, up to 6 times, 60 s apart; any other error fails at once.
+          for attempt in $(seq 1 6); do
+            if out=$("$RUNNER_TEMP/mcp-publisher" publish server.json 2>&1); then echo "$out"; exit 0; fi
+            echo "$out"
+            if ! printf '%s' "$out" | grep -q "was not found"; then exit 1; fi
+            echo "registry cannot see linksee-memory@$VERSION on npm yet (attempt $attempt/6); retrying in 60 s"
+            sleep 60
+          done
+          exit 1
 
       - name: Registry not updated — publish by hand
         if: failure() && steps.npm_publish.outcome == 'success'
