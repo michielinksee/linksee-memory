@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Release CI:** the MCP registry step retries `mcp-publisher publish` (up to 6 times, 60 s apart) when the registry cannot see the new npm version yet. v0.20.0 reached npm but the registry answered 404 for it and had to be published by hand.
+
 ## v0.20.0 — 2026-11-10 (new arguments on existing tools, no new tool)
 
 - **`recall({ dream: true })` returns each distill row whole.** Each `distill_queue` row now also has `title`, `altitude`, `type`, `state`, and `content_full` — every key of the stored content, parsed and uncut. `raw_what` / `context_hint` are still cut at 220 characters for reading, and `truncated` lists each one that was cut. Before, a row had only the cut text; a rewriter that copied it back lost the tail of the memory. The dream guide, the `distill_hint` and the SessionStart digest now say to rewrite with `merge: true`. Every other top-level field of a row is cut at 2 KiB (named in `truncated`), and one reply is capped at 200 KiB counted on each row's whole JSON (before, 25 rows of 1 MiB made a 25 MiB reply; a normal queue of a few KiB per row never reaches the cap): rows are returned in queue order until the next would pass it, and `more: true` / `more_count` give the true number left (a COUNT with the same conditions, not just the page). A single row over 200 KiB is listed without `content_full` (`content_full_omitted: <bytes>`, read it from the database directly).
