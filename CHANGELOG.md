@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Repository:** `main` is protected by a ruleset: changes land through pull requests only, the three CI checks must pass before a merge, and force pushes and deletion are blocked.
 - **Release CI:** the MCP registry step retries `mcp-publisher publish` (up to 6 times, 60 s apart) when the registry cannot see the new npm version yet. v0.20.0 reached npm but the registry answered 404 for it and had to be published by hand.
 
 ## v0.20.0 — 2026-11-10 (new arguments on existing tools, no new tool)
