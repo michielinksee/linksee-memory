@@ -95,7 +95,8 @@
   },
   "overrides": {
     "ip-address": "^10.2.0",
-    "hono": "^4.12.21",
+    "hono": "^4.13.16",
+    "@hono/node-server": "^2.1.6",
     "qs": "^6.15.2",
     "esbuild": "^0.28.1"
   },
@@ -105,9 +106,10 @@
     ],
     "overrides": {
       "ip-address": "^10.2.0",
-      "hono": "^4.12.21",
+      "hono": "^4.13.16",
       "qs": "^6.15.2",
-      "esbuild": "^0.28.1"
+      "esbuild": "^0.28.1",
+      "@hono/node-server": "^2.1.6"
     }
   }
 }
