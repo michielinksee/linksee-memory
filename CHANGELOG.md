@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.20.1 — 2026-11-13 (patched hono and @hono/node-server; registry publish retries)
 
 - **Dependencies:** pnpm overrides raise `hono` to ^4.13.16 and `@hono/node-server` to ^2.1.6 (advisories GHSA-qv5m-9pm6-hqp3 and others, published after 0.20.0). Both come in through `@modelcontextprotocol/sdk`; linksee-memory runs over stdio and does not start the SDK's HTTP server, but the audit gate in CI failed every pull request until they were raised.
 - **Repository:** `main` is protected by a ruleset: changes land through pull requests only, the three CI checks must pass before a merge, and force pushes and deletion are blocked.
