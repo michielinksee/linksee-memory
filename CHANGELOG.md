@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Dependencies:** pnpm overrides raise `hono` to ^4.13.16 and `@hono/node-server` to ^2.1.6 (advisories GHSA-qv5m-9pm6-hqp3 and others, published after 0.20.0). Both come in through `@modelcontextprotocol/sdk`; linksee-memory runs over stdio and does not start the SDK's HTTP server, but the audit gate in CI failed every pull request until they were raised.
+- **Repository:** `main` is protected by a ruleset: changes land through pull requests only, the three CI checks must pass before a merge, and force pushes and deletion are blocked.
 - **Release CI:** the MCP registry step retries `mcp-publisher publish` (up to 6 times, 60 s apart) when the registry cannot see the new npm version yet. v0.20.0 reached npm but the registry answered 404 for it and had to be published by hand.
 
 ## v0.20.0 — 2026-11-10 (new arguments on existing tools, no new tool)
