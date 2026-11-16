@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.20.2 candidate)
+## v0.20.2 — 2026-11-16 (new JSON memories without a title get one from what)
 
 - **`remember` titles a new memory that came without one.** When a memory is created (no `memory_id`) with JSON content that has a string `what` and no `title` (or an empty one), a title is made from `what` and `"title_auto": true` is added, so a person can fix it later and Lint can tell it from a chosen title. The title is the first line or sentence of `what`, trimmed (cut at a newline, at 。．！？, or at . ! ? followed by a space or the end, so `v0.19.1` stays whole), at most 60 characters (longer: 57 + `…`, counted in code points). A title you send is kept as is. Updates (replace and `merge: true`) and plain-text content never get one, and rows already stored are not touched. New required test `test/auto-title.mjs`.
 
