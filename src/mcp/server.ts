@@ -208,7 +208,7 @@ const TOOLS = [
   {
     name: 'remember',
     description:
-      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → content + anchor: {} (remembered AND enforced in one call)\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• After completing a task or receiving user approval\n\nMODES:\n• Create (default): content is the only required field. entity defaults to the project you are in; layer defaults to "context" (or "learning" when anchor is set).\n• Create + enforce: add anchor: {} — the memory also becomes a decision the guard re-injects before Edit/Write/Bash and on session start. Give anchor.violation_signal (forbidden strings) to make contradictions detectable; anchor.affects (path globs) to scope it.\n• Update: memory_id (+ optional content, layer, importance). content replaces the stored content; add merge: true to change only the JSON keys you send (the other keys are kept, a key sent as null is removed)\n• Delete: memory_id + forget: true\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.',
+      'Persist knowledge across sessions and AI tools (Claude, GPT, Cursor, Codex, Gemini). The only cross-agent memory that survives session boundaries.\n\nWHEN TO CALL:\n• The moment an error or failure occurs → layer: "caveat" (auto-protected, never forgotten)\n• When a decision is made or approved → content + anchor: {} (remembered AND enforced in one call)\n• When a goal is set or updated → layer: "goal"\n• When something new is learned → layer: "learning"\n• When the user says "remember this" / "覚えておいて"\n• After completing a task or receiving user approval\n\nMODES:\n• Create (default): content is the only required field. entity defaults to the project you are in; layer defaults to "context" (or "learning" when anchor is set).\n• Create + enforce: add anchor: {} — the memory also becomes a decision the guard re-injects before Edit/Write/Bash and on session start. Give anchor.violation_signal (forbidden strings) to make contradictions detectable; anchor.affects (path globs) to scope it.\n• Update: memory_id (+ optional content, layer, importance). content replaces the stored content; add merge: true to change only the JSON keys you send (the other keys are kept, a key sent as null is removed)\n• Delete: memory_id + forget: true\n\nImportance ≥ 0.9 pins the memory (protected from auto-forgetting). Supports Japanese (日本語) and English.\n\nTitle: when you create a memory with JSON content that has a string `what` but no `title`, a title is made from the start of `what` and marked title_auto: true (updates never add one).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -599,6 +599,18 @@ function handleRemember(args: any): string {
     }
   }
 
+  // 0.20.2: a new memory whose content is a JSON object with a string `what` but no title gets
+  // one made from `what` (marked title_auto: true). Decided on the content as sent; written
+  // after the wrap below so it lands at the top level of the stored object.
+  let autoTitle: string | undefined;
+  try {
+    const sent = JSON.parse(rawContent);
+    if (sent && typeof sent === 'object' && !Array.isArray(sent) && typeof sent.what === 'string'
+        && (sent.title === undefined || (typeof sent.title === 'string' && sent.title.trim() === ''))) {
+      autoTitle = autoTitleFromWhat(sent.what);
+    }
+  } catch { /* plain text: no auto title */ }
+
   if (!isAlreadyStructured) {
     const structured = {
       altitude: inferAltitude(rawContent),
@@ -607,6 +619,14 @@ function handleRemember(args: any): string {
       what: rawContent,
     };
     rawContent = JSON.stringify(structured);
+  }
+  if (autoTitle) {
+    try {
+      const o = JSON.parse(rawContent);
+      if (o && typeof o === 'object' && !Array.isArray(o)) {
+        rawContent = JSON.stringify({ ...o, title: autoTitle, title_auto: true });
+      }
+    } catch { /* structured above, always JSON */ }
   }
 
   // A memory that names what it supersedes IS the current decision.
@@ -1906,6 +1926,23 @@ function brokenJsonRefusal(content: unknown): string | null {
       near: content.slice(Math.max(0, at - 30), at + 10),
     });
   }
+}
+
+/**
+ * Title for a new memory that came without one (0.20.2): the first sentence / line of `what`.
+ * Trimmed, cut at the first newline or sentence end (。．！？ always; . ! ? only when followed by
+ * whitespace or the end, so "v0.19.1" and "e.g." stay whole), then at most 60 code points
+ * (longer: 57 + "…"). Returns undefined when nothing is left.
+ */
+function autoTitleFromWhat(what: string): string | undefined {
+  const t = what.trim();
+  if (!t) return undefined;
+  const m = /[\r\n。．！？]|[.!?](?=\s|$)/.exec(t);
+  let head = (m ? t.slice(0, m.index) : t).trim();
+  if (!head) head = t.replace(/\s+/g, ' ').trim();
+  const cps = Array.from(head);
+  if (cps.length > 60) head = cps.slice(0, 57).join('') + '…';
+  return head || undefined;
 }
 
 async function handleRememberUnified(args: any): Promise<string> {

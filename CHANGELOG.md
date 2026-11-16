@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (0.20.2 candidate)
+
+- **`remember` titles a new memory that came without one.** When a memory is created (no `memory_id`) with JSON content that has a string `what` and no `title` (or an empty one), a title is made from `what` and `"title_auto": true` is added, so a person can fix it later and Lint can tell it from a chosen title. The title is the first line or sentence of `what`, trimmed (cut at a newline, at 。．！？, or at . ! ? followed by a space or the end, so `v0.19.1` stays whole), at most 60 characters (longer: 57 + `…`, counted in code points). A title you send is kept as is. Updates (replace and `merge: true`) and plain-text content never get one, and rows already stored are not touched. New required test `test/auto-title.mjs`.
+
 ## v0.20.1 — 2026-11-13 (patched hono and @hono/node-server; registry publish retries)
 
 - **Dependencies:** pnpm overrides raise `hono` to ^4.13.16 and `@hono/node-server` to ^2.1.6 (advisories GHSA-qv5m-9pm6-hqp3 and others, published after 0.20.0). Both come in through `@modelcontextprotocol/sdk`; linksee-memory runs over stdio and does not start the SDK's HTTP server, but the audit gate in CI failed every pull request until they were raised.
