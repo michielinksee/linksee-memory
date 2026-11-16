@@ -1588,6 +1588,16 @@ function updateMemoryInTx(args: any): string {
       return JSON.stringify({ ok: false, rejected: 'merge', saved: false, memory_id: memoryId, reason: merged.reason, ...(merged.keys ? { keys: merged.keys } : {}) });
     }
     patch.content = merged.content;
+    // 0.20.2: a title sent in this merge that differs from the stored one is no longer machine-made.
+    try {
+      const before = JSON.parse(existing.content);
+      const sent = JSON.parse(args.content);
+      const after = JSON.parse(merged.content);
+      if (before && after && before.title_auto === true && 'title' in sent && !('title_auto' in sent) && after.title !== before.title) {
+        delete after.title_auto;
+        patch.content = JSON.stringify(after);
+      }
+    } catch { /* mergeJsonObject already checked both are objects */ }
     mergeNote = { kept: merged.kept, set: merged.set, removed: merged.removed };
   } else if (typeof args.content === 'string') patch.content = args.content;
   if (typeof args.layer === 'string') {
@@ -1931,7 +1941,7 @@ function brokenJsonRefusal(content: unknown): string | null {
 /**
  * Title for a new memory that came without one (0.20.2): the first sentence / line of `what`.
  * Trimmed, cut at the first newline or sentence end (。．！？ always; . ! ? only when followed by
- * whitespace or the end, so "v0.19.1" and "e.g." stay whole), then at most 60 code points
+ * whitespace or the end, so "v0.19.1" and "e.g." stay whole), then at most 60 grapheme clusters
  * (longer: 57 + "…"). Returns undefined when nothing is left.
  */
 function autoTitleFromWhat(what: string): string | undefined {
@@ -1940,8 +1950,13 @@ function autoTitleFromWhat(what: string): string | undefined {
   const m = /[\r\n。．！？]|[.!?](?=\s|$)/.exec(t);
   let head = (m ? t.slice(0, m.index) : t).trim();
   if (!head) head = t.replace(/\s+/g, ' ').trim();
-  const cps = Array.from(head);
-  if (cps.length > 60) head = cps.slice(0, 57).join('') + '…';
+  // Count and cut in grapheme clusters (an e + U+0301 or a ZWJ emoji is one unit); code points
+  // where Intl.Segmenter is missing.
+  let units: string[];
+  try {
+    units = Array.from(new (Intl as any).Segmenter(undefined, { granularity: 'grapheme' }).segment(head), (x: any) => x.segment as string);
+  } catch { units = Array.from(head); }
+  if (units.length > 60) head = units.slice(0, 57).join('') + '…';
   return head || undefined;
 }
 

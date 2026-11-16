@@ -103,7 +103,7 @@ try {
   check('61 Japanese characters -> 57 + ellipsis', t.c?.title === 'あ'.repeat(57) + '…', dump(t));
   const emoji = '\u{1F600}'.repeat(61);
   t = await create({ ...ax, what: emoji });
-  check('counted in code points, not UTF-16 units', t.c?.title === '\u{1F600}'.repeat(57) + '…', dump(t));
+  check('counted in characters, not UTF-16 units', t.c?.title === '\u{1F600}'.repeat(57) + '…', dump(t));
 
   t = await create({ ...ax, what: 'First line of the note\nsecond line stays out' });
   check('cut at a newline', t.c?.title === 'First line of the note', dump(t));
@@ -142,6 +142,22 @@ try {
   check('update (replace) does not add a title', u.ok && !('title' in readContent(old.id)) && !('title_auto' in readContent(old.id)), JSON.stringify(u).slice(0, 200) + JSON.stringify(readContent(old.id)));
   u = await call('remember', { memory_id: old.id, merge: true, content: JSON.stringify({ what: 'Merged what without a title' }) });
   check('update (merge: true) does not add a title', u.ok && readContent(old.id).what === 'Merged what without a title' && !('title' in readContent(old.id)) && !('title_auto' in readContent(old.id)), JSON.stringify(u).slice(0, 200) + JSON.stringify(readContent(old.id)));
+  // Codex review 1 (PR 39)
+  const auto = await create({ ...ax, what: 'Machine made title row' });
+  check('setup: auto row has title_auto', auto.c?.title_auto === true, dump(auto));
+  u = await call('remember', { memory_id: auto.id, merge: true, content: JSON.stringify({ title: 'Hand written title' }) });
+  check('merge with a different title drops title_auto', u.ok && readContent(auto.id).title === 'Hand written title' && !('title_auto' in readContent(auto.id)), JSON.stringify(readContent(auto.id)));
+  const auto2 = await create({ ...ax, what: 'Another machine made title' });
+  u = await call('remember', { memory_id: auto2.id, merge: true, content: JSON.stringify({ why: 'no title sent' }) });
+  check('merge without a title keeps title_auto', readContent(auto2.id).title_auto === true, JSON.stringify(readContent(auto2.id)));
+  u = await call('remember', { memory_id: auto2.id, merge: true, content: JSON.stringify({ title: 'Another machine made title' }) });
+  check('merge with the same title keeps title_auto', readContent(auto2.id).title_auto === true, JSON.stringify(readContent(auto2.id)));
+  const comb = 'é'.repeat(61);
+  t = await create({ ...ax, what: comb });
+  check('combining marks: cut between graphemes (57 + ellipsis)', t.c?.title === 'é'.repeat(57) + '…', dump(t));
+  const fam = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+  t = await create({ ...ax, what: fam.repeat(61) });
+  check('ZWJ emoji: never cut inside a sequence', t.c?.title === fam.repeat(57) + '…', dump(t));
   check('the given title of another row is untouched', readContent(base.id).title === 'Base title');
 } finally {
   if (server) await server.stop();
