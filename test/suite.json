@@ -27,7 +27,8 @@
     { "file": "auto-consolidate.mjs", "timeout": 90 },
     { "file": "sqlite-driver.mjs", "timeout": 180 },
     { "file": "recall-ranking.mjs", "timeout": 60 },
-    { "file": "four-gaps.mjs", "timeout": 120 }
+    { "file": "four-gaps.mjs", "timeout": 120 },
+    { "file": "auto-title.mjs", "timeout": 120 }
   ],
   "excluded": {
     "smoke.mjs": "writes to ~/.linksee-memory-test under the real home directory",
